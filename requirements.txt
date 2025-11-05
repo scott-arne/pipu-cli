@@ -1,0 +1,6 @@
+# Core dependencies with version constraints
+# Pin major versions, allow minor/patch updates for bug fixes
+rich_click>=1.7,<2.0
+rich>=13.0,<14.0
+textual>=0.40,<1.0
+packaging>=23.0,<25.0
