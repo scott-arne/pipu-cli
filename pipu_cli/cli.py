@@ -7,16 +7,63 @@ from .common import console
 from pip._internal.commands.install import InstallCommand
 
 
-def _install_packages(package_specs: List[str]) -> int:
+def _install_packages(package_names: List[str], packages_being_updated: List[str] | None = None) -> int:
     """
-    Install packages using pip API.
+    Install packages using pip API with filtered constraints.
 
-    :param package_specs: List of package specifications to install
+    :param package_names: List of package names to install
+    :param packages_being_updated: List of package names being updated (to exclude from constraints)
     :returns: Exit code (0 for success, non-zero for failure)
     """
-    install_cmd = InstallCommand("install", "Install packages")
-    install_args = ["--upgrade"] + package_specs
-    return install_cmd.main(install_args)
+    import tempfile
+    import os
+    from packaging.utils import canonicalize_name
+
+    # If packages_being_updated not provided, use package_names
+    if packages_being_updated is None:
+        packages_being_updated = package_names
+
+    # Get all current constraints and filter out packages being updated
+    from .package_constraints import read_constraints
+    all_constraints = read_constraints()
+
+    # Get canonical names of packages being updated
+    packages_being_updated_canonical = {canonicalize_name(pkg) for pkg in packages_being_updated}
+
+    # Filter out constraints for packages being updated to avoid conflicts
+    filtered_constraints = {
+        pkg: constraint
+        for pkg, constraint in all_constraints.items()
+        if pkg not in packages_being_updated_canonical
+    }
+
+    # Create a temporary constraints file if there are any constraints to apply
+    constraint_file_path = None
+    try:
+        if filtered_constraints:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                constraint_file_path = f.name
+                for pkg, constraint in filtered_constraints.items():
+                    f.write(f"{pkg}{constraint}\n")
+
+            # Set environment variable for pip to use the filtered constraints
+            os.environ['PIP_CONSTRAINT'] = constraint_file_path
+            console.print(f"[dim]Using filtered constraints (excluding {len(packages_being_updated_canonical)} package(s) being updated)[/dim]")
+
+        install_cmd = InstallCommand("install", "Install packages")
+        install_args = ["--upgrade"] + package_names
+        return install_cmd.main(install_args)
+
+    finally:
+        # Clean up: remove the constraint file and unset environment variable
+        if constraint_file_path:
+            if 'PIP_CONSTRAINT' in os.environ:
+                del os.environ['PIP_CONSTRAINT']
+            if os.path.exists(constraint_file_path):
+                try:
+                    os.unlink(constraint_file_path)
+                except Exception:
+                    pass  # Best effort cleanup
 
 
 def launch_tui() -> None:
@@ -202,21 +249,13 @@ def update(pre, yes):
         console.print()
         console.print("[bold green]Installing updates...[/bold green]")
 
-        # Create list of package specs to install
-        package_specs = []
-        for package in packages_to_update:
-            # Check if package has a constraint that should be applied instead of latest version
-            constraint = package.get('constraint')
-            if constraint:
-                # Apply the constraint instead of pinning to latest version
-                spec = f"{package['name']}{constraint}"
-            else:
-                # No constraint, use latest version
-                spec = f"{package['name']}=={package['latest_version']}"
-            package_specs.append(spec)
+        # Create list of package names to install
+        # Use --upgrade without version pinning to allow pip's dependency resolver
+        # to handle interdependent packages (e.g., pydantic and pydantic-core)
+        package_names = [package['name'] for package in packages_to_update]
 
-        # Install packages using pip API
-        exit_code = _install_packages(package_specs)
+        # Install packages using pip API with filtered constraints
+        exit_code = _install_packages(package_names, packages_being_updated=package_names)
 
         if exit_code == 0:
             console.print("[bold green]✓ All packages updated successfully![/bold green]")

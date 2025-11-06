@@ -989,81 +989,116 @@ class PackageUpdateScreen(ModalScreen[None]):
             try:
                 import subprocess
                 import sys
+                import tempfile
+                import os
+                from packaging.utils import canonicalize_name
 
                 logger.info(f"Starting batch update for {len(self.selected_packages)} packages")
                 total_packages = len(self.selected_packages)
 
-                # Build list of package specs to update, respecting constraints
-                package_specs = []
-                package_names = []
-                for pkg in self.selected_packages:
-                    package_names.append(pkg["name"])
-                    # Check if package has a constraint that should be applied instead of latest version
-                    constraint = pkg.get('constraint')
-                    if constraint:
-                        # Apply the constraint instead of pinning to latest version
-                        spec = f"{pkg['name']}{constraint}"
-                    else:
-                        # No constraint, use latest version
-                        spec = f"{pkg['name']}=={pkg['latest_version']}"
-                    package_specs.append(spec)
+                # Get canonical names of packages being updated
+                from ..package_constraints import read_constraints
+                all_constraints = read_constraints()
+                packages_being_updated = {canonicalize_name(pkg["name"]) for pkg in self.selected_packages}
 
-                self.app.call_from_thread(self._update_status, f"Updating {total_packages} packages...")
-                self.app.call_from_thread(self._log_message, f"{'='*70}")
-                self.app.call_from_thread(self._log_message, f"📦 Updating {total_packages} packages: {', '.join(package_names[:5])}")
-                if len(package_names) > 5:
-                    self.app.call_from_thread(self._log_message, f"   ... and {len(package_names) - 5} more")
-                self.app.call_from_thread(self._log_message, f"{'='*70}\n")
+                # Filter out constraints for packages being updated to avoid conflicts
+                filtered_constraints = {
+                    pkg: constraint
+                    for pkg, constraint in all_constraints.items()
+                    if pkg not in packages_being_updated
+                }
 
-                # Prepare pip command to install all packages at once with proper version specs
-                pip_cmd = [sys.executable, "-m", "pip", "install"] + package_specs
-
-                # Run pip and capture output with proper cleanup
-                from ..utils import ManagedProcess
-                return_code = None
-
+                # Create a temporary constraints file if there are any constraints to apply
+                constraint_file = None
+                constraint_file_path = None
                 try:
-                    with ManagedProcess(
-                        pip_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        universal_newlines=True
-                    ) as process:
-                        # Stream output line by line
-                        if process.stdout is None:
-                            raise RuntimeError("Failed to capture subprocess output")
-                        for line in process.stdout:
-                            if self.cancel_event.is_set():
-                                self.app.call_from_thread(self._log_message, "\n🛑 Update cancelled by user")
-                                break
-                            # Display each line of pip output
-                            self.app.call_from_thread(self._log_message, line.rstrip())
+                    if filtered_constraints:
+                        constraint_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                        constraint_file_path = constraint_file.name
+                        for pkg, constraint in filtered_constraints.items():
+                            constraint_file.write(f"{pkg}{constraint}\n")
+                        constraint_file.close()
+                        self.app.call_from_thread(self._log_message, f"[dim]Using filtered constraints (excluding {len(packages_being_updated)} package(s) being updated)[/dim]")
 
-                        # Wait for process to complete
-                        return_code = process.wait()
-                except Exception as e:
-                    logger.error(f"Error during package update: {e}")
-                    self.app.call_from_thread(self._log_message, f"\n❌ Error: {e}")
-                    return_code = 1
+                    # Build list of package names to update
+                    # Use --upgrade instead of pinning versions to avoid dependency conflicts
+                    # when updating interdependent packages (e.g., pydantic and pydantic-core)
+                    package_names = []
+                    for pkg in self.selected_packages:
+                        package_names.append(pkg["name"])
 
-                if return_code == 0:
-                    # All packages updated successfully
-                    self.successful_updates.extend(package_names)
-                    self.app.call_from_thread(self._log_message, f"\n{'='*70}")
-                    self.app.call_from_thread(self._log_message, f"✅ Successfully updated all {total_packages} packages!")
+                    self.app.call_from_thread(self._update_status, f"Updating {total_packages} packages...")
                     self.app.call_from_thread(self._log_message, f"{'='*70}")
-                else:
-                    # Some packages failed - pip will have shown which ones in output
-                    self.failed_updates.extend(package_names)
-                    self.app.call_from_thread(self._log_message, f"\n{'='*70}")
-                    self.app.call_from_thread(self._log_message, "❌ Update completed with errors (see above)")
-                    self.app.call_from_thread(self._log_message, f"{'='*70}")
+                    self.app.call_from_thread(self._log_message, f"📦 Updating {total_packages} packages: {', '.join(package_names[:5])}")
+                    if len(package_names) > 5:
+                        self.app.call_from_thread(self._log_message, f"   ... and {len(package_names) - 5} more")
+                    self.app.call_from_thread(self._log_message, f"{'='*70}\n")
 
-                # Show final results and cleanup
-                logger.info("Update loop completed, calling _update_complete")
-                self.app.call_from_thread(self._update_complete)
+                    # Prepare pip command to install all packages with --upgrade
+                    # This allows pip's dependency resolver to find compatible versions
+                    # for interdependent packages (e.g., pydantic requires specific pydantic-core)
+                    pip_cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + package_names
+
+                    # Set up environment with constraint file if available
+                    env = os.environ.copy()
+                    if constraint_file_path:
+                        env['PIP_CONSTRAINT'] = constraint_file_path
+
+                    # Run pip and capture output with proper cleanup
+                    from ..utils import ManagedProcess
+                    return_code = None
+
+                    try:
+                        with ManagedProcess(
+                            pip_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            universal_newlines=True,
+                            env=env
+                        ) as process:
+                            # Stream output line by line
+                            if process.stdout is None:
+                                raise RuntimeError("Failed to capture subprocess output")
+                            for line in process.stdout:
+                                if self.cancel_event.is_set():
+                                    self.app.call_from_thread(self._log_message, "\n🛑 Update cancelled by user")
+                                    break
+                                # Display each line of pip output
+                                self.app.call_from_thread(self._log_message, line.rstrip())
+
+                            # Wait for process to complete
+                            return_code = process.wait()
+                    except Exception as e:
+                        logger.error(f"Error during package update: {e}")
+                        self.app.call_from_thread(self._log_message, f"\n❌ Error: {e}")
+                        return_code = 1
+
+                    if return_code == 0:
+                        # All packages updated successfully
+                        self.successful_updates.extend(package_names)
+                        self.app.call_from_thread(self._log_message, f"\n{'='*70}")
+                        self.app.call_from_thread(self._log_message, f"✅ Successfully updated all {total_packages} packages!")
+                        self.app.call_from_thread(self._log_message, f"{'='*70}")
+                    else:
+                        # Some packages failed - pip will have shown which ones in output
+                        self.failed_updates.extend(package_names)
+                        self.app.call_from_thread(self._log_message, f"\n{'='*70}")
+                        self.app.call_from_thread(self._log_message, "❌ Update completed with errors (see above)")
+                        self.app.call_from_thread(self._log_message, f"{'='*70}")
+
+                    # Show final results and cleanup
+                    logger.info("Update loop completed, calling _update_complete")
+                    self.app.call_from_thread(self._update_complete)
+
+                finally:
+                    # Clean up temporary constraint file
+                    if constraint_file_path and os.path.exists(constraint_file_path):
+                        try:
+                            os.unlink(constraint_file_path)
+                        except Exception:
+                            pass  # Best effort cleanup
 
             except Exception as e:
                 logger.error(f"Error in update loop: {e}", exc_info=True)

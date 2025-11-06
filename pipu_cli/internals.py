@@ -1,3 +1,6 @@
+import logging
+import time
+import threading
 from pip._internal.metadata import get_default_environment
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.index.collector import LinkCollector
@@ -10,10 +13,8 @@ from rich.table import Table
 from typing import List, Dict, Any, Optional, Union, Set, Callable, Tuple
 from packaging.version import Version, InvalidVersion
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
-import logging
-import time
-import threading
 from queue import Queue, Empty
+from .config import EDITABLE_PACKAGES_CACHE_TTL
 
 # Import configuration
 from .config import (
@@ -329,7 +330,6 @@ def list_outdated(
 
                 # Find the best candidate (latest version) with retry logic
                 candidates = None
-                last_error = None
                 for attempt in range(retries + 1):
                     try:
                         # Use hard timeout wrapper to ensure we don't hang
@@ -345,7 +345,6 @@ def list_outdated(
                         break
                     except (TimeoutError, Exception) as e:
                         logger.debug(f"Error checking {package_name}: {type(e).__name__}: {e}")
-                        last_error = e
                         # Check if it's a network-related error (TimeoutError always is)
                         error_str = str(e).lower()
                         is_network_error = isinstance(e, TimeoutError) or any(keyword in error_str for keyword in [
@@ -394,7 +393,7 @@ def list_outdated(
                         candidates_to_check = stable_candidates if stable_candidates else candidates
                     else:
                         candidates_to_check = candidates
-                    
+
                     # Get the latest version from filtered candidates
                     if candidates_to_check:
                         latest_candidate = max(candidates_to_check, key=lambda c: c.version)
@@ -535,7 +534,7 @@ def list_outdated(
 
 
 # Thread-safe cache for editable packages to avoid repeated subprocess calls
-from .config import EDITABLE_PACKAGES_CACHE_TTL
+
 
 # Initialize thread-safe cache
 _editable_packages_cache = ThreadSafeCache[Dict[str, str]](ttl=EDITABLE_PACKAGES_CACHE_TTL)
@@ -656,6 +655,9 @@ def update_packages_preserving_editable(
     2. Use the original source directory with pip install -e
     3. For regular packages, use normal pip install
 
+    When updating packages, constraints for those packages are temporarily excluded
+    to avoid conflicts between constraints and package dependencies.
+
     :param packages_to_update: List of package dictionaries with keys: name, latest_version, editable
     :param console: Optional Rich console for output
     :param timeout: Optional timeout for pip operations
@@ -664,6 +666,9 @@ def update_packages_preserving_editable(
     """
     import subprocess
     import sys
+    import tempfile
+    import os
+    from packaging.utils import canonicalize_name
 
     if console is None:
         console = Console()
@@ -671,103 +676,140 @@ def update_packages_preserving_editable(
     successful_updates = []
     failed_updates = []
 
-    # Helper function to run subprocess with cancellation support
-    def run_with_cancel(cmd, timeout=None):
-        """Run a subprocess command that can be cancelled."""
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+    # Get all current constraints and create a filtered version that excludes packages being updated
+    from .package_constraints import read_constraints
+    all_constraints = read_constraints()
 
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-            return process.returncode, stdout, stderr
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()  # Clean up
-            raise
-        except:
-            # If we're interrupted or cancelled, kill the process
-            if process.poll() is None:  # Process still running
+    # Get canonical names of packages being updated
+    packages_being_updated = {canonicalize_name(pkg["name"]) for pkg in packages_to_update}
+
+    # Filter out constraints for packages being updated to avoid conflicts
+    filtered_constraints = {
+        pkg: constraint
+        for pkg, constraint in all_constraints.items()
+        if pkg not in packages_being_updated
+    }
+
+    # Create a temporary constraints file if there are any constraints to apply
+    constraint_file = None
+    constraint_file_path = None
+    try:
+        if filtered_constraints:
+            constraint_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+            constraint_file_path = constraint_file.name
+            for pkg, constraint in filtered_constraints.items():
+                constraint_file.write(f"{pkg}{constraint}\n")
+            constraint_file.close()
+
+        # Helper function to run subprocess with cancellation support
+        def run_with_cancel(cmd, timeout=None):
+            """Run a subprocess command that can be cancelled."""
+            # Set up environment with constraint file if available
+            env = os.environ.copy()
+            if constraint_file_path:
+                env['PIP_CONSTRAINT'] = constraint_file_path
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env
+            )
+
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                return process.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
                 process.kill()
-                try:
-                    process.communicate(timeout=1)
-                except:
-                    pass
-            raise
+                process.communicate()  # Clean up
+                raise
+            except:
+                # If we're interrupted or cancelled, kill the process
+                if process.poll() is None:  # Process still running
+                    process.kill()
+                    try:
+                        process.communicate(timeout=1)
+                    except Exception:
+                        pass
+                raise
 
-    # Get current editable packages to find source directories
-    editable_packages = get_editable_packages()
+        # Get current editable packages to find source directories
+        editable_packages = get_editable_packages()
 
-    for package_info in packages_to_update:
-        # Check for cancellation before processing each package
-        if cancel_event and cancel_event.is_set():
-            console.print("[yellow]Update cancelled by user[/yellow]")
-            break
+        for package_info in packages_to_update:
+            # Check for cancellation before processing each package
+            if cancel_event and cancel_event.is_set():
+                console.print("[yellow]Update cancelled by user[/yellow]")
+                break
 
-        package_name = package_info["name"]
-        latest_version = package_info.get("latest_version")
-        is_editable = package_info.get("editable", False)
+            package_name = package_info["name"]
+            is_editable = package_info.get("editable", False)
 
-        try:
-            console.print(f"Updating {package_name}...")
+            try:
+                console.print(f"Updating {package_name}...")
 
-            if is_editable:
-                # Package is editable, reinstall from source directory
-                from packaging.utils import canonicalize_name
-                canonical_name = canonicalize_name(package_name)
-                source_path = editable_packages.get(canonical_name)
+                if is_editable:
+                    # Package is editable, reinstall from source directory
+                    canonical_name = canonicalize_name(package_name)
+                    source_path = editable_packages.get(canonical_name)
 
-                if source_path:
-                    console.print(f"  📝 Reinstalling editable package from: {source_path}")
+                    if source_path:
+                        console.print(f"  📝 Reinstalling editable package from: {source_path}")
 
-                    # First uninstall the current version
-                    uninstall_cmd = [sys.executable, "-m", "pip", "uninstall", package_name, "-y"]
-                    returncode, stdout, stderr = run_with_cancel(uninstall_cmd, timeout=timeout)
+                        # First uninstall the current version
+                        uninstall_cmd = [sys.executable, "-m", "pip", "uninstall", package_name, "-y"]
+                        returncode, stdout, stderr = run_with_cancel(uninstall_cmd, timeout=timeout)
 
-                    if returncode != 0:
-                        console.print(f"  [red]Failed to uninstall {package_name}: {stderr}[/red]")
-                        failed_updates.append(package_name)
-                        continue
+                        if returncode != 0:
+                            console.print(f"  [red]Failed to uninstall {package_name}: {stderr}[/red]")
+                            failed_updates.append(package_name)
+                            continue
 
-                    # Then reinstall in editable mode
-                    install_cmd = [sys.executable, "-m", "pip", "install", "-e", source_path]
+                        # Then reinstall in editable mode
+                        install_cmd = [sys.executable, "-m", "pip", "install", "-e", source_path]
+                        returncode, stdout, stderr = run_with_cancel(install_cmd, timeout=timeout)
+
+                        if returncode == 0:
+                            console.print(f"  [green]✓ Successfully updated editable {package_name}[/green]")
+                            successful_updates.append(package_name)
+                        else:
+                            console.print(f"  [red]Failed to reinstall editable {package_name}: {stderr}[/red]")
+                            failed_updates.append(package_name)
+                    else:
+                        console.print(f"  [yellow]Could not find source path for editable {package_name}, updating normally[/yellow]")
+                        # Fall through to normal update
+                        is_editable = False
+
+                if not is_editable:
+                    # Regular package update
+                    # Use --upgrade instead of pinning to specific versions to allow pip's
+                    # dependency resolver to handle interdependent packages correctly
+                    # (e.g., pydantic and pydantic-core, boto3 and botocore)
+                    install_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", package_name]
+
                     returncode, stdout, stderr = run_with_cancel(install_cmd, timeout=timeout)
 
                     if returncode == 0:
-                        console.print(f"  [green]✓ Successfully updated editable {package_name}[/green]")
+                        console.print(f"  [green]✓ Successfully updated {package_name}[/green]")
                         successful_updates.append(package_name)
                     else:
-                        console.print(f"  [red]Failed to reinstall editable {package_name}: {stderr}[/red]")
+                        console.print(f"  [red]Failed to update {package_name}: {stderr}[/red]")
                         failed_updates.append(package_name)
-                else:
-                    console.print(f"  [yellow]Could not find source path for editable {package_name}, updating normally[/yellow]")
-                    # Fall through to normal update
-                    is_editable = False
 
-            if not is_editable:
-                # Regular package update
-                if latest_version:
-                    install_cmd = [sys.executable, "-m", "pip", "install", f"{package_name}=={latest_version}"]
-                else:
-                    install_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", package_name]
+            except subprocess.TimeoutExpired:
+                console.print(f"  [red]Timeout updating {package_name}[/red]")
+                failed_updates.append(package_name)
+            except Exception as e:
+                console.print(f"  [red]Error updating {package_name}: {e}[/red]")
+                failed_updates.append(package_name)
 
-                returncode, stdout, stderr = run_with_cancel(install_cmd, timeout=timeout)
+        return successful_updates, failed_updates
 
-                if returncode == 0:
-                    console.print(f"  [green]✓ Successfully updated {package_name}[/green]")
-                    successful_updates.append(package_name)
-                else:
-                    console.print(f"  [red]Failed to update {package_name}: {stderr}[/red]")
-                    failed_updates.append(package_name)
-
-        except subprocess.TimeoutExpired:
-            console.print(f"  [red]Timeout updating {package_name}[/red]")
-            failed_updates.append(package_name)
-        except Exception as e:
-            console.print(f"  [red]Error updating {package_name}: {e}[/red]")
-            failed_updates.append(package_name)
-
-    return successful_updates, failed_updates
+    finally:
+        # Clean up temporary constraint file
+        if constraint_file_path and os.path.exists(constraint_file_path):
+            try:
+                os.unlink(constraint_file_path)
+            except Exception:
+                pass  # Best effort cleanup
