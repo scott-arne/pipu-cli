@@ -133,6 +133,11 @@ def validate_existing_constraints_and_triggers(env_name: Optional[str] = None) -
     installed_packages = _get_installed_packages()
 
     try:
+        # Check if config file exists - if not, there's nothing to validate
+        config_path = get_recommended_pip_config_path()
+        if not config_path.exists():
+            return invalid_constraint_packages, invalid_trigger_packages
+
         # Check constraints
         section_name = _get_section_name(env_name)
         config, _ = _load_config(create_if_missing=False)
@@ -1107,7 +1112,11 @@ def remove_all_constraints_from_config(env_name: Optional[str] = None) -> Tuple[
     # Read existing config
     config = configparser.ConfigParser()
     if not config_path.exists():
-        raise ValueError(f"No pip configuration file found at {config_path}")
+        # If file doesn't exist, no constraints to remove
+        if env_name:
+            raise ValueError(f"No constraints found in environment '{env_name}'")
+        else:
+            raise ValueError("No constraints found in any environment")
 
     config.read(config_path)
 
@@ -1195,7 +1204,11 @@ def remove_all_ignores_from_config(env_name: Optional[str] = None) -> Tuple[Path
     # Read existing config
     config = configparser.ConfigParser()
     if not config_path.exists():
-        raise ValueError(f"No pip configuration file found at {config_path}")
+        # If file doesn't exist, no ignores to remove
+        if env_name:
+            raise ValueError(f"No ignores found in environment '{env_name}'")
+        else:
+            raise ValueError("No ignores found in any environment")
 
     config.read(config_path)
 

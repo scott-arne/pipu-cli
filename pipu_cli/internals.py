@@ -210,9 +210,16 @@ def list_outdated(
         extra_index_urls = []
     extra_index_urls = extra_index_urls or []
 
-    # Ensure extra_index_urls is a list
+    # Parse extra_index_urls - pip config returns multi-line values as a single string
     if isinstance(extra_index_urls, str):
-        extra_index_urls = [extra_index_urls]
+        # Split by newlines and clean up each URL (remove comments and whitespace)
+        extra_index_urls = [
+            url.strip()
+            for url in extra_index_urls.split('\n')
+            if url.strip() and not url.strip().startswith('#')
+        ]
+    elif not isinstance(extra_index_urls, list):
+        extra_index_urls = []
 
     # Combine all index URLs
     all_index_urls = [index_url] + extra_index_urls
@@ -223,14 +230,30 @@ def list_outdated(
     except Exception:
         trusted_hosts = []
     trusted_hosts = trusted_hosts or []
+
+    # Parse trusted_hosts - pip config returns multi-line values as a single string
     if isinstance(trusted_hosts, str):
-        trusted_hosts = [trusted_hosts]
+        # Split by newlines and clean up each host (remove comments and whitespace)
+        trusted_hosts = [
+            host.strip()
+            for host in trusted_hosts.split('\n')
+            if host.strip() and not host.strip().startswith('#')
+        ]
+    elif not isinstance(trusted_hosts, list):
+        trusted_hosts = []
 
     # Set up pip session and package finder to check for updates
     try:
         session = PipSession()
         # Set timeout on the session
         session.timeout = timeout
+
+        # Add trusted hosts to the session
+        for host in trusted_hosts:
+            # Strip whitespace and skip empty strings
+            host = host.strip()
+            if host:
+                session.add_trusted_host(host, source="pip configuration")
     except Exception as e:
         # If we can't create a session (network issues, permissions, etc.), raise error
         raise ConnectionError(f"Failed to create network session: {e}") from e
