@@ -4,13 +4,13 @@ from pathlib import Path
 import tempfile
 import os
 import subprocess
-from pipu.package_constraints import (
+from pipu_cli.package_constraints import (
     find_project_root, parse_requirement_line, read_constraints,
     get_current_environment_name, get_pip_config_paths, read_pip_config_constraint,
-    parse_inline_constraints, read_ignores, read_pip_config_ignore, 
+    parse_inline_constraints, read_ignores, read_pip_config_ignore,
     parse_inline_ignores, read_ignores_file,
     # Invalidation trigger functions
-    parse_invalidation_trigger, format_invalidation_triggers, 
+    parse_invalidation_trigger, format_invalidation_triggers,
     parse_invalidation_triggers_storage, merge_invalidation_triggers,
     validate_invalidation_triggers, add_constraints_to_config,
     remove_constraints_from_config, remove_all_constraints_from_config,
@@ -41,7 +41,7 @@ def test_find_project_root_with_pyproject_toml():
         subdir = temp_path / "subdir"
         subdir.mkdir()
         
-        with patch('pipu.package_constraints.Path.cwd', return_value=subdir):
+        with patch('pipu_cli.package_constraints.Path.cwd', return_value=subdir):
             result = find_project_root()
             assert result == temp_path
 
@@ -62,7 +62,7 @@ def test_find_project_root_with_setup_py():
         subdir = temp_path / "deep" / "nested" / "dir"
         subdir.mkdir(parents=True)
         
-        with patch('pipu.package_constraints.Path.cwd', return_value=subdir):
+        with patch('pipu_cli.package_constraints.Path.cwd', return_value=subdir):
             result = find_project_root()
             assert result == temp_path
 
@@ -80,7 +80,7 @@ def test_find_project_root_with_both_files():
         (temp_path / "pyproject.toml").touch()
         (temp_path / "setup.py").touch()
         
-        with patch('pipu.package_constraints.Path.cwd', return_value=temp_path):
+        with patch('pipu_cli.package_constraints.Path.cwd', return_value=temp_path):
             result = find_project_root()
             assert result == temp_path
 
@@ -94,7 +94,7 @@ def test_find_project_root_not_found():
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         
-        with patch('pipu.package_constraints.Path.cwd', return_value=temp_path):
+        with patch('pipu_cli.package_constraints.Path.cwd', return_value=temp_path):
             result = find_project_root()
             assert result is None
 
@@ -111,7 +111,7 @@ def test_find_project_root_in_current_directory():
         # Create pyproject.toml in current directory
         (temp_path / "pyproject.toml").touch()
         
-        with patch('pipu.package_constraints.Path.cwd', return_value=temp_path):
+        with patch('pipu_cli.package_constraints.Path.cwd', return_value=temp_path):
             result = find_project_root()
             assert result == temp_path
 
@@ -472,9 +472,9 @@ def test_read_valid_constraints_file(assets_dir):
     :returns: None
     """
     # Mock find_project_root to return the assets directory and disable environment detection
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("valid_constraints.txt", include_auto=False)
 
@@ -498,9 +498,9 @@ def test_read_empty_constraints_file(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("empty_constraints.txt", include_auto=False)
                     assert result == {}
@@ -513,9 +513,9 @@ def test_read_invalid_constraints_file(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("invalid_constraints.txt", include_auto=False)
 
@@ -537,9 +537,9 @@ def test_read_duplicate_constraints_file(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     # Capture print output to verify warnings
                     with patch('builtins.print') as mock_print:
@@ -562,9 +562,9 @@ def test_read_nonexistent_file(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("nonexistent_file.txt", include_auto=False)
                     assert result == {}
@@ -578,9 +578,9 @@ def test_read_constraints_no_project_root():
     
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=None):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=None):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict(os.environ, {}, clear=True):
                     result = read_constraints(include_auto=False)
                     assert result == {}
@@ -594,7 +594,7 @@ def test_read_constraints_file_permission_error(assets_dir):
     :returns: None
     :raises IOError: When file cannot be read
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
         with patch('builtins.open', side_effect=PermissionError("Permission denied")):
             with pytest.raises(IOError) as exc_info:
                 read_constraints("valid_constraints.txt", include_auto=False)
@@ -609,9 +609,9 @@ def test_read_constraints_custom_filename(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("valid_constraints.txt", include_auto=False)
                     assert isinstance(result, dict)
@@ -625,9 +625,9 @@ def test_read_constraints_case_normalization(assets_dir):
     :param assets_dir: Path to test assets directory
     :returns: None
     """
-    with patch('pipu.package_constraints.find_project_root', return_value=assets_dir):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+    with patch('pipu_cli.package_constraints.find_project_root', return_value=assets_dir):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                 with patch.dict('os.environ', {}, clear=True):
                     result = read_constraints("valid_constraints.txt", include_auto=False)
 
@@ -654,9 +654,9 @@ def test_read_constraints_encoding():
             f.write("# Test with UTF-8 characters: àáâãäå\n")
             f.write("requests==2.31.0\n")
         
-        with patch('pipu.package_constraints.find_project_root', return_value=temp_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
+        with patch('pipu_cli.package_constraints.find_project_root', return_value=temp_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
                     with patch.dict('os.environ', {}, clear=True):
                         result = read_constraints("utf8_constraints.txt", include_auto=False)
                         assert result["requests"] == "==2.31.0"
@@ -768,7 +768,7 @@ constraint = /path/to/global/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -793,7 +793,7 @@ constraints = /path/to/env/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -818,7 +818,7 @@ constraint = /path/to/global/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint()
             assert result is not None
             constraint_type, constraint_value = result
@@ -843,7 +843,7 @@ constraints = /path/to/global/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint()
             assert result is not None
             constraint_type, constraint_value = result
@@ -868,7 +868,7 @@ this is not valid ini format
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint()
             assert result is None
     
@@ -900,9 +900,9 @@ def test_read_constraints_pip_constraint_env_nonexistent():
     :returns: None
     """
     with patch.dict(os.environ, {'PIP_CONSTRAINT': '/nonexistent/path/constraints.txt'}):
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
-                with patch('pipu.package_constraints.find_project_root', return_value=None):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
+                with patch('pipu_cli.package_constraints.find_project_root', return_value=None):
                     result = read_constraints(include_auto=False)
                     assert result == {}
 
@@ -918,8 +918,8 @@ def test_read_constraints_pip_config():
         f.flush()
         
         with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='test'):
-                with patch('pipu.package_constraints.read_pip_config_constraint', return_value=('file', f.name)):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test'):
+                with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=('file', f.name)):
                     result = read_constraints(include_auto=False)
                     assert 'numpy' in result
                     assert result['numpy'] == '>=1.20.0'
@@ -934,9 +934,9 @@ def test_read_constraints_pip_config_nonexistent():
     :returns: None
     """
     with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-        with patch('pipu.package_constraints.get_current_environment_name', return_value='test'):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
-                with patch('pipu.package_constraints.find_project_root', return_value=None):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test'):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
+                with patch('pipu_cli.package_constraints.find_project_root', return_value=None):
                     result = read_constraints(include_auto=False)
                     assert result == {}
 
@@ -1020,7 +1020,7 @@ constraints =
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -1046,7 +1046,7 @@ constraints = /path/to/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -1071,7 +1071,7 @@ constraints = requests==2.25.0 numpy>=1.20.0
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint()
             assert result is not None
             constraint_type, constraint_value = result
@@ -1099,8 +1099,8 @@ constraints =
         f.flush()
         
         with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
-                with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
+                with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
                     result = read_constraints(include_auto=False)
                     expected = {
                         'requests': '>=2.25.0',
@@ -1195,7 +1195,7 @@ constraints = /path/with>=signs/constraints.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -1345,7 +1345,7 @@ ignore = /path/to/global/ignores.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore('test_env')
             assert result is not None
             ignore_type, ignore_value = result
@@ -1370,7 +1370,7 @@ ignores = /path/to/env/ignores.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore('test_env')
             assert result is not None
             ignore_type, ignore_value = result
@@ -1395,7 +1395,7 @@ ignore = /path/to/global/ignores.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore()
             assert result is not None
             ignore_type, ignore_value = result
@@ -1420,7 +1420,7 @@ ignores = /path/to/global/ignores.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore()
             assert result is not None
             ignore_type, ignore_value = result
@@ -1445,7 +1445,7 @@ ignores = requests numpy flask
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore('test_env')
             assert result is not None
             ignore_type, ignore_value = result
@@ -1473,7 +1473,7 @@ ignores =
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore('test_env')
             assert result is not None
             ignore_type, ignore_value = result
@@ -1500,7 +1500,7 @@ this is not valid ini format
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_ignore()
             assert result is None
     
@@ -1522,8 +1522,8 @@ ignores = requests numpy flask
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
-            with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
+            with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
                 result = read_ignores()
                 expected = {'requests', 'numpy', 'flask'}
                 assert result == expected
@@ -1550,8 +1550,8 @@ ignore = {ignores_file.name}
             config_file.write(config_content)
             config_file.flush()
             
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
-                with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(config_file.name)]):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
+                with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(config_file.name)]):
                     result = read_ignores()
                     expected = {'requests', 'numpy', 'flask'}
                     assert result == expected
@@ -1567,8 +1567,8 @@ def test_read_ignores_no_config():
     
     :returns: None
     """
-    with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-        with patch('pipu.package_constraints.read_pip_config_ignore', return_value=None):
+    with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.read_pip_config_ignore', return_value=None):
             result = read_ignores()
             assert result == set()
 
@@ -1588,8 +1588,8 @@ ignore = /nonexistent/path/ignores.txt
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
-            with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
+            with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
                 result = read_ignores()
                 # Should return empty set when file doesn't exist
                 assert result == set()
@@ -1612,7 +1612,7 @@ constraints = requests
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is not None
             constraint_type, constraint_value = result
@@ -1638,7 +1638,7 @@ constraints = requests==2.25.0 numpy>=1.20.0 django~=4.1.0
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint()
             assert result is not None
             constraint_type, constraint_value = result
@@ -1690,8 +1690,8 @@ constraints =
         f.flush()
         
         with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
-                with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
+                with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
                     result = read_constraints(include_auto=False)
                     expected = {
                         'django': '>=4.1.0,<5.0.0',
@@ -1716,10 +1716,10 @@ def test_read_constraints_falls_back_from_inline_to_file():
         constraints_file.flush()
         
         with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='test_env'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='test_env'):
                 # Return tuple indicating file path, but file doesn't exist
-                with patch('pipu.package_constraints.read_pip_config_constraint', return_value=('file', '/nonexistent/path')):
-                    with patch('pipu.package_constraints.find_project_root', return_value=Path(constraints_file.name).parent):
+                with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=('file', '/nonexistent/path')):
+                    with patch('pipu_cli.package_constraints.find_project_root', return_value=Path(constraints_file.name).parent):
                         # Should fall back to project root constraints file
                         result = read_constraints(Path(constraints_file.name).name, include_auto=False)
                         expected = {
@@ -1751,9 +1751,9 @@ def test_read_constraints_with_auto_discovery():
     ]
 
     with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=('inline', 'requests>=2.25.0\nnumpy>=1.20.0')):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=auto_constraints):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=('inline', 'requests>=2.25.0\nnumpy>=1.20.0')):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=auto_constraints):
                     result = read_constraints(include_auto=True)
 
                     # Should include both manual and auto-discovered constraints
@@ -1780,9 +1780,9 @@ def test_read_constraints_without_auto_discovery():
     ]
 
     with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=('inline', 'requests>=2.25.0\nnumpy>=1.20.0')):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=auto_constraints):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=('inline', 'requests>=2.25.0\nnumpy>=1.20.0')):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=auto_constraints):
                     result = read_constraints(include_auto=False)
 
                     # Should only include manual constraints
@@ -1806,10 +1806,10 @@ def test_read_constraints_auto_only():
     ]
 
     with patch.dict(os.environ, {}, clear=True):  # Clear PIP_CONSTRAINT
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-            with patch('pipu.package_constraints.read_pip_config_constraint', return_value=None):
-                with patch('pipu.package_constraints.find_project_root', return_value=None):
-                    with patch('pipu.package_constraints.discover_auto_constraints', return_value=auto_constraints):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.read_pip_config_constraint', return_value=None):
+                with patch('pipu_cli.package_constraints.find_project_root', return_value=None):
+                    with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=auto_constraints):
                         result = read_constraints(include_auto=True)
 
                         # Should only include auto-discovered constraints
@@ -1835,9 +1835,9 @@ def test_get_auto_constraint_triggers():
     ]
 
     # Mock no manual constraints
-    with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
-        with patch('pipu.package_constraints.read_constraints', return_value={}):
-            from pipu.package_constraints import get_auto_constraint_triggers
+    with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.read_constraints', return_value={}):
+            from pipu_cli.package_constraints import get_auto_constraint_triggers
 
             result = get_auto_constraint_triggers()
 
@@ -1876,9 +1876,9 @@ def test_get_auto_constraint_triggers_respects_manual_constraints():
         'numpy': '>=1.20.0'
     }
 
-    with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
-        with patch('pipu.package_constraints.read_constraints', return_value=mock_manual_constraints):
-            from pipu.package_constraints import get_auto_constraint_triggers
+    with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.read_constraints', return_value=mock_manual_constraints):
+            from pipu_cli.package_constraints import get_auto_constraint_triggers
 
             result = get_auto_constraint_triggers()
 
@@ -1900,7 +1900,7 @@ def test_read_pip_config_constraint_no_config_files():
     
     :returns: None
     """
-    with patch('pipu.package_constraints.get_pip_config_paths', return_value=[]):
+    with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[]):
         result = read_pip_config_constraint('test_env')
         assert result is None
 
@@ -1917,7 +1917,7 @@ def test_read_pip_config_constraint_empty_config_file():
         f.write(config_content)
         f.flush()
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[Path(f.name)]):
             result = read_pip_config_constraint('test_env')
             assert result is None
     
@@ -1932,14 +1932,14 @@ def test_add_constraints_to_config_new_constraint():
 
     :returns: None
     """
-    from pipu.package_constraints import add_constraints_to_config
+    from pipu_cli.package_constraints import add_constraints_to_config
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, changes = add_constraints_to_config(['requests>=2.25.0'])
                 
                 assert result_path == config_path
@@ -1956,7 +1956,7 @@ def test_remove_constraints_from_config_success():
 
     :returns: None
     """
-    from pipu.package_constraints import remove_constraints_from_config
+    from pipu_cli.package_constraints import remove_constraints_from_config
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
@@ -1968,9 +1968,9 @@ def test_remove_constraints_from_config_success():
             f.write('    requests>=2.25.0\n')
             f.write('    numpy>=1.20.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, removed, removed_triggers = remove_constraints_from_config(['requests'])
                 
                 assert result_path == config_path
@@ -1984,7 +1984,7 @@ def test_list_all_constraints_multiple_environments():
 
     :returns: None
     """
-    from pipu.package_constraints import list_all_constraints
+    from pipu_cli.package_constraints import list_all_constraints
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
@@ -1998,7 +1998,7 @@ def test_list_all_constraints_multiple_environments():
             f.write('constraints = \n')
             f.write('    django>=4.1.0\n')
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[config_path]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[config_path]):
             result = list_all_constraints()
             
             assert 'global' in result
@@ -2013,14 +2013,14 @@ def test_add_ignores_to_config_new_ignore():
 
     :returns: None
     """
-    from pipu.package_constraints import add_ignores_to_config
+    from pipu_cli.package_constraints import add_ignores_to_config
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, changes = add_ignores_to_config(['requests', 'numpy'])
                 
                 assert result_path == config_path
@@ -2037,7 +2037,7 @@ def test_remove_ignores_from_config_success():
 
     :returns: None
     """
-    from pipu.package_constraints import remove_ignores_from_config
+    from pipu_cli.package_constraints import remove_ignores_from_config
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
@@ -2049,9 +2049,9 @@ def test_remove_ignores_from_config_success():
             f.write('\trequests\n')
             f.write('\tnumpy\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, removed = remove_ignores_from_config(['requests'])
                 
                 assert result_path == config_path
@@ -2064,7 +2064,7 @@ def test_list_all_ignores_multiple_environments():
 
     :returns: None
     """
-    from pipu.package_constraints import list_all_ignores
+    from pipu_cli.package_constraints import list_all_ignores
     
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
@@ -2079,7 +2079,7 @@ def test_list_all_ignores_multiple_environments():
             f.write('ignores = \n')
             f.write('\tdjango\n')
         
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[config_path]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[config_path]):
             result = list_all_ignores()
             
             assert 'global' in result
@@ -2400,9 +2400,9 @@ def test_add_constraints_to_config_with_invalidation_triggers():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 # Add constraint (this function doesn't support triggers directly)
                 # We'll test the trigger functionality through the CLI tests
                 result_path, changes = add_constraints_to_config(['flask>=2.0.0'])
@@ -2429,9 +2429,9 @@ def test_remove_constraints_cleans_up_triggers():
             f.write('    django>=4.0.0\n')
             f.write('constraint_invalid_when = flask>=2.0.0:other>=1.0.0,django>=4.0.0:another==2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, removed, removed_triggers = remove_constraints_from_config(['flask'])
                 
                 assert result_path == config_path
@@ -2466,8 +2466,8 @@ def test_remove_all_constraints_cleans_up_all_triggers():
             f.write('    django>=4.0.0\n')
             f.write('constraint_invalid_when = flask>=2.0.0:other>=1.0.0,django>=4.0.0:another==2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             result_path, removed, _ = remove_all_constraints_from_config()
             
             assert result_path == config_path
@@ -2675,9 +2675,9 @@ def test_constraint_removal_with_missing_triggers():
             f.write('constraint_invalid_when = malformed-entry-without-colon\n')
         
         # Should still work even with malformed triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, removed, _ = remove_constraints_from_config(['flask'])
                 
                 assert result_path == config_path
@@ -2699,9 +2699,9 @@ def test_constraint_removal_nonexistent_package():
             f.write('constraints = \n')
             f.write('    flask>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 with pytest.raises(ValueError) as exc_info:
                     remove_constraints_from_config(['nonexistent-package'])
                 
@@ -2717,9 +2717,9 @@ def test_constraint_removal_no_config_file():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'nonexistent.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 with pytest.raises(ValueError) as exc_info:
                     remove_constraints_from_config(['flask'])
                 
@@ -2736,9 +2736,9 @@ def test_add_constraints_creates_directory():
         config_path = Path(temp_dir) / 'nonexistent_dir' / 'pip.conf'
         
         # Mock get_recommended_pip_config_path to create directory
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 # Create the directory manually for the test
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 
@@ -2758,9 +2758,9 @@ def test_ignore_functions_comprehensive():
         config_path = Path(temp_dir) / 'pip.conf'
         
         # Test adding ignores
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, changes = add_ignores_to_config(['requests', 'numpy', 'flask'])
                 
                 assert result_path == config_path
@@ -2769,25 +2769,25 @@ def test_ignore_functions_comprehensive():
                 assert changes['flask'] == 'added'
         
         # Test adding duplicate ignores
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, changes = add_ignores_to_config(['requests', 'django'])
                 
                 assert changes['requests'] == 'already_exists'
                 assert changes['django'] == 'added'
         
         # Test removing some ignores
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result_path, removed = remove_ignores_from_config(['requests', 'nonexistent'])
                 
                 assert 'requests' in removed
                 assert 'nonexistent' not in removed
         
         # Test listing ignores
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[config_path]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[config_path]):
             result = list_all_ignores()
             # Should have remaining ignores
             assert 'global' in result
@@ -2813,7 +2813,7 @@ def test_constraint_config_file_corruption_handling():
             f.write('[invalid section name with special chars!@#\n')
         
         # Should handle corruption gracefully
-        with patch('pipu.package_constraints.get_pip_config_paths', return_value=[config_path]):
+        with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[config_path]):
             result = list_all_constraints()
             # Should return empty result rather than crashing
             assert isinstance(result, dict)
@@ -2846,7 +2846,7 @@ def test_constraint_environment_edge_cases():
         config_path = Path(temp_dir) / 'pip.conf'
         
         # Test with environment name that has special characters  
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             result_path, changes = add_constraints_to_config(['flask>=2.0.0'], env_name='test-env_with.special-chars')
             
             assert result_path == config_path
@@ -2939,9 +2939,9 @@ def test_config_file_permissions_error():
         config_path.chmod(0o444)  # Read-only
         
         try:
-            with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-                with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+                with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                     with pytest.raises(IOError):
                         add_constraints_to_config(['flask>=2.0.0'])
         finally:
@@ -2982,7 +2982,7 @@ def test_constraint_operations_with_missing_sections():
             f.write('# Empty config\n')
         
         # Try to remove from non-existent environment
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             with pytest.raises(ValueError) as exc_info:
                 remove_constraints_from_config(['flask'], env_name='nonexistent-env')
             
@@ -3115,9 +3115,9 @@ def test_constraint_update_preserves_existing_settings():
             f.write('upgrade = true\n')
         
         # Add constraints
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 add_constraints_to_config(['flask>=2.0.0'])
         
         # Verify all original settings preserved
@@ -3408,10 +3408,10 @@ def test_apply_auto_constraints_basic():
             ('flask~=2.1.0', 'another-package>=2.0.0')
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                     result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                     
                     assert result_path == config_path
@@ -3439,9 +3439,9 @@ def test_apply_auto_constraints_dry_run():
             ('deprecated==1.2.10', 'test-package>=1.5.0'),
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                 result_path, changes, constraints_added, triggers_added = apply_auto_constraints(dry_run=True)
                 
                 assert result_path == config_path
@@ -3465,9 +3465,9 @@ def test_apply_auto_constraints_no_auto_constraints():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.discover_auto_constraints', return_value=[]):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=[]):
                 result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                 
                 assert result_path == config_path
@@ -3497,10 +3497,10 @@ def test_apply_auto_constraints_with_existing_constraints():
             ('flask~=2.1.0', 'another-package>=2.0.0')  # New
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                     result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                     
                     assert result_path == config_path
@@ -3527,8 +3527,8 @@ def test_apply_auto_constraints_with_environment():
             ('deprecated==1.2.10', 'test-package>=1.5.0'),
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                 result_path, changes, constraints_added, triggers_added = apply_auto_constraints(env_name='production')
                 
                 assert result_path == config_path
@@ -3563,10 +3563,10 @@ def test_apply_auto_constraints_with_existing_triggers():
             ('deprecated==1.2.10', 'test-package>=1.5.0'),  # Same constraint, new trigger
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                     result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                     
                     assert result_path == config_path
@@ -3678,10 +3678,10 @@ def test_apply_auto_constraints_trigger_validation():
             ('deprecated==1.2.10', 'test-package>=1.5.0'),
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                     # Should not raise validation errors
                     result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                     
@@ -3704,10 +3704,10 @@ def test_apply_auto_constraints_error_handling():
         ]
         
         # Test with constraint addition error
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
-                with patch('pipu.package_constraints.add_constraints_to_config', side_effect=IOError("Write error")):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+                with patch('pipu_cli.package_constraints.add_constraints_to_config', side_effect=IOError("Write error")):
                     with pytest.raises(IOError):
                         apply_auto_constraints()
 
@@ -3788,10 +3788,10 @@ def test_apply_auto_constraints_integration_with_existing_system():
             ('existing-package==2.0.0', 'another-source>=1.0.0')  # Same constraint, different trigger
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
-                with patch('pipu.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.discover_auto_constraints', return_value=mock_auto_constraints):
                     result_path, changes, constraints_added, triggers_added = apply_auto_constraints()
                     
                     assert result_path == config_path
@@ -3845,8 +3845,8 @@ def test_check_constraint_invalidations_basic():
             f.write('\trequests<3.0.0\n')
             f.write('constraint_invalid_when = numpy==1.20.0:pandas>=2.0.0,requests<3.0.0:urllib3>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Test with packages that would invalidate constraints
             invalidated = check_constraint_invalidations(['pandas', 'urllib3'])
             
@@ -3873,8 +3873,8 @@ def test_check_constraint_invalidations_partial_match():
             f.write('\tflask==2.0.0\n')
             f.write('constraint_invalid_when = flask==2.0.0:jinja2>=3.0.0|werkzeug>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Test with only one of the triggering packages
             invalidated = check_constraint_invalidations(['jinja2'])
             
@@ -3896,8 +3896,8 @@ def test_check_constraint_invalidations_no_config():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'nonexistent.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             invalidated = check_constraint_invalidations(['any-package'])
             assert len(invalidated) == 0
 
@@ -3918,8 +3918,8 @@ def test_validate_package_installation_safe_packages():
             f.write('\tnumpy==1.20.0\n')
             f.write('constraint_invalid_when = numpy==1.20.0:pandas>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Test with safe packages
             safe_packages, invalidated = validate_package_installation(['scipy', 'matplotlib'])
             
@@ -3946,8 +3946,8 @@ def test_validate_package_installation_unsafe_packages():
             f.write('\trequests<3.0.0\n')
             f.write('constraint_invalid_when = numpy==1.20.0:pandas>=2.0.0,requests<3.0.0:urllib3>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Test with mix of safe and unsafe packages
             safe_packages, invalidated = validate_package_installation(['pandas', 'scipy', 'urllib3'])
             
@@ -4005,8 +4005,8 @@ def test_evaluate_invalidation_triggers_all_satisfied():
             MagicMock(metadata={'Name': 'werkzeug'}, version='2.2.0'),
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'), \
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'), \
              patch('importlib.metadata.distributions', return_value=mock_distributions):
             
             to_remove, details = evaluate_invalidation_triggers()
@@ -4041,8 +4041,8 @@ def test_evaluate_invalidation_triggers_partial_satisfaction():
             MagicMock(metadata={'Name': 'werkzeug'}, version='1.0.0'),  # Doesn't satisfy >=2.0.0
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'), \
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'), \
              patch('importlib.metadata.distributions', return_value=mock_distributions):
             
             to_remove, details = evaluate_invalidation_triggers()
@@ -4076,8 +4076,8 @@ def test_cleanup_invalidated_constraints_success():
             MagicMock(metadata={'Name': 'urllib3'}, version='2.1.0'),
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'), \
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'), \
              patch('importlib.metadata.distributions', return_value=mock_distributions):
             
             removed, details, message = cleanup_invalidated_constraints()
@@ -4123,8 +4123,8 @@ def test_cleanup_invalidated_constraints_no_removals():
             MagicMock(metadata={'Name': 'pandas'}, version='1.5.0'),  # Doesn't satisfy >=2.0.0
         ]
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'), \
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'), \
              patch('importlib.metadata.distributions', return_value=mock_distributions):
             
             removed, details, message = cleanup_invalidated_constraints()
@@ -4142,7 +4142,7 @@ def test_post_install_cleanup_with_console():
     """
     mock_console = MagicMock()
     
-    with patch('pipu.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
+    with patch('pipu_cli.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
         mock_cleanup.return_value = (
             ['numpy', 'requests'], 
             {'numpy': ['pandas>=2.0.0'], 'requests': ['urllib3>=2.0.0']}, 
@@ -4166,7 +4166,7 @@ def test_post_install_cleanup_no_console():
     
     :returns: None
     """
-    with patch('pipu.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
+    with patch('pipu_cli.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
         mock_cleanup.return_value = (['numpy'], {}, 'Test message')
         
         # Should not raise any exceptions
@@ -4183,7 +4183,7 @@ def test_post_install_cleanup_error_handling():
     """
     mock_console = MagicMock()
     
-    with patch('pipu.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
+    with patch('pipu_cli.package_constraints.cleanup_invalidated_constraints') as mock_cleanup:
         mock_cleanup.side_effect = Exception('Test error')
         
         # Should not raise exceptions, just log warning
@@ -4208,8 +4208,8 @@ def test_constraint_invalidation_edge_cases():
         with open(config_path, 'w') as f:
             f.write('[global]\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Should handle empty config gracefully
             invalidated = check_constraint_invalidations(['any-package'])
             assert len(invalidated) == 0
@@ -4224,8 +4224,8 @@ def test_constraint_invalidation_edge_cases():
             f.write('constraints = invalid-format\n')
             f.write('constraint_invalid_when = malformed:trigger\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Should handle malformed config gracefully
             invalidated = check_constraint_invalidations(['any-package'])
             assert len(invalidated) == 0
@@ -4247,8 +4247,8 @@ def test_constraint_invalidation_case_sensitivity():
             f.write('\tNumPy==1.20.0\n')
             f.write('constraint_invalid_when = numpy==1.20.0:Pandas>=2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
-             patch('pipu.package_constraints._get_section_name', return_value='global'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path), \
+             patch('pipu_cli.package_constraints._get_section_name', return_value='global'):
             # Test with different cases
             invalidated = check_constraint_invalidations(['pandas'])
             assert len(invalidated) == 1
@@ -4280,7 +4280,7 @@ def test_discover_auto_constraints_excludes_trigger_packages():
     ]
 
     with patch('importlib.metadata.distributions', return_value=mock_distributions), \
-         patch('pipu.package_constraints.read_ignores', return_value=set()):
+         patch('pipu_cli.package_constraints.read_ignores', return_value=set()):
 
         # Without exclusions - should find constraints with pandas and scikit-learn as triggers
         all_constraints = discover_auto_constraints()
@@ -4322,7 +4322,7 @@ def test_discover_auto_constraints_multiple_triggers_same_constraint():
     ]
 
     with patch('importlib.metadata.distributions', return_value=mock_distributions), \
-         patch('pipu.package_constraints.read_ignores', return_value=set()):
+         patch('pipu_cli.package_constraints.read_ignores', return_value=set()):
 
         # Without exclusions - should find multiple constraints for numpy
         all_constraints = discover_auto_constraints()
@@ -4357,7 +4357,7 @@ def test_discover_auto_constraints_case_insensitive_exclusion():
     ]
     
     with patch('importlib.metadata.distributions', return_value=mock_distributions), \
-         patch('pipu.package_constraints.read_ignores', return_value=set()):
+         patch('pipu_cli.package_constraints.read_ignores', return_value=set()):
         
         # Test various case combinations
         test_cases = [
@@ -4390,7 +4390,7 @@ def test_discover_auto_constraints_empty_exclusion_list():
     ]
     
     with patch('importlib.metadata.distributions', return_value=mock_distributions), \
-         patch('pipu.package_constraints.read_ignores', return_value=set()):
+         patch('pipu_cli.package_constraints.read_ignores', return_value=set()):
         
         # Test with None (default)
         constraints_none = discover_auto_constraints()
@@ -4437,8 +4437,8 @@ def test_discover_auto_constraints_validates_trigger_packages():
         return {'validpackage'}  # Only validpackage is considered "installed"
 
     with patch('importlib.metadata.distributions', return_value=mock_distributions), \
-         patch('pipu.package_constraints.read_ignores', return_value=set()), \
-         patch('pipu.package_constraints._get_installed_packages', side_effect=mock_get_installed_packages):
+         patch('pipu_cli.package_constraints.read_ignores', return_value=set()), \
+         patch('pipu_cli.package_constraints._get_installed_packages', side_effect=mock_get_installed_packages):
 
         constraints = discover_auto_constraints()
 

@@ -66,7 +66,7 @@ dev = ["invoke", "build"]
 
 # Command line executables provided by the package
 [project.scripts]
-pipu = "pipu.cli:cli"
+pipu = "pipu_cli.cli:cli"
 
 # ----------------------------------------------------------------------------------------
 # These configurations are specific to the `setuptools` build backend
@@ -84,7 +84,7 @@ exclude = ["*test*"]
 [tool.setuptools.dynamic]
 
 # Get the version from a "single source of truth"
-version = {attr = "pipu.__version__"}
+version = {attr = "pipu_cli.__version__"}
 
 # Package dependencies (these will be installed by pip)
 # https://packaging.python.org/discussions/install-requires-vs-requirements/

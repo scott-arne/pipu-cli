@@ -2116,7 +2116,7 @@ def evaluate_invalidation_triggers(env_name: Optional[str] = None) -> Tuple[List
         from .internals import _check_constraint_satisfaction
     except ImportError:
         # Fallback for when executed via exec in __init__.py
-        from pipu.internals import _check_constraint_satisfaction
+        from pipu_cli.internals import _check_constraint_satisfaction
 
     constraints_to_remove = []
     trigger_details = {}

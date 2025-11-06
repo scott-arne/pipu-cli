@@ -14,8 +14,8 @@ class TestEditablePackagesCaching:
 
     def test_cache_returns_same_result_within_ttl(self):
         """Test that cache returns same result within TTL without calling subprocess."""
-        from pipu.internals import get_editable_packages
-        import pipu.internals as internals
+        from pipu_cli.internals import get_editable_packages
+        import pipu_cli.internals as internals
 
         # Clear cache first
         internals._editable_packages_cache.invalidate()
@@ -37,9 +37,9 @@ class TestEditablePackagesCaching:
 
     def test_cache_expires_after_ttl(self):
         """Test that cache expires and refreshes after TTL."""
-        from pipu.internals import get_editable_packages
-        import pipu.internals as internals
-        from pipu.thread_safe import ThreadSafeCache
+        from pipu_cli.internals import get_editable_packages
+        import pipu_cli.internals as internals
+        from pipu_cli.thread_safe import ThreadSafeCache
 
         # Create a new cache with short TTL for testing
         original_cache = internals._editable_packages_cache
@@ -68,8 +68,8 @@ class TestEditablePackagesCaching:
 
     def test_cache_returns_copy_not_reference(self):
         """Test that cache returns a copy to prevent external modifications."""
-        from pipu.internals import get_editable_packages
-        import pipu.internals as internals
+        from pipu_cli.internals import get_editable_packages
+        import pipu_cli.internals as internals
 
         # Clear cache first
         internals._editable_packages_cache.invalidate()
@@ -91,8 +91,8 @@ class TestEditablePackagesCaching:
 
     def test_cache_handles_subprocess_errors(self):
         """Test that cache handles subprocess errors gracefully."""
-        from pipu.internals import get_editable_packages
-        import pipu.internals as internals
+        from pipu_cli.internals import get_editable_packages
+        import pipu_cli.internals as internals
         import subprocess
 
         # Clear cache first

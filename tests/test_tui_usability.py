@@ -8,7 +8,7 @@ and provides a good user experience for both experienced and inexperienced users
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from textual.widgets import DataTable
-from pipu.ui import MainTUIApp, PackageSelectionApp, PackageSelectionTable
+from pipu_cli.ui import MainTUIApp, PackageSelectionApp, PackageSelectionTable
 
 
 class TestTUIInitializationScenarios:
@@ -19,7 +19,7 @@ class TestTUIInitializationScenarios:
         app = MainTUIApp()
 
         # Mock empty package environment - patch the import used by apps.py
-        with patch('pipu.ui.apps.get_default_environment') as mock_env:
+        with patch('pipu_cli.ui.apps.get_default_environment') as mock_env:
             mock_env_instance = Mock()
             mock_env_instance.iter_all_distributions.return_value = []
             mock_env.return_value = mock_env_instance
@@ -42,7 +42,7 @@ class TestTUIInitializationScenarios:
             mock_dist.version = f"1.{i % 100}.0"
             large_package_list.append(mock_dist)
 
-        with patch('pipu.ui.apps.get_default_environment') as mock_env:
+        with patch('pipu_cli.ui.apps.get_default_environment') as mock_env:
             mock_env_instance = Mock()
             mock_env_instance.iter_all_distributions.return_value = large_package_list
             mock_env.return_value = mock_env_instance
@@ -140,7 +140,7 @@ class TestTUINavigationAndInteraction:
 
     def test_constraint_input_with_invalid_package_names(self):
         """Test constraint input screen with invalid package names."""
-        from pipu.ui import ConstraintInputScreen
+        from pipu_cli.ui import ConstraintInputScreen
 
         # Test with package name that doesn't exist
         screen = ConstraintInputScreen("nonexistent-package", "")
@@ -151,7 +151,7 @@ class TestTUINavigationAndInteraction:
 
         with patch.object(ConstraintInputScreen, 'app', new_callable=lambda: mock_app):
             # Mock validation to return False (package doesn't exist)
-            with patch('pipu.package_constraints.validate_package_exists') as mock_validate:
+            with patch('pipu_cli.package_constraints.validate_package_exists') as mock_validate:
                 mock_validate.return_value = (False, "Package 'nonexistent-package' not found in environment")
 
                 # Simulate constraint submission
@@ -159,7 +159,7 @@ class TestTUINavigationAndInteraction:
                 screen.invalidation_trigger = ""
 
                 # This would normally be called by the UI framework
-                with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
+                with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
                     mock_parse.return_value = {'name': 'nonexistent-package', 'constraint': '>=1.0.0'}
 
                     # Mock the input widgets
@@ -209,14 +209,14 @@ class TestTUIErrorRecovery:
         import time
         from unittest.mock import Mock
         from requests.exceptions import ReadTimeout
-        from pipu.ui.constants import NETWORK_TIMEOUT_TEST
+        from pipu_cli.ui.constants import NETWORK_TIMEOUT_TEST
 
         app = MainTUIApp()
 
         # Mock everything needed to simulate fast timeout without real network calls
-        with patch('pipu.internals.get_default_environment') as mock_env, \
-             patch('pipu.internals.Configuration') as mock_config_cls, \
-             patch('pipu.internals.PipSession') as mock_session_cls:
+        with patch('pipu_cli.internals.get_default_environment') as mock_env, \
+             patch('pipu_cli.internals.Configuration') as mock_config_cls, \
+             patch('pipu_cli.internals.PipSession') as mock_session_cls:
 
             # Mock environment with one package to check
             mock_env_instance = Mock()
@@ -239,7 +239,7 @@ class TestTUIErrorRecovery:
             mock_session.timeout = NETWORK_TIMEOUT_TEST
 
             # Mock package finder to simulate timeout during candidate search
-            with patch('pipu.internals.PackageFinder') as mock_finder_cls:
+            with patch('pipu_cli.internals.PackageFinder') as mock_finder_cls:
                 mock_finder = Mock()
                 mock_finder_cls.create.return_value = mock_finder
 
@@ -251,7 +251,7 @@ class TestTUIErrorRecovery:
                 mock_finder.find_all_candidates.side_effect = mock_find_candidates
 
                 # Should raise ConnectionError on network timeout
-                from pipu.internals import list_outdated
+                from pipu_cli.internals import list_outdated
 
                 # This will raise ConnectionError after first network failure
                 with pytest.raises(ConnectionError) as exc_info:
@@ -331,7 +331,7 @@ class TestTUIAccessibilityAndUsability:
 
     def test_help_screen_completeness(self):
         """Test that help screen contains comprehensive information."""
-        from pipu.ui import HelpScreen
+        from pipu_cli.ui import HelpScreen
 
         help_screen = HelpScreen()
 
@@ -446,7 +446,7 @@ class TestTUIErrorMessaging:
 
     def test_constraint_validation_error_messages(self):
         """Test that constraint validation provides helpful error messages."""
-        from pipu.ui.modal_dialogs import ConstraintInputScreen
+        from pipu_cli.ui.modal_dialogs import ConstraintInputScreen
 
         # Just test empty constraint for now
         screen = ConstraintInputScreen("test-package", "")
@@ -483,7 +483,7 @@ class TestTUIErrorMessaging:
 
     def test_uninstall_confirmation_clarity(self):
         """Test that uninstall confirmations are clear and prominent."""
-        from pipu.ui import UninstallConfirmScreen
+        from pipu_cli.ui import UninstallConfirmScreen
 
         screen = UninstallConfirmScreen("critical-package")
 

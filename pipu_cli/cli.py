@@ -856,6 +856,6 @@ def ignore(package_names, env, list_ignores, remove_ignores, remove_all_ignores,
         sys.exit(1)
 
 
-# This allows the module to be run with: python -m pipu.cli
+# This allows the module to be run with: python -m pipu_cli.cli
 if __name__ == '__main__':
     cli()

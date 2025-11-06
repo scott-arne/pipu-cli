@@ -12,15 +12,15 @@ import subprocess
 from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 
-from pipu.internals import list_outdated, _check_constraint_satisfaction
-from pipu.ui import MainTUIApp
+from pipu_cli.internals import list_outdated, _check_constraint_satisfaction
+from pipu_cli.ui import MainTUIApp
 
 
 class TestNetworkAndIOEdgeCases:
     """Test network failures and I/O error scenarios."""
 
-    @patch('pipu.internals.get_default_environment')
-    @patch('pipu.internals.Configuration')
+    @patch('pipu_cli.internals.get_default_environment')
+    @patch('pipu_cli.internals.Configuration')
     def test_list_outdated_network_timeout(self, mock_config_cls, mock_get_env):
         """Test list_outdated handles network timeouts gracefully."""
         # Mock environment
@@ -35,7 +35,7 @@ class TestNetworkAndIOEdgeCases:
         mock_config.get_value.side_effect = Exception("Network timeout")
 
         # Should raise ConnectionError when session creation fails
-        with patch('pipu.internals.PipSession') as mock_session:
+        with patch('pipu_cli.internals.PipSession') as mock_session:
             # Mock the session to raise exception during creation
             mock_session_instance = Mock()
             mock_session.return_value = mock_session_instance
@@ -48,7 +48,7 @@ class TestNetworkAndIOEdgeCases:
 
     def test_list_outdated_with_corrupted_package_metadata(self):
         """Test handling of packages with corrupted metadata."""
-        with patch('pipu.internals.get_default_environment') as mock_get_env:
+        with patch('pipu_cli.internals.get_default_environment') as mock_get_env:
             mock_env = Mock()
             mock_get_env.return_value = mock_env
 
@@ -60,19 +60,19 @@ class TestNetworkAndIOEdgeCases:
 
             mock_env.iter_all_distributions.return_value = [mock_dist]
 
-            with patch('pipu.internals.Configuration'):
+            with patch('pipu_cli.internals.Configuration'):
                 # Should handle corrupted metadata gracefully
                 result = list_outdated(print_table=False)
                 assert isinstance(result, list)
 
     def test_permission_denied_during_config_access(self):
         """Test handling of permission errors when accessing pip config."""
-        with patch('pipu.internals.Configuration') as mock_config_cls:
+        with patch('pipu_cli.internals.Configuration') as mock_config_cls:
             mock_config = Mock()
             mock_config_cls.return_value = mock_config
             mock_config.load.side_effect = PermissionError("Access denied")
 
-            with patch('pipu.internals.get_default_environment') as mock_get_env:
+            with patch('pipu_cli.internals.get_default_environment') as mock_get_env:
                 mock_env = Mock()
                 mock_get_env.return_value = mock_env
                 mock_env.iter_all_distributions.return_value = []
@@ -248,12 +248,12 @@ class TestConfigurationEdgeCases:
             config_path = f.name
 
         try:
-            with patch('pipu.internals.Configuration') as mock_config_cls:
+            with patch('pipu_cli.internals.Configuration') as mock_config_cls:
                 mock_config = Mock()
                 mock_config_cls.return_value = mock_config
                 mock_config.load.side_effect = Exception("Malformed config")
 
-                with patch('pipu.internals.get_default_environment') as mock_get_env:
+                with patch('pipu_cli.internals.get_default_environment') as mock_get_env:
                     mock_env = Mock()
                     mock_get_env.return_value = mock_env
                     mock_env.iter_all_distributions.return_value = []
@@ -267,12 +267,12 @@ class TestConfigurationEdgeCases:
 
     def test_empty_package_environment(self):
         """Test behavior with completely empty package environment."""
-        with patch('pipu.internals.get_default_environment') as mock_get_env:
+        with patch('pipu_cli.internals.get_default_environment') as mock_get_env:
             mock_env = Mock()
             mock_get_env.return_value = mock_env
             mock_env.iter_all_distributions.return_value = []
 
-            with patch('pipu.internals.Configuration'):
+            with patch('pipu_cli.internals.Configuration'):
                 result = list_outdated(print_table=False)
                 assert result == []
 

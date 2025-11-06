@@ -10,7 +10,7 @@ import tempfile
 from unittest.mock import patch, Mock
 from click.testing import CliRunner
 from pathlib import Path
-from pipu.cli import cli
+from pipu_cli.cli import cli
 
 
 class TestPackageNameMistakes:
@@ -29,7 +29,7 @@ class TestPackageNameMistakes:
         ]
 
         for typo in typos:
-            with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
+            with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
                 mock_parse.return_value = None  # Invalid package name
 
                 result = runner.invoke(cli, ['constrain', f'{typo}>=1.0.0'])
@@ -51,8 +51,8 @@ class TestPackageNameMistakes:
             with tempfile.TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / 'pip.conf'
 
-                with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-                    with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+                    with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                         result = runner.invoke(cli, ['constrain', variation])
 
                         # Should succeed - package names are normalized
@@ -75,8 +75,8 @@ class TestPackageNameMistakes:
             with tempfile.TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / 'pip.conf'
 
-                with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-                    with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+                    with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                         result = runner.invoke(cli, ['constrain', variation])
 
                         # Should handle whitespace gracefully
@@ -99,8 +99,8 @@ class TestPackageNameMistakes:
             with tempfile.TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / 'pip.conf'
 
-                with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-                    with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+                with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+                    with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                         result = runner.invoke(cli, ['constrain', variation])
 
                         # Should either succeed or provide helpful error message
@@ -126,7 +126,7 @@ class TestVersionConstraintMistakes:
         ]
 
         for constraint in malformed_constraints:
-            with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
+            with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
                 mock_parse.return_value = None  # Invalid constraint
 
                 result = runner.invoke(cli, ['constrain', constraint])
@@ -146,7 +146,7 @@ class TestVersionConstraintMistakes:
         ]
 
         for constraint in incomplete_versions:
-            with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
+            with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
                 # Some might be valid, some invalid - test both cases
                 mock_parse.return_value = None
 
@@ -166,7 +166,7 @@ class TestVersionConstraintMistakes:
         ]
 
         for constraint in mixed_operators:
-            with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
+            with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
                 mock_parse.return_value = None  # Invalid constraint
 
                 result = runner.invoke(cli, ['constrain', constraint])
@@ -185,7 +185,7 @@ class TestEnvironmentNameMistakes:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / 'pip.conf'
 
-            with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
                 # Environment name with spaces
                 result = runner.invoke(cli, ['constrain', 'requests>=1.0.0', '--env', 'my environment'])
 
@@ -209,7 +209,7 @@ class TestEnvironmentNameMistakes:
             with tempfile.TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / 'pip.conf'
 
-                with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+                with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
                     result = runner.invoke(cli, ['constrain', 'requests>=1.0.0', '--env', env_name])
 
                     # Should handle gracefully
@@ -223,7 +223,7 @@ class TestEnvironmentNameMistakes:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / 'pip.conf'
 
-            with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
                 result = runner.invoke(cli, ['constrain', 'requests>=1.0.0', '--env', ''])
 
                 # Should either work (using default) or provide clear error
@@ -239,7 +239,7 @@ class TestEnvironmentNameMistakes:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / 'pip.conf'
 
-            with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
                 result = runner.invoke(cli, ['constrain', 'requests>=1.0.0', '--env', long_name])
 
                 # Should handle gracefully - either work or give reasonable error
@@ -276,8 +276,8 @@ class TestInteractivePromptMistakes:
         ]
 
         for invalid_input in invalid_responses:
-            with patch('pipu.cli.read_constraints', return_value={}):
-                with patch('pipu.cli.list_outdated', return_value=outdated_packages):
+            with patch('pipu_cli.cli.read_constraints', return_value={}):
+                with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
                     result = runner.invoke(cli, ['update'], input=invalid_input + 'n\n')  # Follow with 'n' to exit
 
                     # Should either handle gracefully or ask again
@@ -298,8 +298,8 @@ class TestInteractivePromptMistakes:
             }
         ]
 
-        with patch('pipu.cli.read_constraints', return_value={}):
-            with patch('pipu.cli.list_outdated', return_value=outdated_packages):
+        with patch('pipu_cli.cli.read_constraints', return_value={}):
+            with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
                 # Simulate Ctrl+C by providing no input (will timeout/EOF)
                 result = runner.invoke(cli, ['update'], input='')
 
@@ -351,8 +351,8 @@ class TestWorkflowMistakes:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / 'pip.conf'
 
-            with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-                with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+                with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                     # Try to remove constraint for package that has no constraints
                     result = runner.invoke(cli, ['constrain', '--remove', 'nonexistent-package'])
 
@@ -368,7 +368,7 @@ class TestWorkflowMistakes:
             config_path = Path(temp_dir) / 'pip.conf'
 
             # Patch get_pip_config_paths to return only our empty temp config
-            with patch('pipu.package_constraints.get_pip_config_paths', return_value=[config_path]):
+            with patch('pipu_cli.package_constraints.get_pip_config_paths', return_value=[config_path]):
                 result = runner.invoke(cli, ['constrain', '--list'])
 
                 # Should provide clear message about no constraints
@@ -381,8 +381,8 @@ class TestWorkflowMistakes:
         """Test update when no packages are outdated."""
         runner = CliRunner()
 
-        with patch('pipu.cli.read_constraints', return_value={}):
-            with patch('pipu.cli.list_outdated', return_value=[]):  # No outdated packages
+        with patch('pipu_cli.cli.read_constraints', return_value={}):
+            with patch('pipu_cli.cli.list_outdated', return_value=[]):  # No outdated packages
                 result = runner.invoke(cli, ['update'])
 
                 # Should handle gracefully
@@ -397,10 +397,10 @@ class TestFilePermissionScenarios:
         """Test behavior when config file is read-only."""
         runner = CliRunner()
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/readonly/pip.conf')
 
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 # This will likely fail with permission error
                 result = runner.invoke(cli, ['constrain', 'requests>=1.0.0'])
 
@@ -414,10 +414,10 @@ class TestFilePermissionScenarios:
         """Test behavior when config directory doesn't exist."""
         runner = CliRunner()
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/nonexistent/directory/pip.conf')
 
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['constrain', 'requests>=1.0.0'])
 
                 # Should either create directory or provide helpful error
@@ -436,9 +436,9 @@ class TestOutputClarityScenarios:
 
         # Test when no packages are outdated - mock the underlying dependencies
         # so that list_outdated returns empty list but still prints its message
-        with patch('pipu.cli.read_constraints', return_value={}), \
-             patch('pipu.internals.get_default_environment') as mock_env, \
-             patch('pipu.package_constraints.cleanup_invalid_constraints_and_triggers', return_value=([], {}, None)):
+        with patch('pipu_cli.cli.read_constraints', return_value={}), \
+             patch('pipu_cli.internals.get_default_environment') as mock_env, \
+             patch('pipu_cli.package_constraints.cleanup_invalid_constraints_and_triggers', return_value=([], {}, None)):
 
             # Mock empty environment (no installed packages)
             mock_env_instance = Mock()

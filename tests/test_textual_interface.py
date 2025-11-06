@@ -11,7 +11,7 @@ from textual.widgets import DataTable, Input
 from textual.app import App
 from rich.text import Text
 
-from pipu.ui import (
+from pipu_cli.ui import (
     MainTUIApp, PackageSelectionApp, PackageSelectionTable,
     ConstraintInputScreen,
     UninstallConfirmScreen
@@ -56,7 +56,7 @@ class TestPackageSelectionTable:
         table = PackageSelectionTable(packages)
         assert table.selected_packages['package-a'] is True
 
-    @patch('pipu.ui.table_widgets._check_constraint_satisfaction')
+    @patch('pipu_cli.ui.table_widgets._check_constraint_satisfaction')
     def test_package_selection_initialization_with_satisfying_constraints(self, mock_check):
         """Test pre-selection with constraints that are satisfied."""
         mock_check.return_value = True
@@ -74,7 +74,7 @@ class TestPackageSelectionTable:
         assert table.selected_packages['package-b'] is True
         mock_check.assert_called_with('1.5.0', '>=1.0.0,<2.0.0')
 
-    @patch('pipu.ui.table_widgets._check_constraint_satisfaction')
+    @patch('pipu_cli.ui.table_widgets._check_constraint_satisfaction')
     def test_package_selection_initialization_with_violating_constraints(self, mock_check):
         """Test pre-selection with constraints that are violated."""
         mock_check.return_value = False
@@ -159,8 +159,8 @@ class TestMainTUIApp:
         assert app.filter_outdated_only is False  # Default to showing all packages
         assert app.package_row_mapping == {}
 
-    @patch('pipu.package_constraints.read_constraints')
-    @patch('pipu.package_constraints.read_ignores')
+    @patch('pipu_cli.package_constraints.read_constraints')
+    @patch('pipu_cli.package_constraints.read_ignores')
     def test_on_mount_loads_configuration(self, mock_read_ignores, mock_read_constraints):
         """Test that mounting loads constraints and ignores."""
         mock_read_constraints.return_value = {'package': '>=1.0.0'}
@@ -579,7 +579,7 @@ class TestTUIPerformanceOptimizations:
 class TestTUIIntegration:
     """Integration tests for TUI components."""
 
-    @patch('pipu.internals.list_outdated')
+    @patch('pipu_cli.internals.list_outdated')
     def test_package_discovery_integration(self, mock_list_outdated):
         """Test integration between package discovery and TUI display."""
         mock_list_outdated.return_value = [
@@ -699,7 +699,7 @@ class TestConstraintInputInteractive:
         original_add_constraints = None
 
         def mock_add_constraints(constraint_specs):
-            from pipu.package_constraints import parse_requirement_line
+            from pipu_cli.package_constraints import parse_requirement_line
 
             # Test the actual parsing that would happen
             for spec in constraint_specs:
@@ -710,7 +710,7 @@ class TestConstraintInputInteractive:
             # If we get here, parsing succeeded
             return "/fake/path", {"testpackage": ("added", constraint_specs[0].replace("testpackage", ""))}
 
-        with patch('pipu.package_constraints.add_constraints_to_config', side_effect=mock_add_constraints):
+        with patch('pipu_cli.package_constraints.add_constraints_to_config', side_effect=mock_add_constraints):
             app = TestMainTUIApp()
 
             async with app.run_test() as pilot:
@@ -768,13 +768,13 @@ class TestConstraintInputInteractive:
                 for constraint in constraints:
                     try:
                         # This is exactly what the TUI does
-                        from pipu.package_constraints import add_constraints_to_config
+                        from pipu_cli.package_constraints import add_constraints_to_config
                         constraint_spec = f"testpackage{constraint}"
                         config_path, changes = add_constraints_to_config([constraint_spec])
                         self.constraint_results.append((constraint, "SUCCESS", changes))
 
                         # Clean up
-                        from pipu.package_constraints import remove_constraints_from_config
+                        from pipu_cli.package_constraints import remove_constraints_from_config
                         remove_constraints_from_config(["testpackage"])
 
                     except Exception as e:
@@ -951,7 +951,7 @@ class TestTUIRowKeyRegressionTests:
             mock_query.return_value = mock_table
 
             # Mock the constraint addition at the constraints module level
-            with patch('pipu.package_constraints.add_constraints_to_config', side_effect=mock_add_constraints):
+            with patch('pipu_cli.package_constraints.add_constraints_to_config', side_effect=mock_add_constraints):
                 with patch.object(app, 'push_screen') as mock_push_screen:
 
                     # Call action_add_constraint
@@ -1032,7 +1032,7 @@ class TestTUIRowKeyRegressionTests:
             mock_query.return_value = mock_table
 
             # Mock constraint removal at the constraints module level
-            with patch('pipu.package_constraints.remove_constraints_from_config', side_effect=mock_remove_constraints):
+            with patch('pipu_cli.package_constraints.remove_constraints_from_config', side_effect=mock_remove_constraints):
                 with patch.object(app, 'push_screen') as mock_push_screen:
 
                     # Call action_delete_constraint
@@ -1168,7 +1168,7 @@ class TestFormatLatestVersionUtility:
 
     def test_format_with_no_constraint(self):
         """Test formatting latest version with no constraint (should be green)."""
-        from pipu.ui.apps import MainTUIApp
+        from pipu_cli.ui.apps import MainTUIApp
         from rich.text import Text
 
         app = MainTUIApp()
@@ -1182,7 +1182,7 @@ class TestFormatLatestVersionUtility:
 
     def test_format_with_satisfied_constraint(self):
         """Test formatting latest version with satisfied constraint (should be green)."""
-        from pipu.ui.apps import MainTUIApp
+        from pipu_cli.ui.apps import MainTUIApp
         from rich.text import Text
 
         app = MainTUIApp()
@@ -1196,7 +1196,7 @@ class TestFormatLatestVersionUtility:
 
     def test_format_with_violated_constraint(self):
         """Test formatting latest version with violated constraint (should be red)."""
-        from pipu.ui.apps import MainTUIApp
+        from pipu_cli.ui.apps import MainTUIApp
         from rich.text import Text
 
         app = MainTUIApp()
@@ -1210,7 +1210,7 @@ class TestFormatLatestVersionUtility:
 
     def test_format_with_complex_constraint(self):
         """Test formatting with complex constraint expressions."""
-        from pipu.ui.apps import MainTUIApp
+        from pipu_cli.ui.apps import MainTUIApp
         from rich.text import Text
 
         app = MainTUIApp()
@@ -1231,7 +1231,7 @@ class TestWorkerCancellationTracking:
 
     def test_worker_cancellation_tracks_cancelled_workers(self):
         """Test that worker cancellation properly tracks which workers were cancelled."""
-        from pipu.ui.apps import MainTUIApp
+        from pipu_cli.ui.apps import MainTUIApp
         from unittest.mock import Mock, patch
 
         app = MainTUIApp()

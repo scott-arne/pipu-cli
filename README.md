@@ -366,7 +366,7 @@ pytest tests/test_cli.py -v
 pytest tests/test_tui_usability.py -v
 
 # With coverage
-pytest tests/ --cov=pipu --cov-report=html
+pytest tests/ --cov=pipu_cli --cov-report=html
 ```
 
 ### Building
@@ -379,7 +379,7 @@ pip install build
 python -m build
 
 # Install locally
-pip install dist/pipu-*.whl
+pip install dist/pipu_cli-*.whl
 ```
 
 ### Code Quality

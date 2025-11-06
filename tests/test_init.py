@@ -1,5 +1,5 @@
 import logging
-from pipu import LevelSpecificFormatter, __version__
+from pipu_cli import LevelSpecificFormatter, __version__
 
 
 def test_version():

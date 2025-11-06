@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from rich.console import Console
-from pipu.internals import list_outdated, _check_constraint_satisfaction, _format_constraint_for_display
+from pipu_cli.internals import list_outdated, _check_constraint_satisfaction, _format_constraint_for_display
 
 
 @pytest.fixture
@@ -14,12 +14,12 @@ def mock_console():
     return Mock(spec=Console)
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_with_outdated_packages(mock_package_finder_cls, mock_link_collector_cls,
                                              mock_search_scope_cls, _mock_pip_session_cls,
                                              mock_config_cls, mock_get_env, mock_console):
@@ -119,12 +119,12 @@ def test_list_outdated_with_outdated_packages(mock_package_finder_cls, mock_link
     mock_console.status.assert_called_once()
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_no_outdated_packages(mock_package_finder_cls, mock_link_collector_cls,
                                            mock_search_scope_cls, _mock_pip_session_cls,
                                            mock_config_cls, mock_get_env, mock_console):
@@ -203,13 +203,13 @@ def test_list_outdated_creates_console_when_none_provided():
     :returns: None
     """
 
-    with patch('pipu.internals.get_default_environment') as mock_get_env:
+    with patch('pipu_cli.internals.get_default_environment') as mock_get_env:
             # Mock empty environment to avoid complex setup
             mock_env = Mock()
             mock_env.iter_all_distributions.return_value = []
             mock_get_env.return_value = mock_env
 
-            with patch('pipu.internals.Configuration') as mock_config_cls:
+            with patch('pipu_cli.internals.Configuration') as mock_config_cls:
                 mock_config = Mock()
                 mock_config_cls.return_value = mock_config
                 mock_config.get_value.side_effect = Exception("Key not found")
@@ -221,7 +221,7 @@ def test_list_outdated_creates_console_when_none_provided():
                 assert result == []
 
 
-@patch('pipu.internals.get_default_environment')
+@patch('pipu_cli.internals.get_default_environment')
 def test_list_outdated_handles_exceptions_gracefully(mock_get_env, mock_console):
     """
     Test that list_outdated handles exceptions in package checking gracefully.
@@ -248,12 +248,12 @@ def test_list_outdated_handles_exceptions_gracefully(mock_get_env, mock_console)
 
     mock_env.iter_all_distributions.return_value = [mock_dist]
 
-    with patch('pipu.internals.Configuration') as mock_config_cls:
+    with patch('pipu_cli.internals.Configuration') as mock_config_cls:
         mock_config = Mock()
         mock_config_cls.return_value = mock_config
         mock_config.get_value.side_effect = Exception("Key not found")
 
-        with patch('pipu.internals.PackageFinder') as mock_package_finder_cls:
+        with patch('pipu_cli.internals.PackageFinder') as mock_package_finder_cls:
             mock_package_finder = Mock()
             mock_package_finder_cls.create.return_value = mock_package_finder
 
@@ -272,12 +272,12 @@ def test_list_outdated_handles_exceptions_gracefully(mock_get_env, mock_console)
             assert "proxy settings" in str(exc_info.value)
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_extra_index_urls_as_string(mock_package_finder_cls, mock_link_collector_cls,
                                                   mock_search_scope_cls, _mock_pip_session_cls,
                                                   mock_config_cls, mock_get_env, mock_console):
@@ -337,12 +337,12 @@ def test_list_outdated_extra_index_urls_as_string(mock_package_finder_cls, mock_
     assert result == []
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_trusted_hosts_as_string(mock_package_finder_cls, mock_link_collector_cls,
                                                mock_search_scope_cls, _mock_pip_session_cls,
                                                mock_config_cls, mock_get_env, mock_console):
@@ -396,12 +396,12 @@ def test_list_outdated_trusted_hosts_as_string(mock_package_finder_cls, mock_lin
     assert result == []
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_prints_all_up_to_date_message(mock_package_finder_cls, mock_link_collector_cls,
                                                      mock_search_scope_cls, _mock_pip_session_cls,
                                                      mock_config_cls, mock_get_env):
@@ -461,12 +461,12 @@ def test_list_outdated_prints_all_up_to_date_message(mock_package_finder_cls, mo
     assert result == []
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_prints_table_with_outdated_packages(mock_package_finder_cls, mock_link_collector_cls,
                                                            mock_search_scope_cls, _mock_pip_session_cls,
                                                            mock_config_cls, mock_get_env):
@@ -519,7 +519,7 @@ def test_list_outdated_prints_table_with_outdated_packages(mock_package_finder_c
     mock_console.status.return_value.__exit__ = Mock(return_value=None)
 
     # Call the function with print_table=True (default)
-    with patch('pipu.internals.Table') as mock_table_cls:
+    with patch('pipu_cli.internals.Table') as mock_table_cls:
         mock_table = Mock()
         mock_table_cls.return_value = mock_table
 
@@ -548,12 +548,12 @@ def test_list_outdated_prints_table_with_outdated_packages(mock_package_finder_c
         assert result[0]["name"] == "outdated-package"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_respects_constraints(mock_package_finder_cls, mock_link_collector_cls,
                                            mock_search_scope_cls, _mock_pip_session_cls,
                                            mock_config_cls, mock_get_env, mock_console):
@@ -610,12 +610,12 @@ def test_list_outdated_respects_constraints(mock_package_finder_cls, mock_link_c
     assert result[0]["constraint"] == "<2.0.0"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_includes_packages_satisfying_constraints(mock_package_finder_cls, mock_link_collector_cls,
                                                               mock_search_scope_cls, _mock_pip_session_cls,
                                                               mock_config_cls, mock_get_env, mock_console):
@@ -756,18 +756,18 @@ def test_format_constraint_for_display_exception_handling():
 
     :returns: None
     """
-    with patch('pipu.internals._check_constraint_satisfaction', side_effect=Exception("Test error")):
+    with patch('pipu_cli.internals._check_constraint_satisfaction', side_effect=Exception("Test error")):
         result = _format_constraint_for_display(">=1.0.0", "1.5.0")
         # Should return yellow when an exception occurs
         assert result == "[yellow]>=1.0.0[/yellow]"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_excludes_prereleases_by_default(mock_package_finder_cls, mock_link_collector_cls,
                                                        mock_search_scope_cls, _mock_pip_session_cls,
                                                        mock_config_cls, mock_get_env, mock_console):
@@ -827,12 +827,12 @@ def test_list_outdated_excludes_prereleases_by_default(mock_package_finder_cls, 
     assert result[0]["latest_version"] == "1.5.0"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_includes_prereleases_with_pre_flag(mock_package_finder_cls, mock_link_collector_cls,
                                                           mock_search_scope_cls, _mock_pip_session_cls,
                                                           mock_config_cls, mock_get_env, mock_console):
@@ -892,12 +892,12 @@ def test_list_outdated_includes_prereleases_with_pre_flag(mock_package_finder_cl
     assert result[0]["latest_version"] == "2.0.0a1"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_fallback_to_prerelease_if_no_stable(mock_package_finder_cls, mock_link_collector_cls,
                                                            mock_search_scope_cls, _mock_pip_session_cls,
                                                            mock_config_cls, mock_get_env, mock_console):
@@ -954,12 +954,12 @@ def test_list_outdated_fallback_to_prerelease_if_no_stable(mock_package_finder_c
     assert result[0]["latest_version"] == "2.0.0a1"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_handles_invalid_version_during_prerelease_filtering(
     mock_package_finder_cls, mock_link_collector_cls,
     mock_search_scope_cls, _mock_pip_session_cls,
@@ -1021,12 +1021,12 @@ def test_list_outdated_handles_invalid_version_during_prerelease_filtering(
     assert result[0]["latest_version"] == "1.5.0"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_detects_different_file_types(mock_package_finder_cls, mock_link_collector_cls,
                                                      mock_search_scope_cls, _mock_pip_session_cls,
                                                      mock_config_cls, mock_get_env, mock_console):
@@ -1104,12 +1104,12 @@ def test_list_outdated_detects_different_file_types(mock_package_finder_cls, moc
     assert sdist_pkg["latest_filetype"] == "sdist"
 
 
-@patch('pipu.internals.get_default_environment')
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.SearchScope')
-@patch('pipu.internals.LinkCollector')
-@patch('pipu.internals.PackageFinder')
+@patch('pipu_cli.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.SearchScope')
+@patch('pipu_cli.internals.LinkCollector')
+@patch('pipu_cli.internals.PackageFinder')
 def test_list_outdated_handles_edge_case_file_types(mock_package_finder_cls, mock_link_collector_cls,
                                                      mock_search_scope_cls, _mock_pip_session_cls,
                                                      mock_config_cls, mock_get_env, mock_console):
@@ -1213,9 +1213,9 @@ def test_list_outdated_handles_edge_case_file_types(mock_package_finder_cls, moc
     assert no_link_pkg["latest_filetype"] == "wheel"  # Fallback
 
 
-@patch('pipu.internals.Configuration')
-@patch('pipu.internals.PipSession')
-@patch('pipu.internals.get_default_environment')
+@patch('pipu_cli.internals.Configuration')
+@patch('pipu_cli.internals.PipSession')
+@patch('pipu_cli.internals.get_default_environment')
 def test_list_outdated_progress_callback(mock_env, mock_session, mock_config_cls):
     """Test that progress callback is called for each package being checked."""
     # Mock console
@@ -1242,7 +1242,7 @@ def test_list_outdated_progress_callback(mock_env, mock_session, mock_config_cls
     mock_session.return_value = mock_session_instance
 
     # Mock no candidates to avoid complex mocking
-    with patch('pipu.internals.PackageFinder') as mock_finder_class:
+    with patch('pipu_cli.internals.PackageFinder') as mock_finder_class:
         mock_finder = MagicMock()
         mock_finder.find_all_candidates.return_value = []
         mock_finder_class.create.return_value = mock_finder
@@ -1271,7 +1271,7 @@ class TestCallWithTimeoutCompletion:
     def test_timeout_uses_completion_event(self):
         """Test that timeout detection uses completion Event instead of thread.is_alive()."""
         import time
-        from pipu.internals import _call_with_timeout
+        from pipu_cli.internals import _call_with_timeout
 
         def slow_function():
             time.sleep(0.5)
@@ -1285,7 +1285,7 @@ class TestCallWithTimeoutCompletion:
 
     def test_completion_event_set_on_success(self):
         """Test that completion Event is set when function completes successfully."""
-        from pipu.internals import _call_with_timeout
+        from pipu_cli.internals import _call_with_timeout
 
         def fast_function():
             return "success"
@@ -1295,7 +1295,7 @@ class TestCallWithTimeoutCompletion:
 
     def test_completion_event_set_on_exception(self):
         """Test that completion Event is set even when function raises exception."""
-        from pipu.internals import _call_with_timeout
+        from pipu_cli.internals import _call_with_timeout
 
         def failing_function():
             raise ValueError("test error")
@@ -1307,7 +1307,7 @@ class TestCallWithTimeoutCompletion:
 
     def test_timeout_with_args_and_kwargs(self):
         """Test that _call_with_timeout properly passes args and kwargs."""
-        from pipu.internals import _call_with_timeout
+        from pipu_cli.internals import _call_with_timeout
 
         def function_with_params(a, b, c=None):
             return f"{a}-{b}-{c}"
@@ -1321,42 +1321,42 @@ class TestGetConstraintColorUtility:
 
     def test_color_with_no_constraint(self):
         """Test that no constraint returns green."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("2.0.0", None)
         assert result == "green"
 
     def test_color_with_satisfied_constraint(self):
         """Test that satisfied constraint returns green."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("2.0.0", ">=2.0.0")
         assert result == "green"
 
     def test_color_with_violated_constraint(self):
         """Test that violated constraint returns red."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("3.0.0", "<3.0.0")
         assert result == "red"
 
     def test_color_with_complex_constraint_satisfied(self):
         """Test complex satisfied constraint returns green."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("2.5.0", ">=2.0.0,<3.0.0")
         assert result == "green"
 
     def test_color_with_complex_constraint_violated(self):
         """Test complex violated constraint returns red."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("3.5.0", ">=2.0.0,<3.0.0")
         assert result == "red"
 
     def test_color_with_empty_string_constraint(self):
         """Test that empty string constraint is treated as no constraint."""
-        from pipu.internals import get_constraint_color
+        from pipu_cli.internals import get_constraint_color
 
         result = get_constraint_color("2.0.0", "")
         assert result == "green"
@@ -1367,28 +1367,28 @@ class TestFormatInvalidWhenDisplay:
 
     def test_format_with_triggers(self):
         """Test formatting with trigger packages returns yellow text."""
-        from pipu.internals import format_invalid_when_display
+        from pipu_cli.internals import format_invalid_when_display
 
         result = format_invalid_when_display("package-a, package-b")
         assert result == "[yellow]package-a, package-b[/yellow]"
 
     def test_format_with_none(self):
         """Test formatting with None returns dim dash."""
-        from pipu.internals import format_invalid_when_display
+        from pipu_cli.internals import format_invalid_when_display
 
         result = format_invalid_when_display(None)
         assert result == "[dim]-[/dim]"
 
     def test_format_with_empty_string(self):
         """Test formatting with empty string returns dim dash."""
-        from pipu.internals import format_invalid_when_display
+        from pipu_cli.internals import format_invalid_when_display
 
         result = format_invalid_when_display("")
         assert result == "[dim]-[/dim]"
 
     def test_format_with_single_trigger(self):
         """Test formatting with single trigger package."""
-        from pipu.internals import format_invalid_when_display
+        from pipu_cli.internals import format_invalid_when_display
 
         result = format_invalid_when_display("django")
         assert result == "[yellow]django[/yellow]"

@@ -21,7 +21,7 @@ def find_css_definitions() -> List[Tuple[str, str, str]]:
     :returns: List of (file_path, class_name, css_content) tuples
     """
     css_definitions = []
-    project_root = Path(__file__).parent.parent / "pipu"
+    project_root = Path(__file__).parent.parent / "pipu_cli"
 
     for py_file in project_root.rglob("*.py"):
         try:
@@ -125,7 +125,7 @@ def test_delete_constraint_screen_css():
     CSS parsing errors.
     """
     # Test that we can create the screen without CSS errors
-    from pipu.ui.modal_dialogs import DeleteConstraintConfirmScreen
+    from pipu_cli.ui.modal_dialogs import DeleteConstraintConfirmScreen
 
     try:
         screen = DeleteConstraintConfirmScreen("test_package", ">=1.0.0")
@@ -146,7 +146,7 @@ def test_all_modal_screens_css():
 
     This ensures all modal dialogs can be created without CSS parsing errors.
     """
-    from pipu.ui.modal_dialogs import (
+    from pipu_cli.ui.modal_dialogs import (
         ConstraintInputScreen,
         HelpScreen,
         DeleteConstraintConfirmScreen,
@@ -251,7 +251,7 @@ def test_modal_button_visibility():
     This ensures buttons have background colors and text colors specified
     to prevent invisible button text issues.
     """
-    from pipu.ui.modal_dialogs import (
+    from pipu_cli.ui.modal_dialogs import (
         DeleteConstraintConfirmScreen,
         RemoveAllConstraintsConfirmScreen,
         UninstallConfirmScreen

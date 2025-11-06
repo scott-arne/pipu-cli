@@ -3,7 +3,7 @@ import tempfile
 from unittest.mock import Mock, patch, MagicMock
 from click.testing import CliRunner
 from pathlib import Path
-from pipu.cli import cli
+from pipu_cli.cli import cli
 
 
 def test_update_command_no_outdated_packages():
@@ -14,8 +14,8 @@ def test_update_command_no_outdated_packages():
     """
     runner = CliRunner()
     
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=[]):
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=[]):
             result = runner.invoke(cli, ['update'])
     
     assert result.exit_code == 0
@@ -40,8 +40,8 @@ def test_update_command_with_outdated_packages_user_declines():
         }
     ]
     
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages):
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
             # Simulate user declining the update
             result = runner.invoke(cli, ['update'], input='n\n')
     
@@ -64,8 +64,8 @@ def test_constrain_command_with_invalidation_triggers():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0', 
                     '--invalidates-when', 'other>=1.0.0',
@@ -90,8 +90,8 @@ def test_constrain_command_invalidation_triggers_validation_error():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0', 
                     '--invalidates-when', 'invalid-trigger-without-version'
@@ -172,8 +172,8 @@ def test_constrain_command_removes_invalidation_triggers():
             f.write('    django>=4.0.0\n')
             f.write('constraint_invalid_when = flask>=2.0.0:other>=1.0.0,django>=4.0.0:another==2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['constrain', '--remove', 'flask'])
         
         assert result.exit_code == 0
@@ -201,7 +201,7 @@ def test_constrain_command_remove_all_invalidation_triggers():
             f.write('    django>=4.0.0\n')
             f.write('constraint_invalid_when = flask>=2.0.0:other>=1.0.0,django>=4.0.0:another==2.0.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             result = runner.invoke(cli, ['constrain', '--remove-all', '--yes'])
         
         assert result.exit_code == 0
@@ -224,8 +224,8 @@ def test_constrain_command_multiple_constraints_with_triggers():
         config_path = Path(temp_dir) / 'pip.conf'
         
         # First, add one constraint with triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result1 = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0', 
                     '--invalidates-when', 'other>=1.0.0'
@@ -234,8 +234,8 @@ def test_constrain_command_multiple_constraints_with_triggers():
         assert result1.exit_code == 0
         
         # Then add another constraint with different triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result2 = runner.invoke(cli, [
                     'constrain', 'django>=4.0.0', 
                     '--invalidates-when', 'third>=3.0.0'
@@ -271,8 +271,8 @@ def test_constrain_command_merge_triggers_existing_constraint():
         config_path = Path(temp_dir) / 'pip.conf'
         
         # First, add constraint with initial triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result1 = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0', 
                     '--invalidates-when', 'other>=1.0.0',
@@ -282,8 +282,8 @@ def test_constrain_command_merge_triggers_existing_constraint():
         assert result1.exit_code == 0
         
         # Then add the same constraint (no change) with additional triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result2 = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0', 
                     '--invalidates-when', 'third>=3.0.0'
@@ -315,7 +315,7 @@ def test_constrain_command_with_environment_specific_triggers():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             result = runner.invoke(cli, [
                 'constrain', 'flask<2.0.0', 
                 '--env', 'production',
@@ -349,8 +349,8 @@ def test_constrain_command_complex_trigger_scenarios():
         config_path = Path(temp_dir) / 'pip.conf'
         
         # Test with complex version constraints and multiple triggers
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, [
                     'constrain', 'complex-package>=1.0.0,<2.0.0,!=1.5.0', 
                     '--invalidates-when', 'trigger1>=1.0.0',
@@ -382,10 +382,10 @@ def test_constrain_command_io_error_handling():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
         mock_path.return_value = Path('/nonexistent/path/pip.conf')
         
-        with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
             result = runner.invoke(cli, [
                 'constrain', 'flask<2.0.0', 
                 '--invalidates-when', 'other>=1.0.0'
@@ -429,9 +429,9 @@ def test_update_command_with_yes_flag():
         }
     ]
     
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages):
-            with patch('pipu.cli._install_packages', return_value=0) as mock_install:
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
+            with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
                 
                 # Verify the correct package spec was passed to install
@@ -464,9 +464,9 @@ def test_update_command_with_constraints():
         }
     ]
 
-    with patch('pipu.cli.read_constraints', return_value={"constrained-package": "<2.0.0"}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages):
-            with patch('pipu.cli._install_packages', return_value=0) as mock_install:
+    with patch('pipu_cli.cli.read_constraints', return_value={"constrained-package": "<2.0.0"}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
+            with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
 
                 # Check that the constraint was used instead of pinning to latest_version
@@ -504,9 +504,9 @@ def test_update_command_with_constraint_prevents_dependency_conflict():
         }
     ]
 
-    with patch('pipu.cli.read_constraints', return_value={"deprecated": "==1.2.10", "wrapt": "<2"}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages):
-            with patch('pipu.cli._install_packages', return_value=0) as mock_install:
+    with patch('pipu_cli.cli.read_constraints', return_value={"deprecated": "==1.2.10", "wrapt": "<2"}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
+            with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
 
                 # Verify that constraints were applied, not latest versions
@@ -534,9 +534,9 @@ def test_update_command_install_failure():
         }
     ]
     
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages):
-            with patch('pipu.cli._install_packages', return_value=1):  # Failed installation
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages):
+            with patch('pipu_cli.cli._install_packages', return_value=1):  # Failed installation
                 result = runner.invoke(cli, ['update', '--yes'])
     
     assert result.exit_code == 1
@@ -561,9 +561,9 @@ def test_update_command_with_pre_flag():
         }
     ]
     
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages) as mock_list:
-            with patch('pipu.cli._install_packages', return_value=0):
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages) as mock_list:
+            with patch('pipu_cli.cli._install_packages', return_value=0):
                 result = runner.invoke(cli, ['update', '--pre', '--yes'])
                 
                 # Verify that list_outdated was called with pre=True
@@ -582,7 +582,7 @@ def test_update_command_exception_handling():
     """
     runner = CliRunner()
     
-    with patch('pipu.cli.read_constraints', side_effect=Exception("Test error")):
+    with patch('pipu_cli.cli.read_constraints', side_effect=Exception("Test error")):
         result = runner.invoke(cli, ['update'])
     
     assert result.exit_code == 1
@@ -607,11 +607,11 @@ def test_interactive_package_selection_tui_integration():
     ]
 
     # Mock the entire interactive_package_selection function to avoid heavy TUI imports
-    with patch('pipu.ui.interactive_package_selection') as mock_selection:
+    with patch('pipu_cli.ui.interactive_package_selection') as mock_selection:
         mock_selection.return_value = outdated_packages
 
         # Import after mocking to avoid loading heavy dependencies
-        from pipu.ui import interactive_package_selection
+        from pipu_cli.ui import interactive_package_selection
         result = interactive_package_selection(outdated_packages)
 
     assert result == outdated_packages
@@ -636,10 +636,10 @@ def test_interactive_package_selection_tui_cancelled():
     ]
 
     # Mock the function to return empty list (simulating user cancellation)
-    with patch('pipu.ui.interactive_package_selection') as mock_selection:
+    with patch('pipu_cli.ui.interactive_package_selection') as mock_selection:
         mock_selection.return_value = []
 
-        from pipu.ui import interactive_package_selection
+        from pipu_cli.ui import interactive_package_selection
         result = interactive_package_selection(outdated_packages)
 
     assert result == []
@@ -654,10 +654,10 @@ def test_interactive_package_selection_tui_empty_list():
     """
 
     # Mock the function to return empty list
-    with patch('pipu.ui.interactive_package_selection') as mock_selection:
+    with patch('pipu_cli.ui.interactive_package_selection') as mock_selection:
         mock_selection.return_value = []
 
-        from pipu.ui import interactive_package_selection
+        from pipu_cli.ui import interactive_package_selection
         result = interactive_package_selection([])
 
     assert result == []
@@ -677,8 +677,8 @@ def test_constrain_command_basic_constraint():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['constrain', 'requests>=2.25.0'])
             
                 assert result.exit_code == 0
@@ -698,8 +698,8 @@ def test_constrain_command_multiple_constraints():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['constrain', 'requests>=2.25.0', 'numpy>=1.20.0'])
     
     assert result.exit_code == 0
@@ -718,8 +718,8 @@ def test_constrain_command_with_environment():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value='production'):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value='production'):
                 result = runner.invoke(cli, ['constrain', 'django>=4.1.0', '--env', 'production'])
     
     assert result.exit_code == 0
@@ -734,7 +734,7 @@ def test_constrain_command_list_option():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_constraints') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_constraints') as mock_list:
         mock_list.return_value = {
             'global': {'requests': '>=2.25.0', 'numpy': '>=1.20.0'},
             'production': {'django': '>=4.1.0'}
@@ -758,7 +758,7 @@ def test_constrain_command_list_specific_environment():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_constraints') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_constraints') as mock_list:
         mock_list.return_value = {'production': {'django': '>=4.1.0'}}
         
         result = runner.invoke(cli, ['constrain', '--list', '--env', 'production'])
@@ -776,7 +776,7 @@ def test_constrain_command_list_no_constraints():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_constraints') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_constraints') as mock_list:
         mock_list.return_value = {}
         
         result = runner.invoke(cli, ['constrain', '--list'])
@@ -793,7 +793,7 @@ def test_constrain_command_remove_option():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_constraints_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_constraints_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), {'requests': '>=2.25.0'}, {})
         
         result = runner.invoke(cli, ['constrain', '--remove', 'requests'])
@@ -812,7 +812,7 @@ def test_constrain_command_remove_multiple_packages():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_constraints_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_constraints_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), {
             'requests': '>=2.25.0',
             'numpy': '>=1.20.0'
@@ -834,7 +834,7 @@ def test_constrain_command_remove_with_environment():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_constraints_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_constraints_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), {'django': '>=4.1.0'}, {})
         
         result = runner.invoke(cli, ['constrain', '--remove', 'django', '--env', 'production'])
@@ -894,7 +894,7 @@ def test_constrain_command_remove_nonexistent_package():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_constraints_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_constraints_from_config') as mock_remove:
         mock_remove.side_effect = ValueError("None of the specified packages have constraints")
         
         result = runner.invoke(cli, ['constrain', '--remove', 'nonexistent'])
@@ -911,8 +911,8 @@ def test_constrain_command_invalid_constraint_spec():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.parse_requirement_line') as mock_parse:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.parse_requirement_line') as mock_parse:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_parse.return_value = None  # Invalid constraint
             
@@ -939,8 +939,8 @@ def test_constrain_command_no_changes_made():
             f.write('constraints = \n')
             f.write('    requests>=2.25.0\n')
         
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['constrain', 'requests>=2.25.0'])
     
     assert result.exit_code == 0
@@ -955,8 +955,8 @@ def test_constrain_command_file_write_error():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_constraints_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_constraints_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.side_effect = IOError("Failed to write config file")
             
@@ -974,7 +974,7 @@ def test_constrain_command_unexpected_error():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
         mock_path.side_effect = Exception("Unexpected error")
         
         result = runner.invoke(cli, ['constrain', 'requests>=2.25.0'])
@@ -993,8 +993,8 @@ def test_ignore_command_basic_ignore():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.return_value = (Path('/fake/path/pip.conf'), {'requests': 'added'})
             
@@ -1014,8 +1014,8 @@ def test_ignore_command_multiple_packages():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.return_value = (Path('/fake/path/pip.conf'), {
                 'requests': 'added',
@@ -1039,8 +1039,8 @@ def test_ignore_command_with_environment():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.return_value = (Path('/fake/path/pip.conf'), {'django': 'added'})
             
@@ -1058,7 +1058,7 @@ def test_ignore_command_list_option():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_ignores') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_ignores') as mock_list:
         mock_list.return_value = {
             'global': ['requests', 'numpy'],
             'production': ['django', 'flask']
@@ -1084,7 +1084,7 @@ def test_ignore_command_list_specific_environment():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_ignores') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_ignores') as mock_list:
         mock_list.return_value = {'production': ['django', 'flask']}
         
         result = runner.invoke(cli, ['ignore', '--list', '--env', 'production'])
@@ -1103,7 +1103,7 @@ def test_ignore_command_list_no_ignores():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.list_all_ignores') as mock_list:
+    with patch('pipu_cli.package_constraints.list_all_ignores') as mock_list:
         mock_list.return_value = {}
         
         result = runner.invoke(cli, ['ignore', '--list'])
@@ -1120,7 +1120,7 @@ def test_ignore_command_remove_option():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_ignores_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_ignores_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), ['requests'])
         
         result = runner.invoke(cli, ['ignore', '--remove', 'requests'])
@@ -1139,7 +1139,7 @@ def test_ignore_command_remove_multiple_packages():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_ignores_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_ignores_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), ['requests', 'numpy'])
         
         result = runner.invoke(cli, ['ignore', '--remove', 'requests', 'numpy'])
@@ -1158,7 +1158,7 @@ def test_ignore_command_remove_with_environment():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_ignores_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_ignores_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), ['django'])
         
         result = runner.invoke(cli, ['ignore', '--remove', 'django', '--env', 'production'])
@@ -1217,7 +1217,7 @@ def test_ignore_command_remove_nonexistent_package():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_ignores_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_ignores_from_config') as mock_remove:
         mock_remove.side_effect = ValueError("None of the specified packages are ignored")
         
         result = runner.invoke(cli, ['ignore', '--remove', 'nonexistent'])
@@ -1234,8 +1234,8 @@ def test_ignore_command_already_ignored():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.return_value = (Path('/fake/path/pip.conf'), {
                 'requests': 'already_exists',
@@ -1257,8 +1257,8 @@ def test_ignore_command_no_changes_made():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.return_value = (Path('/fake/path/pip.conf'), {'requests': 'already_exists'})
             
@@ -1276,8 +1276,8 @@ def test_ignore_command_file_write_error():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.add_ignores_to_config') as mock_add:
-        with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.add_ignores_to_config') as mock_add:
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
             mock_path.return_value = Path('/fake/path/pip.conf')
             mock_add.side_effect = IOError("Failed to write config file")
             
@@ -1295,7 +1295,7 @@ def test_ignore_command_unexpected_error():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.get_recommended_pip_config_path') as mock_path:
+    with patch('pipu_cli.package_constraints.get_recommended_pip_config_path') as mock_path:
         mock_path.side_effect = Exception("Unexpected error")
         
         result = runner.invoke(cli, ['ignore', 'requests'])
@@ -1312,7 +1312,7 @@ def test_ignore_command_remove_no_packages_removed():
     """
     runner = CliRunner()
     
-    with patch('pipu.package_constraints.remove_ignores_from_config') as mock_remove:
+    with patch('pipu_cli.package_constraints.remove_ignores_from_config') as mock_remove:
         mock_remove.return_value = (Path('/fake/path/pip.conf'), [])  # No packages removed
         
         result = runner.invoke(cli, ['ignore', '--remove', 'requests'])
@@ -1332,9 +1332,9 @@ def test_list_command_with_pre_flag():
     """
     runner = CliRunner()
 
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.read_ignores', return_value=set()):
-            with patch('pipu.cli.list_outdated', return_value=[]) as mock_list:
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.read_ignores', return_value=set()):
+            with patch('pipu_cli.cli.list_outdated', return_value=[]) as mock_list:
                 result = runner.invoke(cli, ['list', '--pre'])
 
                 assert result.exit_code == 0
@@ -1352,9 +1352,9 @@ def test_list_command_without_pre_flag():
     """
     runner = CliRunner()
 
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.read_ignores', return_value=set()):
-            with patch('pipu.cli.list_outdated', return_value=[]) as mock_list:
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.read_ignores', return_value=set()):
+            with patch('pipu_cli.cli.list_outdated', return_value=[]) as mock_list:
                 result = runner.invoke(cli, ['list'])
 
                 assert result.exit_code == 0
@@ -1372,7 +1372,7 @@ def test_cli_main_command_launches_tui():
     """
     runner = CliRunner()
 
-    with patch('pipu.cli.launch_tui') as mock_launch_tui:
+    with patch('pipu_cli.cli.launch_tui') as mock_launch_tui:
         result = runner.invoke(cli, [])
 
         # Should launch TUI when no subcommand provided
@@ -1416,9 +1416,9 @@ def test_update_command_with_pre_and_yes_flags():
         }
     ]
 
-    with patch('pipu.cli.read_constraints', return_value={}):
-        with patch('pipu.cli.list_outdated', return_value=outdated_packages) as mock_list:
-            with patch('pipu.cli._install_packages', return_value=0) as mock_install:
+    with patch('pipu_cli.cli.read_constraints', return_value={}):
+        with patch('pipu_cli.cli.list_outdated', return_value=outdated_packages) as mock_list:
+            with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--pre', '--yes'])
 
                 assert result.exit_code == 0
@@ -1440,8 +1440,8 @@ def test_constrain_command_with_multiple_invalidation_triggers():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, [
                     'constrain', 'flask<2.0.0',
                     '--invalidates-when', 'requests>=3.0.0',
@@ -1465,8 +1465,8 @@ def test_ignore_command_basic_functionality():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 result = runner.invoke(cli, ['ignore', 'test-package'])
 
         assert result.exit_code == 0
@@ -1484,7 +1484,7 @@ def test_ignore_command_list_functionality():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / 'pip.conf'
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             result = runner.invoke(cli, ['ignore', '--list'])
 
         assert result.exit_code == 0
@@ -1503,8 +1503,8 @@ def test_constrain_command_remove_all_functionality():
         config_path = Path(temp_dir) / 'pip.conf'
 
         # First add a constraint
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
-            with patch('pipu.package_constraints.get_current_environment_name', return_value=None):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+            with patch('pipu_cli.package_constraints.get_current_environment_name', return_value=None):
                 runner.invoke(cli, ['constrain', 'requests>=2.0.0'])
 
                 # Then remove all constraints
@@ -1528,7 +1528,7 @@ def test_error_handling_with_invalid_pip_config():
         with open(config_path, 'w') as f:
             f.write("invalid config content\n[missing closing bracket\n")
 
-        with patch('pipu.package_constraints.get_recommended_pip_config_path', return_value=config_path):
+        with patch('pipu_cli.package_constraints.get_recommended_pip_config_path', return_value=config_path):
             result = runner.invoke(cli, ['constrain', '--list'])
 
         # Should handle invalid config gracefully
@@ -1544,7 +1544,7 @@ def test_tui_launch_error_handling():
     """
     runner = CliRunner()
 
-    with patch('pipu.ui.main_tui_app', side_effect=Exception("TUI launch failed")):
+    with patch('pipu_cli.ui.main_tui_app', side_effect=Exception("TUI launch failed")):
         result = runner.invoke(cli, [])
 
         # Should handle TUI launch failure gracefully
@@ -1560,11 +1560,11 @@ def test_cleanup_invalid_constraints_on_commands():
     """
     runner = CliRunner()
 
-    with patch('pipu.package_constraints.cleanup_invalid_constraints_and_triggers') as mock_cleanup:
+    with patch('pipu_cli.package_constraints.cleanup_invalid_constraints_and_triggers') as mock_cleanup:
         mock_cleanup.return_value = (None, None, "Cleaned up 2 invalid constraints")
 
-        with patch('pipu.cli.read_constraints', return_value={}):
-            with patch('pipu.cli.list_outdated', return_value=[]):
+        with patch('pipu_cli.cli.read_constraints', return_value={}):
+            with patch('pipu_cli.cli.list_outdated', return_value=[]):
                 # Should show cleanup message
                 with patch('builtins.input', return_value=''):  # Skip wait
                     result = runner.invoke(cli, ['list'])

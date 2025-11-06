@@ -14,7 +14,7 @@ class TestBaseConfirmationScreen:
 
     def test_initialization_with_defaults(self):
         """Test BaseConfirmationScreen initialization with default parameters."""
-        from pipu.ui.modal_dialogs import BaseConfirmationScreen
+        from pipu_cli.ui.modal_dialogs import BaseConfirmationScreen
 
         screen = BaseConfirmationScreen(message="Test message")
         assert screen.message == "Test message"
@@ -25,7 +25,7 @@ class TestBaseConfirmationScreen:
 
     def test_initialization_with_custom_parameters(self):
         """Test BaseConfirmationScreen initialization with custom parameters."""
-        from pipu.ui.modal_dialogs import BaseConfirmationScreen
+        from pipu_cli.ui.modal_dialogs import BaseConfirmationScreen
 
         screen = BaseConfirmationScreen(
             message="Custom message",
@@ -42,7 +42,7 @@ class TestBaseConfirmationScreen:
 
     def test_compose_creates_proper_widgets(self):
         """Test that compose() creates the proper widget structure."""
-        from pipu.ui.modal_dialogs import BaseConfirmationScreen
+        from pipu_cli.ui.modal_dialogs import BaseConfirmationScreen
 
         screen = BaseConfirmationScreen(message="Test message")
         widgets = list(screen.compose())
@@ -54,7 +54,7 @@ class TestBaseConfirmationScreen:
 
     def test_css_includes_button_styling(self):
         """Test that CSS includes required button styling."""
-        from pipu.ui.modal_dialogs import BaseConfirmationScreen
+        from pipu_cli.ui.modal_dialogs import BaseConfirmationScreen
 
         screen = BaseConfirmationScreen(message="Test")
         css = screen.CSS
@@ -74,21 +74,21 @@ class TestUninstallConfirmScreenRefactored:
 
     def test_inherits_from_base_confirmation_screen(self):
         """Test that UninstallConfirmScreen properly inherits from BaseConfirmationScreen."""
-        from pipu.ui.modal_dialogs import UninstallConfirmScreen, BaseConfirmationScreen
+        from pipu_cli.ui.modal_dialogs import UninstallConfirmScreen, BaseConfirmationScreen
 
         screen = UninstallConfirmScreen("test-package")
         assert isinstance(screen, BaseConfirmationScreen)
 
     def test_message_contains_package_name(self):
         """Test that the message contains the package name."""
-        from pipu.ui.modal_dialogs import UninstallConfirmScreen
+        from pipu_cli.ui.modal_dialogs import UninstallConfirmScreen
 
         screen = UninstallConfirmScreen("my-package")
         assert "my-package" in screen.message
 
     def test_uses_error_variant_for_confirm(self):
         """Test that confirm button uses error variant for uninstall."""
-        from pipu.ui.modal_dialogs import UninstallConfirmScreen
+        from pipu_cli.ui.modal_dialogs import UninstallConfirmScreen
 
         screen = UninstallConfirmScreen("test-package")
         assert screen.confirm_variant == "error"
