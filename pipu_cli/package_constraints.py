@@ -155,22 +155,21 @@ def validate_existing_constraints_and_triggers(env_name: Optional[str] = None) -
                         invalid_constraint_packages.append(package_name)
 
         # Check invalidation trigger packages
-        if config.has_option(section_name, 'constraint_invalid_when'):
-            triggers_value = config.get(section_name, 'constraint_invalid_when')
-            if triggers_value.strip():
-                all_triggers = parse_invalidation_triggers_storage(triggers_value)
-                for constrained_package, triggers in all_triggers.items():
-                    invalid_triggers_for_package = []
-                    for trigger in triggers:
-                        parsed = parse_invalidation_trigger(trigger)
-                        if parsed:
-                            from packaging.utils import canonicalize_name
-                            trigger_package = canonicalize_name(parsed['name'])
-                            if trigger_package not in installed_packages:
-                                invalid_triggers_for_package.append(trigger_package)
+        triggers_value = _get_constraint_invalid_when(config, section_name)
+        if triggers_value and triggers_value.strip():
+            all_triggers = parse_invalidation_triggers_storage(triggers_value)
+            for constrained_package, triggers in all_triggers.items():
+                invalid_triggers_for_package = []
+                for trigger in triggers:
+                    parsed = parse_invalidation_trigger(trigger)
+                    if parsed:
+                        from packaging.utils import canonicalize_name
+                        trigger_package = canonicalize_name(parsed['name'])
+                        if trigger_package not in installed_packages:
+                            invalid_triggers_for_package.append(trigger_package)
 
-                    if invalid_triggers_for_package:
-                        invalid_trigger_packages[constrained_package] = invalid_triggers_for_package
+                if invalid_triggers_for_package:
+                    invalid_trigger_packages[constrained_package] = invalid_triggers_for_package
 
     except (OSError, ValueError, KeyError) as e:
         # If validation fails, log and return empty results to avoid disrupting the app
@@ -209,8 +208,10 @@ def cleanup_invalid_constraints_and_triggers(env_name: Optional[str] = None) -> 
             section_name = _get_section_name(env_name)
             config, config_path = _load_config(create_if_missing=False)
 
-            if config.has_section(section_name) and config.has_option(section_name, 'constraint_invalid_when'):
-                triggers_value = config.get(section_name, 'constraint_invalid_when')
+            if config.has_section(section_name):
+                triggers_value = _get_constraint_invalid_when(config, section_name)
+                if not triggers_value:
+                    return
                 all_triggers = parse_invalidation_triggers_storage(triggers_value)
 
                 # Remove invalid triggers while keeping valid ones
@@ -249,16 +250,12 @@ def cleanup_invalid_constraints_and_triggers(env_name: Optional[str] = None) -> 
                             if formatted_entry:
                                 trigger_entries.append(formatted_entry)
 
-                    if trigger_entries:
-                        new_triggers_value = ','.join(trigger_entries)
-                        config.set(section_name, 'constraint_invalid_when', new_triggers_value)
-                    else:
-                        config.remove_option(section_name, 'constraint_invalid_when')
-
+                    new_triggers_value = ','.join(trigger_entries) if trigger_entries else ''
+                    _set_constraint_invalid_when(config, section_name, new_triggers_value)
                     _write_config_file(config, config_path)
                 else:
                     # No valid triggers left, remove the option
-                    config.remove_option(section_name, 'constraint_invalid_when')
+                    _set_constraint_invalid_when(config, section_name, '')
                     _write_config_file(config, config_path)
 
     except (OSError, configparser.Error) as e:
@@ -324,6 +321,33 @@ def _load_config(create_if_missing: bool = False) -> Tuple[configparser.ConfigPa
     return config, config_path
 
 
+def _get_constraint_invalid_when(config: configparser.ConfigParser, section_name: str) -> Optional[str]:
+    """
+    Get constraint_invalid_when value from config with consistent pattern.
+
+    :param config: ConfigParser instance
+    :param section_name: Name of section to read from
+    :returns: Constraint invalid when value or None if not present
+    """
+    if config.has_option(section_name, 'constraint_invalid_when'):
+        return config.get(section_name, 'constraint_invalid_when')
+    return None
+
+
+def _set_constraint_invalid_when(config: configparser.ConfigParser, section_name: str, value: str) -> None:
+    """
+    Set constraint_invalid_when value in config.
+
+    :param config: ConfigParser instance
+    :param section_name: Name of section to write to
+    :param value: Value to set (will remove option if empty)
+    """
+    if value and value.strip():
+        config.set(section_name, 'constraint_invalid_when', value)
+    elif config.has_option(section_name, 'constraint_invalid_when'):
+        config.remove_option(section_name, 'constraint_invalid_when')
+
+
 def _ensure_section_exists(config: configparser.ConfigParser, section_name: str) -> None:
     """
     Ensure a config section exists, creating it if necessary.
@@ -385,11 +409,8 @@ def _cleanup_invalidation_triggers(config: configparser.ConfigParser, section_na
     """
     removed_triggers = {}
 
-    if not config.has_option(section_name, 'constraint_invalid_when'):
-        return removed_triggers
-
-    triggers_value = config.get(section_name, 'constraint_invalid_when')
-    if not triggers_value.strip():
+    triggers_value = _get_constraint_invalid_when(config, section_name)
+    if not triggers_value or not triggers_value.strip():
         return removed_triggers
 
     # Parse existing triggers
@@ -416,13 +437,10 @@ def _cleanup_invalidation_triggers(config: configparser.ConfigParser, section_na
                     if formatted_entry:
                         trigger_entries.append(formatted_entry)
 
-        if trigger_entries:
-            new_triggers_value = ','.join(trigger_entries)
-            config.set(section_name, 'constraint_invalid_when', new_triggers_value)
-        else:
-            config.remove_option(section_name, 'constraint_invalid_when')
+        new_triggers_value = ','.join(trigger_entries) if trigger_entries else ''
     else:
-        config.remove_option(section_name, 'constraint_invalid_when')
+        new_triggers_value = ''
+    _set_constraint_invalid_when(config, section_name, new_triggers_value)
 
     return removed_triggers
 
@@ -1158,13 +1176,12 @@ def remove_all_constraints_from_config(env_name: Optional[str] = None) -> Tuple[
             removed_constraints[environment] = existing_constraints
 
             # Clean up all invalidation triggers for this environment and capture what was removed
-            if config.has_option(environment, 'constraint_invalid_when'):
-                triggers_value = config.get(environment, 'constraint_invalid_when')
-                if triggers_value.strip():
-                    existing_triggers = parse_invalidation_triggers_storage(triggers_value)
-                    if existing_triggers:
-                        removed_triggers[environment] = existing_triggers
-                config.remove_option(environment, 'constraint_invalid_when')
+            triggers_value = _get_constraint_invalid_when(config, environment)
+            if triggers_value and triggers_value.strip():
+                existing_triggers = parse_invalidation_triggers_storage(triggers_value)
+                if existing_triggers:
+                    removed_triggers[environment] = existing_triggers
+            _set_constraint_invalid_when(config, environment, '')
 
             # Remove the constraints option
             config.remove_option(environment, 'constraints')
@@ -1525,9 +1542,9 @@ def read_invalidation_triggers() -> Dict[str, List[str]]:
         section_name = _get_section_name(None)
         config, _ = _load_config(create_if_missing=False)
 
-        if config.has_section(section_name) and config.has_option(section_name, 'constraint_invalid_when'):
-            triggers_value = config.get(section_name, 'constraint_invalid_when')
-            if triggers_value.strip():
+        if config.has_section(section_name):
+            triggers_value = _get_constraint_invalid_when(config, section_name)
+            if triggers_value and triggers_value.strip():
                 triggers_map = parse_invalidation_triggers_storage(triggers_value)
 
     except Exception:
@@ -1942,8 +1959,8 @@ def apply_auto_constraints(env_name: Optional[str] = None, dry_run: bool = False
 
     # Get existing triggers
     existing_triggers_storage = {}
-    if config.has_option(section_name, 'constraint_invalid_when'):
-        existing_value = config.get(section_name, 'constraint_invalid_when')
+    existing_value = _get_constraint_invalid_when(config, section_name)
+    if existing_value:
         existing_triggers_storage = parse_invalidation_triggers_storage(existing_value)
 
     # Get current constraints for formatting
@@ -1978,9 +1995,8 @@ def apply_auto_constraints(env_name: Optional[str] = None, dry_run: bool = False
                 if formatted_entry:
                     trigger_entries.append(formatted_entry)
 
-        if trigger_entries:
-            triggers_value = ','.join(trigger_entries)
-            config.set(section_name, 'constraint_invalid_when', triggers_value)
+        triggers_value = ','.join(trigger_entries) if trigger_entries else ''
+        _set_constraint_invalid_when(config, section_name, triggers_value)
 
     # Write the updated config file
     _write_config_file(config, config_path)
@@ -2019,11 +2035,8 @@ def check_constraint_invalidations(packages_to_install: List[str], env_name: Opt
                 current_constraints = parse_inline_constraints(constraints_value)
 
         # Get invalidation triggers
-        if not config.has_option(section_name, 'constraint_invalid_when'):
-            return invalidated_constraints
-
-        triggers_value = config.get(section_name, 'constraint_invalid_when')
-        if not triggers_value.strip():
+        triggers_value = _get_constraint_invalid_when(config, section_name)
+        if not triggers_value or not triggers_value.strip():
             return invalidated_constraints
 
         # Parse triggers
@@ -2150,11 +2163,8 @@ def evaluate_invalidation_triggers(env_name: Optional[str] = None) -> Tuple[List
                 current_constraints = parse_inline_constraints(constraints_value)
 
         # Get invalidation triggers
-        if not config.has_option(section_name, 'constraint_invalid_when'):
-            return constraints_to_remove, trigger_details
-
-        triggers_value = config.get(section_name, 'constraint_invalid_when')
-        if not triggers_value.strip():
+        triggers_value = _get_constraint_invalid_when(config, section_name)
+        if not triggers_value or not triggers_value.strip():
             return constraints_to_remove, trigger_details
 
         # Parse triggers

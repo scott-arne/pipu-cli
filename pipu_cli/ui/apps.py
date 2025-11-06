@@ -23,7 +23,13 @@ from textual.errors import NoWidget
 from textual.coordinate import Coordinate
 from rich.text import Text
 from ..internals import _check_constraint_satisfaction, list_outdated, get_constraint_color
-from ..package_constraints import add_constraints_to_config, read_constraints, read_ignores
+from ..package_constraints import (
+    add_constraints_to_config,
+    read_constraints,
+    read_ignores,
+    _get_constraint_invalid_when,
+    _set_constraint_invalid_when
+)
 from pip._internal.metadata import get_default_environment
 
 # Import modular components
@@ -422,7 +428,7 @@ class MainTUIApp(App):
                 table.add_column("Latest", width=12)
                 table.add_column("Type", width=8)
                 table.add_column("Constraint", width=20)
-                table.add_column("Invalid When", width=25)
+                table.add_column("Constraint Invalid When", width=30)
             except Exception:
                 # App not mounted or table not available (e.g., during testing)
                 pass
@@ -1154,9 +1160,7 @@ class MainTUIApp(App):
                         formatted_entry = format_invalidation_triggers(constraint_spec, [invalidation_trigger])
                         if formatted_entry:
                             # Get existing triggers
-                            existing_triggers = ""
-                            if config.has_option(section_name, 'constraint_invalid_when'):
-                                existing_triggers = config.get(section_name, 'constraint_invalid_when')
+                            existing_triggers = _get_constraint_invalid_when(config, section_name) or ""
 
                             # Add the new trigger
                             if existing_triggers.strip():
@@ -1164,7 +1168,7 @@ class MainTUIApp(App):
                             else:
                                 triggers_value = formatted_entry
 
-                            config.set(section_name, 'constraint_invalid_when', triggers_value)
+                            _set_constraint_invalid_when(config, section_name, triggers_value)
                             _write_config_file(config, config_path)
 
                     # Update the package data in all_packages
@@ -1284,8 +1288,8 @@ class MainTUIApp(App):
                         config.remove_option(section_name, 'constraint')
                         options_removed.append('constraints')
 
-                    if config.has_option(section_name, 'constraint_invalid_when'):
-                        config.remove_option(section_name, 'constraint_invalid_when')
+                    if _get_constraint_invalid_when(config, section_name):
+                        _set_constraint_invalid_when(config, section_name, '')
                         options_removed.append('invalidation triggers')
 
                     # Remove the section if it's empty

@@ -533,7 +533,7 @@ def test_list_outdated_prints_table_with_outdated_packages(mock_package_finder_c
         mock_table.add_column.assert_any_call("Latest", no_wrap=True)  # No style - uses conditional coloring
         mock_table.add_column.assert_any_call("Type", style="yellow")
         mock_table.add_column.assert_any_call("Constraint", no_wrap=True)
-        mock_table.add_column.assert_any_call("Invalid When", no_wrap=True)
+        mock_table.add_column.assert_any_call("Constraint Invalid When", no_wrap=True)
 
         mock_table.add_row.assert_called_with(
             "[bold green]✓[/bold green]",  # Will update (no constraint)

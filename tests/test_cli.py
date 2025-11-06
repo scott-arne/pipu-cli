@@ -434,8 +434,8 @@ def test_update_command_with_yes_flag():
             with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
                 
-                # Verify the correct package spec was passed to install
-                mock_install.assert_called_once_with(['test-package==1.5.0'])
+                # Verify the correct package names were passed to install with packages_being_updated
+                mock_install.assert_called_once_with(['test-package'], packages_being_updated=['test-package'])
     
     assert result.exit_code == 0
     assert "Installing updates..." in result.output
@@ -446,9 +446,9 @@ def test_update_command_with_constraints():
     """
     Test update command respects version constraints.
 
-    When a package has a constraint, the constraint should be applied during installation
-    instead of pinning to the latest_version shown in the table. This allows pip to resolve
-    the best version that satisfies the constraint and all dependencies.
+    When a package has a constraint, it is applied via the constraint filtering
+    mechanism in _install_packages, not as part of the package spec. This allows
+    pip to resolve the best version that satisfies the constraint and all dependencies.
 
     :returns: None
     """
@@ -469,8 +469,8 @@ def test_update_command_with_constraints():
             with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
 
-                # Check that the constraint was used instead of pinning to latest_version
-                mock_install.assert_called_once_with(['constrained-package<2.0.0'])
+                # Package name is passed without version spec; constraint is handled by _install_packages
+                mock_install.assert_called_once_with(['constrained-package'], packages_being_updated=['constrained-package'])
 
     assert result.exit_code == 0
 
@@ -479,9 +479,10 @@ def test_update_command_with_constraint_prevents_dependency_conflict():
     """
     Test that constraints prevent installation of conflicting package versions.
 
-    This test covers the bug where a package with a constraint (e.g., Deprecated==1.2.10)
-    was shown correctly in the table, but the installation attempted to use the latest
-    version (1.2.18) instead, leading to dependency conflicts.
+    With the new implementation, constraints are handled via constraint filtering in
+    _install_packages rather than being passed as version specs. This prevents
+    dependency conflicts by letting pip's resolver work with the constraints via
+    PIP_CONSTRAINT environment variable.
 
     :returns: None
     """
@@ -509,9 +510,8 @@ def test_update_command_with_constraint_prevents_dependency_conflict():
             with patch('pipu_cli.cli._install_packages', return_value=0) as mock_install:
                 result = runner.invoke(cli, ['update', '--yes'])
 
-                # Verify that constraints were applied, not latest versions
-                # This prevents the error: "Cannot install deprecated==1.2.18 and wrapt==2.0.0"
-                mock_install.assert_called_once_with(['Deprecated==1.2.10', 'wrapt<2'])
+                # Package names are passed without version specs; constraints handled by _install_packages
+                mock_install.assert_called_once_with(['Deprecated', 'wrapt'], packages_being_updated=['Deprecated', 'wrapt'])
 
     assert result.exit_code == 0
 

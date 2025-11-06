@@ -2,7 +2,13 @@ import sys
 from typing import List
 import rich_click as click
 from .internals import list_outdated
-from .package_constraints import read_constraints, read_ignores, read_invalidation_triggers
+from .package_constraints import (
+    read_constraints,
+    read_ignores,
+    read_invalidation_triggers,
+    _get_constraint_invalid_when,
+    _set_constraint_invalid_when
+)
 from .common import console
 from pip._internal.commands.install import InstallCommand
 
@@ -553,8 +559,8 @@ def constrain(constraint_specs, env, list_constraints, remove_constraints, remov
 
                 # Get existing invalidation triggers
                 existing_triggers_storage = {}
-                if config.has_option(section_name, 'constraint_invalid_when'):
-                    existing_value = config.get(section_name, 'constraint_invalid_when')
+                existing_value = _get_constraint_invalid_when(config, section_name)
+                if existing_value:
                     existing_triggers_storage = parse_invalidation_triggers_storage(existing_value)
 
                 # Get current constraints to find the packages that were added/updated
@@ -595,9 +601,8 @@ def constrain(constraint_specs, env, list_constraints, remove_constraints, remov
                             if formatted_entry:
                                 trigger_entries.append(formatted_entry)
 
-                    if trigger_entries:
-                        triggers_value = ','.join(trigger_entries)
-                        config.set(section_name, 'constraint_invalid_when', triggers_value)
+                    triggers_value = ','.join(trigger_entries) if trigger_entries else ''
+                    _set_constraint_invalid_when(config, section_name, triggers_value)
 
                 # Write the updated config file
                 with open(config_path, 'w', encoding='utf-8') as f:

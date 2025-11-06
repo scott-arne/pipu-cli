@@ -452,7 +452,7 @@ class HelpScreen(ModalScreen):
                     "• Auto-discovered constraints protect dependencies automatically (no manual action needed)\n"
                     "• Review constraint colors: green = can update, red = blocked by constraint\n"
                     "• Use 'C' to add custom manual constraints for packages you want to pin\n"
-                    "• Check 'Invalid When' column to understand when constraints will be removed",
+                    "• Check 'Constraint Invalid When' column to understand when constraints will be removed",
                     id="tips-text"
                 )
 

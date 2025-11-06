@@ -12,6 +12,7 @@ from textual.message import Message
 from textual.coordinate import Coordinate
 from rich.text import Text
 from ..internals import _check_constraint_satisfaction, get_constraint_color, format_invalid_when_display
+from ..package_constraints import _get_constraint_invalid_when, _set_constraint_invalid_when
 from .constants import (
     COLUMN_SELECTION, COLUMN_CONSTRAINT, COLUMN_INVALID_WHEN
 )
@@ -98,7 +99,7 @@ class PackageSelectionTable(DataTable):
         self.add_column("Latest", width=10)
         self.add_column("Type", width=8)
         self.add_column("Constraint", width=20)
-        self.add_column("Invalid When", width=25)
+        self.add_column("Constraint Invalid When", width=30)
 
         # Add rows
         for pkg in self.outdated_packages:
@@ -231,9 +232,7 @@ class PackageSelectionTable(DataTable):
                             formatted_entry = format_invalidation_triggers(constraint_spec, [invalidation_trigger])
                             if formatted_entry:
                                 # Get existing triggers
-                                existing_triggers = ""
-                                if config.has_option(section_name, 'constraint_invalid_when'):
-                                    existing_triggers = config.get(section_name, 'constraint_invalid_when')
+                                existing_triggers = _get_constraint_invalid_when(config, section_name) or ""
 
                                 # Add the new trigger
                                 if existing_triggers.strip():
@@ -241,7 +240,7 @@ class PackageSelectionTable(DataTable):
                                 else:
                                     triggers_value = formatted_entry
 
-                                config.set(section_name, 'constraint_invalid_when', triggers_value)
+                                _set_constraint_invalid_when(config, section_name, triggers_value)
                                 _write_config_file(config, config_path)
 
                         # Update the package data and refresh display

@@ -485,7 +485,7 @@ def list_outdated(
             table.add_column("Latest", no_wrap=True)  # Color conditionally per row
             table.add_column("Type", style="yellow")
             table.add_column("Constraint", no_wrap=True)
-            table.add_column("Invalid When", no_wrap=True)
+            table.add_column("Constraint Invalid When", no_wrap=True)
 
             for package in outdated_packages:
                 constraint = package.get("constraint")
