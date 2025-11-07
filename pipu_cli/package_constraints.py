@@ -210,53 +210,55 @@ def cleanup_invalid_constraints_and_triggers(env_name: Optional[str] = None) -> 
 
             if config.has_section(section_name):
                 triggers_value = _get_constraint_invalid_when(config, section_name)
-                if not triggers_value:
-                    return
-                all_triggers = parse_invalidation_triggers_storage(triggers_value)
-
-                # Remove invalid triggers while keeping valid ones
-                updated_triggers = {}
-                for constrained_package, triggers in all_triggers.items():
-                    valid_triggers = []
-                    invalid_packages_for_constraint = invalid_triggers.get(constrained_package, [])
-
-                    for trigger in triggers:
-                        parsed = parse_invalidation_trigger(trigger)
-                        if parsed:
-                            trigger_package = parsed['name'].lower()
-                            if trigger_package not in invalid_packages_for_constraint:
-                                valid_triggers.append(trigger)
-                            else:
-                                removed_triggers_count += 1
-
-                    if valid_triggers:
-                        updated_triggers[constrained_package] = valid_triggers
-
-                # Update config with cleaned triggers
-                if updated_triggers:
-                    # Get current constraints for formatting
-                    current_constraints = {}
-                    if config.has_option(section_name, 'constraints'):
-                        constraints_value = config.get(section_name, 'constraints')
-                        if any(op in constraints_value for op in ['>=', '<=', '==', '!=', '~=', '>', '<']):
-                            current_constraints = parse_inline_constraints(constraints_value)
-
-                    # Format trigger entries
-                    trigger_entries = []
-                    for package_name, triggers in updated_triggers.items():
-                        if package_name in current_constraints:
-                            package_constraint = current_constraints[package_name]
-                            formatted_entry = format_invalidation_triggers(f"{package_name}{package_constraint}", triggers)
-                            if formatted_entry:
-                                trigger_entries.append(formatted_entry)
-
-                    new_triggers_value = ','.join(trigger_entries) if trigger_entries else ''
-                    _set_constraint_invalid_when(config, section_name, new_triggers_value)
-                    _write_config_file(config, config_path)
+                if not triggers_value or not triggers_value.strip():
+                    # No triggers to clean up, skip this section
+                    pass
                 else:
-                    # No valid triggers left, remove the option
-                    _set_constraint_invalid_when(config, section_name, '')
-                    _write_config_file(config, config_path)
+                    all_triggers = parse_invalidation_triggers_storage(triggers_value)
+
+                    # Remove invalid triggers while keeping valid ones
+                    updated_triggers = {}
+                    for constrained_package, triggers in all_triggers.items():
+                        valid_triggers = []
+                        invalid_packages_for_constraint = invalid_triggers.get(constrained_package, [])
+
+                        for trigger in triggers:
+                            parsed = parse_invalidation_trigger(trigger)
+                            if parsed:
+                                trigger_package = parsed['name'].lower()
+                                if trigger_package not in invalid_packages_for_constraint:
+                                    valid_triggers.append(trigger)
+                                else:
+                                    removed_triggers_count += 1
+
+                        if valid_triggers:
+                            updated_triggers[constrained_package] = valid_triggers
+
+                    # Update config with cleaned triggers
+                    if updated_triggers:
+                        # Get current constraints for formatting
+                        current_constraints = {}
+                        if config.has_option(section_name, 'constraints'):
+                            constraints_value = config.get(section_name, 'constraints')
+                            if any(op in constraints_value for op in ['>=', '<=', '==', '!=', '~=', '>', '<']):
+                                current_constraints = parse_inline_constraints(constraints_value)
+
+                        # Format trigger entries
+                        trigger_entries = []
+                        for package_name, triggers in updated_triggers.items():
+                            if package_name in current_constraints:
+                                package_constraint = current_constraints[package_name]
+                                formatted_entry = format_invalidation_triggers(f"{package_name}{package_constraint}", triggers)
+                                if formatted_entry:
+                                    trigger_entries.append(formatted_entry)
+
+                        new_triggers_value = ','.join(trigger_entries) if trigger_entries else ''
+                        _set_constraint_invalid_when(config, section_name, new_triggers_value)
+                        _write_config_file(config, config_path)
+                    else:
+                        # No valid triggers left, remove the option
+                        _set_constraint_invalid_when(config, section_name, '')
+                        _write_config_file(config, config_path)
 
     except (OSError, configparser.Error) as e:
         # If cleanup fails, log and return what we detected
