@@ -1,11 +1,11 @@
 import logging
 from .config import LOG_LEVEL
 
-__version__ = '0.1.dev8'
+__version__ = '0.1.dev9'
 
 
 # Configure logging
-log = logging.getLogger("pipu")
+log = logging.getLogger("pipu-cli")
 
 
 class LevelSpecificFormatter(logging.Formatter):

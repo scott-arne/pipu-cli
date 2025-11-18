@@ -1,3 +1,0 @@
-# This file contains only comments and empty lines
-
-# No actual constraints here

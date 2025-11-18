@@ -1,7 +1,0 @@
-# File with duplicate package constraints
-requests==2.31.0
-numpy>=1.20.0
-
-# Duplicate entries (should warn but use last one)
-requests==2.30.0
-numpy>=1.19.0

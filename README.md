@@ -4,493 +4,196 @@
 
 # pipu
 
-**Author:** Scott Arne Johnson ([sajohn2@gmail.com](mailto:sajohn2@gmail.com))
+**pipu** is a smart Python package updater that safely upgrades your installed packages while respecting dependency constraints. It's like `pip list --outdated` + automated upgrades, but safe and easy.
 
-A powerful and user-friendly Python package updater with advanced constraint handling, beautiful TUI, and intelligent version management. Keep your Python packages up-to-date while maintaining stability through smart constraint enforcement.
+## Why pipu?
 
-## ✨ Key Features
+Keeping Python packages up-to-date is important, but upgrading packages manually is tedious and risky:
 
-- 🎮 **Interactive TUI** - Beautiful terminal interface with keyboard navigation and real-time feedback
-- 🎯 **Smart Constraints** - Automatic constraint discovery and enforcement to prevent breaking updates
-- 🚫 **Flexible Ignoring** - Exclude packages from updates with environment-specific rules
-- 📊 **Rich Output** - Color-coded tables showing constraints, versions, and update safety
-- 🔍 **Pre-release Support** - Optional inclusion of alpha, beta, and RC versions
-- ⚙️ **Configurable** - 10+ environment variables for advanced customization
-- 🔒 **Safe Updates** - Thread-safe operations with guaranteed resource cleanup
-- 🌐 **Cross-Platform** - Full support for Windows, macOS, and Linux
+- 😓 Running `pip install --upgrade` for each package is time-consuming
+- 💥 Upgrading one package might break others due to dependency constraints
+- 🤷 Hard to know which packages can be safely upgraded together
 
-## 🚀 Quick Start
+**pipu makes it easy:**
 
-### Installation
+- ✅ Automatically finds all packages that can be safely upgraded
+- ✅ Shows you exactly what will be upgraded before doing anything
+- ✅ Upgrades everything in one command, letting pip handle the details
+- ✅ Beautiful terminal UI with progress indicators
+
+## Installation
 
 ```bash
-# Install in editable mode for development
-pip install --config-settings editable_mode=compat -e ".[dev]"
+pip install pipu-cli
 ```
 
-### Basic Usage
+## Quick Start
+
+Simply run `pipu` in your Python environment:
 
 ```bash
-# Launch interactive TUI (recommended)
 pipu
-
-# List outdated packages
-pipu list
-
-# Update all packages with confirmation
-pipu update
-
-# Auto-update without prompting
-pipu update --yes
 ```
 
-That's it! For most users, just running `pipu` will give you everything you need.
+That's it! pipu will:
 
-## 📖 Detailed Usage
+1. Check all your installed packages
+2. Find available updates
+3. Determine which ones are safe to upgrade
+4. Show you a table of what will be upgraded
+5. Ask for confirmation (press Y to proceed)
+6. Upgrade everything safely
 
-### Commands Overview
+## Example Session
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `pipu` | Launch interactive TUI | `pipu` |
-| `pipu list` | List outdated packages | `pipu list --pre` |
-| `pipu update` | Update packages (with confirmation) | `pipu update --yes` |
-| `pipu constrain` | Manage version constraints | `pipu constrain "requests<3.0"` |
-| `pipu ignore` | Manage ignored packages | `pipu ignore setuptools pip` |
+```
+$ pipu
 
-### Interactive TUI Mode
+Step 1/5: Inspecting installed packages...
+  Found 182 installed packages
 
-The TUI is the easiest way to manage updates. Just run `pipu` with no arguments.
+Step 2/5: Checking for updates...
+  Found 12 packages with newer versions available
 
-**Navigation:**
-- **↑/↓** - Navigate packages
-- **Space** - Toggle package selection
-- **A** - Select all packages
-- **N** - Deselect all packages
-- **Enter** - Confirm and update selected packages
-- **Esc/Q** - Cancel and exit
-- **H** - Show help
+Step 3/5: Resolving dependency constraints...
+  3 packages can be safely upgraded
 
-**Visual Indicators:**
-- ✓ Green checkmark = Selected for update
-- 🟢 Green constraint = Safe to update
-- 🔴 Red constraint = Update blocked by constraint
-- ⚫ Gray dash (-) = No constraint
+Step 4/5: Packages ready for upgrade:
 
-### Command-Line Mode
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┓
+┃ Package       ┃ Current ┃ Latest  ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━┩
+│ requests      │ 2.28.0  │ 2.31.0  │
+│ rich          │ 13.0.0  │ 13.7.0  │
+│ click         │ 8.1.3   │ 8.1.7   │
+└───────────────┴─────────┴─────────┘
 
-For automation and scripting, use command-line mode:
+Do you want to proceed with the upgrade? [Y/n]: y
+
+Step 5/5: Upgrading packages...
+Successfully installed requests-2.31.0 rich-13.7.0 click-8.1.7
+
+✓ Successfully upgraded 3 package(s)
+  - requests: 2.28.0 -> 2.31.0
+  - rich: 13.0.0 -> 13.7.0
+  - click: 8.1.3 -> 8.1.7
+```
+
+## Usage Examples
+
+### Skip confirmation prompt (for scripts/automation)
 
 ```bash
-# List outdated packages
-pipu list
-
-# Include pre-releases (alpha, beta, rc)
-pipu list --pre
-
-# Update with confirmation prompt
-pipu update
-
-# Update without confirmation (for scripts)
-pipu update --yes
-
-# Update including pre-releases
-pipu update --pre --yes
+pipu --yes
 ```
 
-### Managing Constraints
-
-Constraints prevent packages from updating beyond specific versions, ensuring stability.
-
-**Add Constraints:**
-```bash
-# Single constraint
-pipu constrain "requests>=2.25.0,<3.0.0"
-
-# Multiple constraints
-pipu constrain "numpy>=1.20.0" "pandas<2.0.0" "django~=4.1.0"
-
-# Environment-specific (for conda/venv/poetry environments)
-pipu constrain "pytest>=7.0.0" --env development
-```
-
-**List Constraints:**
-```bash
-# All constraints
-pipu constrain --list
-
-# Environment-specific
-pipu constrain --list --env production
-```
-
-**Remove Constraints:**
-```bash
-# Remove specific packages
-pipu constrain --remove requests numpy
-
-# Remove from specific environment
-pipu constrain --remove django --env production
-
-# Remove ALL constraints (prompts for confirmation)
-pipu constrain --remove-all
-
-# Skip confirmation
-pipu constrain --remove-all --yes
-```
-
-**Auto-Discovery:**
-
-Pipu automatically discovers constraints from your installed packages' dependencies. For example, if `deprecated==1.2.10` depends on `wrapt<2`, pipu will automatically constrain `wrapt<2` and show "deprecated>1.2.10" as the trigger. These auto-constraints are temporary and removed when no longer needed.
-
-### Managing Ignored Packages
-
-Ignored packages are completely excluded from update checks.
-
-**Add Ignores:**
-```bash
-# Ignore packages globally
-pipu ignore setuptools pip wheel
-
-# Environment-specific ignores
-pipu ignore pytest black mypy --env development
-```
-
-**List Ignores:**
-```bash
-pipu ignore --list
-pipu ignore --list --env production
-```
-
-**Remove Ignores:**
-```bash
-pipu ignore --remove setuptools wheel
-pipu ignore --remove-all
-pipu ignore --remove-all --yes  # Skip confirmation
-```
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-Customize pipu's behavior with environment variables:
-
-**Network Settings:**
-```bash
-export PIPU_TIMEOUT=30              # Network timeout (default: 10s)
-export PIPU_RETRIES=3               # Retry attempts (default: 0)
-export PIPU_MAX_NETWORK_ERRORS=3    # Max consecutive errors (default: 1)
-export PIPU_RETRY_DELAY=1.0         # Delay between retries (default: 0.5s)
-```
-
-**Subprocess Settings:**
-```bash
-export PIPU_SUBPROCESS_TIMEOUT=60   # Subprocess timeout (default: 30s)
-export PIPU_UNINSTALL_TIMEOUT=180   # Uninstall timeout (default: 120s)
-export PIPU_FORCE_KILL_TIMEOUT=10   # Force kill timeout (default: 5s)
-```
-
-**Caching & Logging:**
-```bash
-export PIPU_CACHE_TTL=120           # Cache lifetime (default: 60s)
-export PIPU_LOG_LEVEL=DEBUG         # Logging level (default: WARNING)
-```
-
-**Example: Slow Network Configuration**
-```bash
-# For slow or unreliable networks
-export PIPU_TIMEOUT=60
-export PIPU_RETRIES=5
-export PIPU_RETRY_DELAY=2.0
-pipu update --yes
-```
-
-### Pip Configuration Integration
-
-Pipu seamlessly integrates with pip's configuration files:
-
-**Linux/macOS:**
-- `~/.config/pip/pip.conf` (user-specific)
-- `~/.pip/pip.conf` (legacy)
-- `/etc/pip.conf` (system-wide)
-
-**Windows:**
-- `%APPDATA%\pip\pip.ini` (user-specific)
-- `C:\ProgramData\pip\pip.ini` (system-wide)
-
-**Example Configuration:**
-```ini
-[global]
-index-url = https://pypi.org/simple/
-trusted-host = pypi.org
-
-# Global constraints
-constraints =
-    requests>=2.25.0,<3.0.0
-    numpy>=1.20.0
-    django>=4.1.0,<5.0.0
-
-# Global ignores
-ignores = pip setuptools wheel
-
-[development]
-# Development-specific constraints
-constraints =
-    pytest>=7.0.0
-    black>=22.0.0
-    mypy>=1.0.0
-
-ignores =
-    requests
-    numpy
-```
-
-## 📚 Advanced Topics
-
-### Constraint Sources (Priority Order)
-
-Pipu checks these sources in order:
-
-1. **`PIP_CONSTRAINT` environment variable**
-   ```bash
-   export PIP_CONSTRAINT=/path/to/constraints.txt
-   ```
-
-2. **Pip config - Environment-specific section**
-   ```ini
-   [myenv]  # Detected from conda/venv/poetry
-   constraints = /path/to/constraints.txt
-   ```
-
-3. **Pip config - Global section**
-   ```ini
-   [global]
-   constraints = /path/to/constraints.txt
-   ```
-
-4. **Project root** (legacy fallback)
-   ```
-   your-project/
-   ├── pyproject.toml  # or setup.py
-   └── constraints.txt
-   ```
-
-5. **Auto-discovered constraints** (from installed packages)
-   - Automatically detected from package dependencies
-   - Temporary and self-cleaning
-   - Displayed with "Invalid When" trigger information
-
-### Constraint File Format
-
-```txt
-# Web frameworks
-requests>=2.25.0,<3.0.0
-django>=4.1.0,<5.0.0
-flask~=2.0.0
-
-# Data science
-numpy>=1.20.0
-pandas>=1.5.0,!=1.5.1
-scipy>=1.9.0,!=1.9.1,<2.0.0
-
-# Comments and empty lines are ignored
-matplotlib==3.6.0  # Exact version
-```
-
-### Constraint Operators
-
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `==1.0.0` | Exact version | `requests==2.28.0` |
-| `>=1.0.0` | Minimum version | `numpy>=1.20.0` |
-| `<=2.0.0` | Maximum version | `django<=4.2.0` |
-| `>1.0.0,<2.0.0` | Version range | `flask>2.0,<3.0` |
-| `~=1.4.0` | Compatible version | `black~=22.0` |
-| `!=1.5.1` | Exclude version | `pandas!=1.5.1` |
-
-### Environment Detection
-
-Pipu automatically detects your Python environment:
-
-- **Conda/Mamba/Micromamba**: Uses `$CONDA_DEFAULT_ENV`
-- **Poetry**: Runs `poetry env info --name`
-- **Virtualenv/venv**: Uses basename of `$VIRTUAL_ENV`
-
-This enables environment-specific constraints and ignores.
-
-### Invalidation Triggers
-
-Pipu supports automatic constraint removal when packages are updated. Useful for temporary constraints:
+### Include pre-release versions
 
 ```bash
-# Add constraint with trigger
-pipu constrain "wrapt<2" --invalidation-triggers "deprecated>1.2.10"
-
-# When deprecated is updated to >1.2.10, wrapt constraint is automatically removed
-pipu update deprecated
-
-# Manually check and clean invalid constraints
-pipu constrain --list  # Shows triggers
+pipu --pre
 ```
 
-## 🎨 Output Examples
-
-### List Command Output
-
-```
-                    Outdated Packages
-┏━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┓
-┃ Package      ┃ Version ┃ Latest  ┃ Type  ┃ Constraint ┃ Invalid When     ┃
-┡━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━┩
-│ requests     │ 2.28.0  │ 2.31.0  │ wheel │ -          │ -                │
-│ numpy        │ 1.19.5  │ 1.24.3  │ wheel │ >=1.20.0   │ -                │
-│ wrapt        │ 1.14.0  │ 2.0.0   │ wheel │ <2         │ deprecated>1.2.10│
-└──────────────┴─────────┴─────────┴───────┴────────────┴──────────────────┘
-```
-
-**Color Coding:**
-- 🟢 **Green** = Constraint satisfied, safe to update
-- 🔴 **Red** = Constraint violated, update blocked
-- ⚫ **Gray dash** = No constraint
-
-## 🔧 Development
-
-### Running Tests
+### Increase timeout for slow connections
 
 ```bash
-# All tests (422 tests)
-pytest tests/ -v
-
-# Specific test categories
-pytest tests/test_constraints.py -v
-pytest tests/test_cli.py -v
-pytest tests/test_tui_usability.py -v
-
-# With coverage
-pytest tests/ --cov=pipu_cli --cov-report=html
+pipu --timeout 30
 ```
 
-### Building
+### Debug mode (see what's happening behind the scenes)
 
 ```bash
-# Install build dependencies
-pip install build
-
-# Build distribution
-python -m build
-
-# Install locally
-pip install dist/pipu_cli-*.whl
+pipu --debug
 ```
 
-### Code Quality
+Debug mode shows timing information and explains why packages can or cannot be upgraded.
 
-The codebase includes:
-- ✅ Thread-safe operations
-- ✅ Cross-platform compatibility
-- ✅ Comprehensive error handling
-- ✅ Type hints on key functions
-- ✅ Extensive test coverage (422 tests)
-- ✅ Resource cleanup guarantees
-
-## 🤝 Common Workflows
-
-### Workflow 1: First-Time Setup
+### Combine options
 
 ```bash
-# 1. Install pipu
-pip install -e .
-
-# 2. Check what's outdated
-pipu list
-
-# 3. Use interactive mode to select packages
-pipu
-
-# 4. Add constraints for critical packages
-pipu constrain "django>=4.1,<5.0" "numpy>=1.20"
-
-# 5. Update everything else
-pipu update --yes
+pipu --yes --timeout 30 --debug
 ```
 
-### Workflow 2: CI/CD Pipeline
+## Command Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--timeout INTEGER` | | Network timeout in seconds (default: 10) |
+| `--pre` | | Include pre-release versions |
+| `--yes` | `-y` | Skip confirmation prompt |
+| `--debug` | | Show detailed logging and timing info |
+| `--help` | | Show help message |
+
+## How Does It Work?
+
+pipu analyzes your package dependencies to determine which packages can be upgraded without breaking anything:
+
+- **Safe by default**: Only upgrades packages when all dependency constraints are satisfied
+- **Batch upgrades**: Upgrades compatible packages together, letting pip's resolver handle the details
+- **Smart resolution**: Handles complex dependency scenarios, including circular dependencies
+
+If pipu says a package can't be upgraded, it's usually because upgrading it would break another package. This is a good thing - pipu is protecting your environment!
+
+## Common Questions
+
+**Q: Is it safe to use pipu?**
+A: Yes! pipu only upgrades packages when it's safe to do so. It uses the same pip underneath, just smarter.
+
+**Q: Why didn't pipu upgrade package X?**
+A: Probably because upgrading it would break another package. Use `--debug` to see why.
+
+**Q: Can I use pipu in scripts or CI/CD?**
+A: Absolutely! Use `pipu --yes` to skip the confirmation prompt.
+
+**Q: What if all my packages are blocked?**
+A: This means upgrading them would cause conflicts. This is actually good - pipu is preventing a broken environment.
+
+**Q: Does pipu modify my packages without asking?**
+A: No! pipu always asks for confirmation before upgrading (unless you use `--yes`).
+
+**Q: Can I upgrade just one package?**
+A: Currently pipu upgrades all compatible packages. To upgrade a specific package, use `pip install --upgrade package-name`.
+
+**Q: Does pipu work with private PyPI repositories?**
+A: Yes! pipu respects your pip configuration (index-url, extra-index-url, etc.).
+
+## Tips
+
+- **Run pipu regularly** to keep your packages up-to-date
+- **Use `--debug`** if you're curious why a package can't be upgraded
+- **Commit your requirements.txt** before running pipu in case you need to rollback
+- **Use virtual environments** to isolate different projects
+
+## Troubleshooting
+
+### "No packages can be upgraded (all blocked by constraints)"
+
+This means all available updates would violate dependency constraints. Your environment is in a stable state, which is good! If you really need a specific update, you may need to:
+
+1. Manually upgrade the package: `pip install --upgrade package-name`
+2. Upgrade other packages that are blocking it
+3. Check if there's a newer version of the constraining package
+
+### Network timeout errors
+
+If you see timeout errors, increase the timeout:
 
 ```bash
-# Increase timeouts for CI environments
-export PIPU_TIMEOUT=60
-export PIPU_RETRIES=3
-export PIPU_CACHE_TTL=300
-
-# Check for outdated packages
-pipu list
-
-# Update with auto-approval
-pipu update --yes
+pipu --timeout 30
 ```
 
-### Workflow 3: Development Environment
+## Requirements
 
-```bash
-# Create dev-specific constraints
-pipu constrain "pytest>=7.0" --env development
-pipu ignore requests numpy --env development
+- Python 3.10 or higher
+- pip (comes with Python)
 
-# Update only development packages
-pipu update --yes
-```
+## License
 
-### Workflow 4: Production Environment
+MIT License - See LICENSE file for details
 
-```bash
-# Strict constraints for production
-pipu constrain "requests==2.28.0" --env production
-pipu constrain "django~=4.1.0" --env production
+## Author
 
-# List what would be updated (without updating)
-pipu list
+Scott Arne Johnson (scott.arne.johnson@gmail.com)
 
-# Only update when ready
-pipu update --yes
-```
+## Contributing
 
-## 📋 Troubleshooting
-
-### Common Issues
-
-**Slow Package Checks:**
-```bash
-# Increase timeout and enable retries
-export PIPU_TIMEOUT=30
-export PIPU_RETRIES=3
-pipu list
-```
-
-**Network Errors:**
-```bash
-# Enable debug logging
-export PIPU_LOG_LEVEL=DEBUG
-pipu list
-```
-
-**Terminal Display Issues:**
-```bash
-# The TUI handles terminal cleanup automatically
-# If issues persist, pipu resets terminal state on exit
-```
-
-**Package Not Found:**
-```bash
-# Check if package is in your pip indexes
-pip search package-name
-
-# Check your pip configuration
-pip config list
-```
-
-## 📄 License
-
-MIT License - see LICENSE file for details.
-
----
-
-**Made with ❤️ for Python developers who want safe, smart package updates.**
+Found a bug or want to contribute? Check out the [GitHub repository](https://github.com/yourusername/pipu-cli)!
