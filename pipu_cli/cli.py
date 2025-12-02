@@ -200,6 +200,9 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool):
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         sys.exit(130)
+    except click.Abort:
+        console.print("\n[yellow]Update cancelled by user[/yellow]")
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)

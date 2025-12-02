@@ -196,4 +196,4 @@ Scott Arne Johnson (scott.arne.johnson@gmail.com)
 
 ## Contributing
 
-Found a bug or want to contribute? Check out the [GitHub repository](https://github.com/yourusername/pipu-cli)!
+Found a bug or want to contribute? Check out the [GitHub repository](https://github.com/scott-arne/pipu-cli)!
