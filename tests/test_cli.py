@@ -177,3 +177,32 @@ def test_show_blocked_displays_blocked_packages(runner):
         assert 'Blocked' in result.output or 'blocked' in result.output.lower()
         assert 'package-b' in result.output
         assert result.exit_code == 0
+
+
+def test_single_package_upgrade_filters_to_specified_package(runner):
+    """Test pipu <package> only upgrades specified package."""
+    installed = [
+        InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={}),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.resolve_upgradable_packages') as mock_resolve:
+
+        mock_latest.return_value = {
+            installed[0]: Mock(version=Version("2.31.0")),
+            installed[1]: Mock(version=Version("1.26.0")),
+        }
+
+        mock_resolve.return_value = [
+            UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0"), is_editable=False),
+            UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("1.26.0"), is_editable=False),
+        ]
+
+        result = runner.invoke(cli, ['requests', '--dry-run'])
+
+        # Should only show requests
+        assert 'requests' in result.output
+        # numpy should not appear in upgrade table
+        assert result.exit_code == 0

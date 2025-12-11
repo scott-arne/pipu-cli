@@ -31,6 +31,7 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
 
 
 @click.command()
+@click.argument('packages', nargs=-1)
 @click.option(
     "--timeout",
     type=int,
@@ -68,12 +69,14 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     is_flag=True,
     help="Show packages that cannot be upgraded and why"
 )
-def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool) -> None:
+def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
     Automatically checks for package updates and upgrades them with proper
     constraint resolution.
+
+    Optionally specify PACKAGES to upgrade only those packages.
     """
     console = Console()
 
@@ -179,6 +182,14 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude:
             pkg for pkg in upgradable_packages
             if pkg.name.lower() not in excluded_names
         ]
+
+        # Filter to specific packages if provided
+        if packages:
+            requested_packages = {name.lower() for name in packages}
+            can_upgrade = [pkg for pkg in can_upgrade if pkg.name.lower() in requested_packages]
+
+            if debug:
+                console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
 
         if not can_upgrade:
             console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
