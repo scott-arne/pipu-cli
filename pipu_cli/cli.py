@@ -51,7 +51,13 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     is_flag=True,
     help="Show what would be upgraded without actually upgrading"
 )
-def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool) -> None:
+@click.option(
+    "--exclude",
+    type=str,
+    default="",
+    help="Comma-separated list of packages to exclude from upgrade"
+)
+def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -140,8 +146,18 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool) -> None:
         )
         step3_time = time.time() - step3_start
 
-        # Filter to only upgradable packages
-        can_upgrade = [pkg for pkg in upgradable_packages if pkg.upgradable]
+        # Apply exclusions
+        excluded_names = set()
+        if exclude:
+            excluded_names = {name.strip().lower() for name in exclude.split(',')}
+            if debug and excluded_names:
+                console.print(f"  [dim]Excluding: {', '.join(sorted(excluded_names))}[/dim]")
+
+        # Filter to only upgradable packages (excluding excluded ones)
+        can_upgrade = [
+            pkg for pkg in upgradable_packages
+            if pkg.upgradable and pkg.name.lower() not in excluded_names
+        ]
 
         if not can_upgrade:
             console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")

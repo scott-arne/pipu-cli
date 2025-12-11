@@ -72,3 +72,64 @@ def test_dry_run_exit_code_zero_when_upgrades_available(runner, mock_packages):
         result = runner.invoke(cli, ['--dry-run'])
 
         assert result.exit_code == 0
+
+
+def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
+    """Test --exclude removes specified packages from upgrade list."""
+    installed = [
+        InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={}),
+    ]
+
+    upgradable = [
+        UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0"), is_editable=False),
+        UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("1.26.0"), is_editable=False),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable), \
+         patch('pipu_cli.cli.install_packages') as mock_install:
+
+        mock_latest.return_value = {
+            installed[0]: Mock(version=Version("2.31.0")),
+            installed[1]: Mock(version=Version("1.26.0")),
+        }
+
+        result = runner.invoke(cli, ['--exclude', 'numpy', '--dry-run'])
+
+        # Should show requests but NOT numpy
+        assert 'requests' in result.output
+        assert 'numpy' not in result.output or 'Excluded' in result.output
+        assert result.exit_code == 0
+
+
+def test_exclude_multiple_packages(runner):
+    """Test --exclude with comma-separated packages."""
+    installed = [
+        InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="pandas", version=Version("2.0.0"), is_editable=False, constrained_dependencies={}),
+    ]
+
+    upgradable = [
+        UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0"), is_editable=False),
+        UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("1.26.0"), is_editable=False),
+        UpgradePackageInfo(name="pandas", version=Version("2.0.0"), upgradable=True, latest_version=Version("2.1.0"), is_editable=False),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
+
+        mock_latest.return_value = {
+            installed[0]: Mock(version=Version("2.31.0")),
+            installed[1]: Mock(version=Version("1.26.0")),
+            installed[2]: Mock(version=Version("2.1.0")),
+        }
+
+        result = runner.invoke(cli, ['--exclude', 'numpy,pandas', '--dry-run'])
+
+        # Should show only requests
+        assert 'requests' in result.output
+        assert result.exit_code == 0
