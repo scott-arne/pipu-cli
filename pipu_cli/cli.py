@@ -23,6 +23,7 @@ from pipu_cli.pretty import (
     ConsoleStream,
 )
 from pipu_cli.output import JsonOutputFormatter
+from pipu_cli.config_file import load_config, get_config_value
 
 
 # Configure rich_click
@@ -86,6 +87,30 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
     Optionally specify PACKAGES to upgrade only those packages.
     """
     console = Console()
+
+    # Load configuration file
+    config = load_config()
+
+    # CLI options override config file values
+    # Only use config values if CLI options are at their defaults
+    if timeout == 10:  # Default timeout
+        timeout = get_config_value(config, 'timeout', 10)
+    if not exclude:  # No exclusions specified
+        exclude_list = get_config_value(config, 'exclude', [])
+        if exclude_list:
+            exclude = ','.join(exclude_list)
+    if not pre:  # Pre-release not specified
+        pre = get_config_value(config, 'pre', False)
+    if not yes:  # Auto-confirm not specified
+        yes = get_config_value(config, 'yes', False)
+    if not debug:  # Debug not specified
+        debug = get_config_value(config, 'debug', False)
+    if not dry_run:  # Dry-run not specified
+        dry_run = get_config_value(config, 'dry_run', False)
+    if not show_blocked:  # Show-blocked not specified
+        show_blocked = get_config_value(config, 'show_blocked', False)
+    if output == "human":  # Default output format
+        output = get_config_value(config, 'output', 'human')
 
     # Initialize JSON formatter if needed
     json_formatter = JsonOutputFormatter() if output == "json" else None
