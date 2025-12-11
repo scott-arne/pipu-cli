@@ -247,7 +247,8 @@ def _extract_constrained_dependencies(dist) -> Dict[str, str]:
 def get_latest_versions(
     installed_packages: List[InstalledPackage],
     timeout: int = 10,
-    include_prereleases: bool = False
+    include_prereleases: bool = False,
+    progress_callback: Optional[callable] = None
 ) -> Dict[InstalledPackage, Package]:
     """
     Get the latest available versions for a list of installed packages.
@@ -259,6 +260,7 @@ def get_latest_versions(
     :param installed_packages: List of InstalledPackage objects to check
     :param timeout: Network timeout in seconds for package queries (default: 10)
     :param include_prereleases: Whether to include pre-release versions (default: False)
+    :param progress_callback: Optional callback function(current, total) for progress updates
     :returns: Dictionary mapping InstalledPackage objects to Package objects with latest version
     :raises ConnectionError: If unable to connect to package indexes
     :raises RuntimeError: If unable to load pip configuration
@@ -358,8 +360,13 @@ def get_latest_versions(
 
     # Query latest version for each package
     result: Dict[InstalledPackage, Package] = {}
+    total_packages = len(installed_packages)
 
-    for installed_pkg in installed_packages:
+    for idx, installed_pkg in enumerate(installed_packages):
+        # Report progress if callback provided
+        if progress_callback:
+            progress_callback(idx, total_packages)
+
         try:
             # Get canonical name for querying
             canonical_name = canonicalize_name(installed_pkg.name)
@@ -402,6 +409,10 @@ def get_latest_versions(
         except Exception as e:
             logger.warning(f"Error checking {installed_pkg.name}: {e}")
             continue
+
+    # Report completion
+    if progress_callback:
+        progress_callback(total_packages, total_packages)
 
     return result
 

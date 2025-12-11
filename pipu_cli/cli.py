@@ -8,7 +8,7 @@ from typing import Optional
 import rich_click as click
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from pipu_cli.package_management import (
     inspect_installed_packages,
@@ -222,18 +222,23 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
         step2_start = time.time()
         if output != "json":
             with Progress(
-                SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
                 console=console,
                 transient=True
             ) as progress:
-                task = progress.add_task("Querying package indexes...", total=None)
+                task = progress.add_task("Checking packages...", total=len(installed_packages))
+
+                def update_progress(current, total):
+                    progress.update(task, completed=current)
+
                 latest_versions = get_latest_versions(
                     installed_packages,
                     timeout=timeout,
-                    include_prereleases=pre
+                    include_prereleases=pre,
+                    progress_callback=update_progress
                 )
-                progress.update(task, completed=True)
         else:
             latest_versions = get_latest_versions(
                 installed_packages,
