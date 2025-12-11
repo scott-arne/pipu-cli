@@ -91,7 +91,34 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
     constraint resolution.
 
     Optionally specify PACKAGES to upgrade only those packages.
+
+    Special command: Use 'pipu rollback [--dry-run]' to restore previous package versions.
     """
+    # Handle rollback command
+    if packages and packages[0] == 'rollback':
+        # Extract --dry-run flag if present
+        dry_run_rollback = '--dry-run' in packages
+        from pipu_cli.rollback import get_latest_state, rollback_to_state
+
+        console = Console()
+
+        state = get_latest_state()
+        if state is None:
+            console.print("[yellow]No saved state found.[/yellow]")
+            return
+
+        console.print(f"[bold]Rolling back to state from {state['timestamp']}[/bold]")
+
+        rolled_back = rollback_to_state(state, dry_run=dry_run_rollback)
+
+        if dry_run_rollback:
+            console.print("\n[bold cyan]Would rollback:[/bold cyan]")
+            for pkg in rolled_back:
+                console.print(f"  - {pkg}")
+        else:
+            console.print(f"\n[bold green]Rolled back {len(rolled_back)} package(s)[/bold green]")
+        return
+
     console = Console()
 
     # Load configuration file
@@ -310,6 +337,14 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
         if output != "json":
             console.print("\n[bold]Step 5/5:[/bold] Upgrading packages...\n")
         step5_start = time.time()
+
+        # Save state for potential rollback
+        from pipu_cli.rollback import save_state
+        pre_upgrade_packages = [
+            {"name": pkg.name, "version": str(pkg.version)}
+            for pkg in can_upgrade
+        ]
+        save_state(pre_upgrade_packages, "Pre-upgrade state")
 
         stream = ConsoleStream(console) if output != "json" else None
         results = install_packages(can_upgrade, output_stream=stream, timeout=300)
