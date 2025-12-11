@@ -15,7 +15,7 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages,
     install_packages,
 )
-from pipu_cli.pretty import print_upgradable_packages_table, print_upgrade_results
+from pipu_cli.pretty import print_upgradable_packages_table, print_upgrade_results, ConsoleStream
 
 
 # Configure rich_click
@@ -161,18 +161,6 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool):
         # Step 5: Install packages
         console.print("\n[bold]Step 5/5:[/bold] Upgrading packages...\n")
         step5_start = time.time()
-
-        # Create a simple text stream that writes to console
-        class ConsoleStream:
-            def __init__(self, console):
-                self.console = console
-
-            def write(self, text):
-                if text and text.strip():
-                    self.console.print(text, end="")
-
-            def flush(self):
-                pass
 
         stream = ConsoleStream(console)
         results = install_packages(can_upgrade, output_stream=stream, timeout=300)

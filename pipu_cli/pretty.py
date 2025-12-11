@@ -8,6 +8,34 @@ from rich.table import Table
 from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage
 
 
+class ConsoleStream:
+    """A stream adapter that writes to a Rich Console.
+
+    This class implements the write/flush protocol expected by
+    package_management.OutputStream, allowing pip output to be
+    displayed through Rich's console.
+    """
+
+    def __init__(self, console: Console) -> None:
+        """Initialize with a Rich console instance.
+
+        :param console: Rich Console to write output to
+        """
+        self.console = console
+
+    def write(self, text: str) -> None:
+        """Write text to the console if non-empty.
+
+        :param text: Text to write
+        """
+        if text and text.strip():
+            self.console.print(text, end="")
+
+    def flush(self) -> None:
+        """Flush the stream (no-op for console)."""
+        pass
+
+
 def print_upgradable_packages_table(
     packages: List[UpgradePackageInfo],
     console: Optional[Console] = None
