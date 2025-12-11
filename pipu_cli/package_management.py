@@ -701,7 +701,8 @@ def _stream_reader(pipe, stream, lock):
 def install_packages(
     packages_to_upgrade: List[UpgradePackageInfo],
     output_stream: Optional[OutputStream] = None,
-    timeout: int = 300
+    timeout: int = 300,
+    version_constraints: Optional[Dict[str, str]] = None
 ) -> List[UpgradedPackage]:
     """
     Install/upgrade packages using pip.
@@ -714,6 +715,7 @@ def install_packages(
     :param packages_to_upgrade: List of UpgradePackageInfo objects to upgrade
     :param output_stream: Optional stream implementing write() and flush() for live progress updates
     :param timeout: Timeout in seconds for the installation (default: 300)
+    :param version_constraints: Optional dict mapping package names (lowercase) to version specifiers (e.g., "==2.31.0")
     :returns: List of UpgradedPackage objects with upgrade status
     :raises RuntimeError: If pip command cannot be executed
     """
@@ -728,17 +730,28 @@ def install_packages(
 
     # Construct pip install command with all packages at once
     # This allows pip to resolve mutual constraints properly
-    package_names = [pkg.name for pkg in packages_to_upgrade]
+    # Apply version constraints if provided
+    package_specs = []
+    for pkg in packages_to_upgrade:
+        pkg_name_lower = pkg.name.lower()
+        if version_constraints and pkg_name_lower in version_constraints:
+            # Use the specified version constraint
+            constraint = version_constraints[pkg_name_lower]
+            package_specs.append(f"{pkg.name}{constraint}")
+        else:
+            # Just upgrade to latest
+            package_specs.append(pkg.name)
+
     cmd = [
         sys.executable, '-m', 'pip', 'install',
         '--upgrade'
-    ] + package_names
+    ] + package_specs
 
     process = None
     try:
         # Write initial message to output stream
         if output_stream:
-            output_stream.write(f"Upgrading {len(package_names)} package(s)...\n")
+            output_stream.write(f"Upgrading {len(package_specs)} package(s)...\n")
             output_stream.flush()
 
         # Run pip install with real-time output streaming

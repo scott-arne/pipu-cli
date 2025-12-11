@@ -3,6 +3,7 @@
 import logging
 import sys
 import time
+from typing import Optional
 
 import rich_click as click
 from rich.console import Console
@@ -30,6 +31,21 @@ from pipu_cli.config_file import load_config, get_config_value
 click.rich_click.USE_RICH_MARKUP = True
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+
+
+def parse_package_spec(spec: str) -> tuple[str, Optional[str]]:
+    """Parse a package specification like 'requests==2.31.0' or 'requests>=2.30'.
+
+    :param spec: Package specification string
+    :returns: Tuple of (package_name, version_constraint or None)
+    """
+    # Common specifier patterns (check longest operators first to avoid partial matches)
+    for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
+        if op in spec:
+            parts = spec.split(op, 1)
+            return (parts[0].strip(), op + parts[1].strip())
+
+    return (spec.strip(), None)
 
 
 @click.command()
@@ -272,13 +288,22 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
             if pkg.name.lower() not in excluded_names
         ]
 
-        # Filter to specific packages if provided
+        # Parse package specifications and filter to specific packages if provided
+        package_constraints = {}
         if packages:
-            requested_packages = {name.lower() for name in packages}
+            requested_packages = set()
+            for spec in packages:
+                name, constraint = parse_package_spec(spec)
+                requested_packages.add(name.lower())
+                if constraint:
+                    package_constraints[name.lower()] = constraint
+
             can_upgrade = [pkg for pkg in can_upgrade if pkg.name.lower() in requested_packages]
 
             if debug:
                 console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
+                if package_constraints:
+                    console.print(f"  [dim]Version constraints: {package_constraints}[/dim]")
 
         if not can_upgrade:
             if output == "json":
@@ -347,7 +372,12 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
         save_state(pre_upgrade_packages, "Pre-upgrade state")
 
         stream = ConsoleStream(console) if output != "json" else None
-        results = install_packages(can_upgrade, output_stream=stream, timeout=300)
+        results = install_packages(
+            can_upgrade,
+            output_stream=stream,
+            timeout=300,
+            version_constraints=package_constraints if package_constraints else None
+        )
         step5_time = time.time() - step5_start
 
         # Update requirements file if requested

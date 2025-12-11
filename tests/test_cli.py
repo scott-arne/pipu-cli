@@ -206,3 +206,40 @@ def test_single_package_upgrade_filters_to_specified_package(runner):
         assert 'requests' in result.output
         # numpy should not appear in upgrade table
         assert result.exit_code == 0
+
+
+def test_version_constraint_upgrade(runner):
+    """Test upgrading with specific version constraint."""
+    installed = [
+        InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.resolve_upgradable_packages') as mock_resolve, \
+         patch('pipu_cli.cli.install_packages') as mock_install:
+
+        mock_latest.return_value = {
+            installed[0]: Mock(version=Version("2.31.0")),
+        }
+
+        mock_resolve.return_value = [
+            UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0"), is_editable=False),
+        ]
+
+        from pipu_cli.package_management import UpgradedPackage
+        mock_install.return_value = [
+            UpgradedPackage(name="requests", version=Version("2.30.0"), upgraded=True, previous_version=Version("2.28.0"), is_editable=False)
+        ]
+
+        result = runner.invoke(cli, ['requests==2.30.0', '--yes'])
+
+        # Should attempt to install with version constraint
+        mock_install.assert_called_once()
+        call_args = mock_install.call_args
+
+        # Check that version_constraints parameter was passed
+        assert 'version_constraints' in call_args.kwargs
+        assert call_args.kwargs['version_constraints'] == {'requests': '==2.30.0'}
+
+        assert result.exit_code == 0
