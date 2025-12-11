@@ -77,7 +77,13 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     default="human",
     help="Output format (human-readable or json)"
 )
-def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str) -> None:
+@click.option(
+    "--update-requirements",
+    type=click.Path(exists=True),
+    default=None,
+    help="Update the specified requirements.txt file with new versions"
+)
+def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str, update_requirements: str) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -308,6 +314,15 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
         stream = ConsoleStream(console) if output != "json" else None
         results = install_packages(can_upgrade, output_stream=stream, timeout=300)
         step5_time = time.time() - step5_start
+
+        # Update requirements file if requested
+        if update_requirements:
+            from pathlib import Path
+            from pipu_cli.requirements import update_requirements_file
+            req_path = Path(update_requirements)
+            updated = update_requirements_file(req_path, results)
+            if updated and output != "json":
+                console.print(f"\n[bold green]Updated {updated} package(s) in {update_requirements}[/bold green]")
 
         # Print results summary
         if output == "json":
