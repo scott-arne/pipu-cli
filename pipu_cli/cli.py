@@ -13,6 +13,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from pipu_cli.package_management import (
     inspect_installed_packages,
     get_latest_versions,
+    get_latest_versions_parallel,
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
     install_packages,
@@ -99,7 +100,13 @@ def parse_package_spec(spec: str) -> tuple[str, Optional[str]]:
     default=None,
     help="Update the specified requirements.txt file with new versions"
 )
-def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str, update_requirements: str) -> None:
+@click.option(
+    "--parallel",
+    type=int,
+    default=1,
+    help="Number of parallel requests for version checking (default: 1)"
+)
+def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str, update_requirements: str, parallel: int) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -233,18 +240,35 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
                 def update_progress(current, total):
                     progress.update(task, completed=current)
 
-                latest_versions = get_latest_versions(
+                if parallel > 1:
+                    latest_versions = get_latest_versions_parallel(
+                        installed_packages,
+                        timeout=timeout,
+                        include_prereleases=pre,
+                        max_workers=parallel,
+                        progress_callback=update_progress
+                    )
+                else:
+                    latest_versions = get_latest_versions(
+                        installed_packages,
+                        timeout=timeout,
+                        include_prereleases=pre,
+                        progress_callback=update_progress
+                    )
+        else:
+            if parallel > 1:
+                latest_versions = get_latest_versions_parallel(
                     installed_packages,
                     timeout=timeout,
                     include_prereleases=pre,
-                    progress_callback=update_progress
+                    max_workers=parallel
                 )
-        else:
-            latest_versions = get_latest_versions(
-                installed_packages,
-                timeout=timeout,
-                include_prereleases=pre
-            )
+            else:
+                latest_versions = get_latest_versions(
+                    installed_packages,
+                    timeout=timeout,
+                    include_prereleases=pre
+                )
         step2_time = time.time() - step2_start
 
         num_updates = len(latest_versions)

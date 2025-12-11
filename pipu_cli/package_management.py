@@ -244,6 +244,205 @@ def _extract_constrained_dependencies(dist) -> Dict[str, str]:
     return constrained_dependencies
 
 
+def get_latest_versions_parallel(
+    installed_packages: List[InstalledPackage],
+    timeout: int = 10,
+    include_prereleases: bool = False,
+    max_workers: int = 10,
+    progress_callback: Optional[callable] = None
+) -> Dict[InstalledPackage, Package]:
+    """
+    Get the latest available versions for a list of installed packages using parallel queries.
+
+    This function queries PyPI (or configured package indexes) to find the latest
+    version available for each installed package using concurrent requests. It respects
+    pip configuration settings including index-url, extra-index-url, and trusted-host.
+
+    :param installed_packages: List of InstalledPackage objects to check
+    :param timeout: Network timeout in seconds for package queries (default: 10)
+    :param include_prereleases: Whether to include pre-release versions (default: False)
+    :param max_workers: Maximum concurrent requests (default: 10)
+    :param progress_callback: Optional thread-safe callback function(current, total) for progress updates
+    :returns: Dictionary mapping InstalledPackage objects to Package objects with latest version
+    :raises ConnectionError: If unable to connect to package indexes
+    :raises RuntimeError: If unable to load pip configuration
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Load pip configuration to get index URLs and trusted hosts
+    try:
+        config = Configuration(isolated=False, load_only=None)
+        config.load()
+    except Exception as e:
+        logger.warning(f"Could not load pip configuration: {e}")
+        config = None
+
+    # Get index URL (primary package index)
+    index_url = None
+    if config:
+        try:
+            index_url = config.get_value("global.index-url")
+        except Exception:
+            pass
+    index_url = index_url or "https://pypi.org/simple/"
+
+    # Get extra index URLs (additional package indexes)
+    extra_index_urls = []
+    if config:
+        try:
+            raw_extra_urls = config.get_value("global.extra-index-url")
+            if raw_extra_urls:
+                # Handle both string and list formats
+                if isinstance(raw_extra_urls, str):
+                    # Split by newlines and filter out comments/empty lines
+                    extra_index_urls = [
+                        url.strip()
+                        for url in raw_extra_urls.split('\n')
+                        if url.strip() and not url.strip().startswith('#')
+                    ]
+                elif isinstance(raw_extra_urls, list):
+                    extra_index_urls = raw_extra_urls
+        except Exception:
+            pass
+
+    # Combine all index URLs
+    all_index_urls = [index_url] + extra_index_urls
+
+    # Get trusted hosts (hosts that don't require HTTPS verification)
+    trusted_hosts = []
+    if config:
+        try:
+            raw_trusted_hosts = config.get_value("global.trusted-host")
+            if raw_trusted_hosts:
+                # Handle both string and list formats
+                if isinstance(raw_trusted_hosts, str):
+                    # Split by newlines and filter out comments/empty lines
+                    trusted_hosts = [
+                        host.strip()
+                        for host in raw_trusted_hosts.split('\n')
+                        if host.strip() and not host.strip().startswith('#')
+                    ]
+                elif isinstance(raw_trusted_hosts, list):
+                    trusted_hosts = raw_trusted_hosts
+        except Exception:
+            pass
+
+    # Create pip session for network requests
+    try:
+        session = PipSession()
+        session.timeout = timeout
+
+        # Add trusted hosts to session
+        for host in trusted_hosts:
+            host = host.strip()
+            if host:
+                session.add_trusted_host(host, source="pip configuration")
+    except Exception as e:
+        raise ConnectionError(f"Failed to create network session: {e}") from e
+
+    # Set up package finder with configured indexes
+    selection_prefs = SelectionPreferences(
+        allow_yanked=False,
+        allow_all_prereleases=include_prereleases
+    )
+
+    search_scope = SearchScope.create(
+        find_links=[],
+        index_urls=all_index_urls,
+        no_index=False
+    )
+
+    link_collector = LinkCollector(
+        session=session,
+        search_scope=search_scope
+    )
+
+    package_finder = PackageFinder.create(
+        link_collector=link_collector,
+        selection_prefs=selection_prefs
+    )
+
+    # Thread-safe result storage and progress tracking
+    result: Dict[InstalledPackage, Package] = {}
+    result_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    completed_count = [0]  # Mutable container for thread-safe counter
+    total_packages = len(installed_packages)
+
+    def check_package(installed_pkg: InstalledPackage) -> Optional[tuple[InstalledPackage, Package]]:
+        """Check a single package for updates."""
+        try:
+            # Get canonical name for querying
+            canonical_name = canonicalize_name(installed_pkg.name)
+
+            # Find all available versions
+            candidates = package_finder.find_all_candidates(canonical_name)
+
+            if not candidates:
+                logger.debug(f"No candidates found for {installed_pkg.name}")
+                return None
+
+            # Filter out pre-releases if not requested
+            if not include_prereleases:
+                stable_candidates = []
+                for candidate in candidates:
+                    try:
+                        version_obj = Version(str(candidate.version))
+                        if not version_obj.is_prerelease:
+                            stable_candidates.append(candidate)
+                    except InvalidVersion:
+                        continue
+
+                # Use stable candidates if available, otherwise use all
+                candidates = stable_candidates if stable_candidates else candidates
+
+            # Get the latest version
+            if candidates:
+                latest_candidate = max(candidates, key=lambda c: c.version)
+                latest_version = Version(str(latest_candidate.version))
+
+                # Create Package object with latest version
+                latest_package = Package(
+                    name=installed_pkg.name,
+                    version=latest_version
+                )
+
+                logger.debug(f"Found latest version for {installed_pkg.name}: {latest_version}")
+                return (installed_pkg, latest_package)
+
+        except Exception as e:
+            logger.warning(f"Error checking {installed_pkg.name}: {e}")
+            return None
+
+        return None
+
+    # Execute parallel queries
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(check_package, pkg): pkg
+            for pkg in installed_packages
+        }
+
+        # Process results as they complete
+        for future in as_completed(futures):
+            result_tuple = future.result()
+
+            # Update result if package was found
+            if result_tuple:
+                installed_pkg, latest_pkg = result_tuple
+                with result_lock:
+                    result[installed_pkg] = latest_pkg
+
+            # Update progress
+            with progress_lock:
+                completed_count[0] += 1
+                if progress_callback:
+                    progress_callback(completed_count[0], total_packages)
+
+    return result
+
+
 def get_latest_versions(
     installed_packages: List[InstalledPackage],
     timeout: int = 10,
