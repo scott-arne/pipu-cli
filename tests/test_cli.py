@@ -6,7 +6,7 @@ from unittest.mock import patch, Mock
 
 from packaging.version import Version
 from pipu_cli.cli import cli
-from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo
+from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo
 
 
 @pytest.fixture
@@ -132,4 +132,48 @@ def test_exclude_multiple_packages(runner):
 
         # Should show only requests
         assert 'requests' in result.output
+        assert result.exit_code == 0
+
+
+def test_show_blocked_displays_blocked_packages(runner):
+    """Test --show-blocked shows packages blocked by constraints."""
+    installed = [
+        InstalledPackage(
+            name="package-a",
+            version=Version("1.0.0"),
+            is_editable=False,
+            constrained_dependencies={"package-b": "<2.0"}
+        ),
+        InstalledPackage(
+            name="package-b",
+            version=Version("1.5.0"),
+            is_editable=False,
+            constrained_dependencies={}
+        ),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons') as mock_resolve:
+
+        mock_latest.return_value = {
+            installed[1]: Mock(version=Version("2.5.0")),
+        }
+
+        # package-b blocked because package-a requires <2.0
+        mock_resolve.return_value = (
+            [],  # No upgradable
+            [BlockedPackageInfo(
+                name="package-b",
+                version=Version("1.5.0"),
+                latest_version=Version("2.5.0"),
+                blocked_by=["package-a requires <2.0"],
+                is_editable=False
+            )]
+        )
+
+        result = runner.invoke(cli, ['--show-blocked', '--dry-run'])
+
+        assert 'Blocked' in result.output or 'blocked' in result.output.lower()
+        assert 'package-b' in result.output
         assert result.exit_code == 0

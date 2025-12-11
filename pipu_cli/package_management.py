@@ -72,6 +72,14 @@ class UpgradedPackage(Package):
     is_editable: bool = False
 
 
+@dataclass(frozen=True)
+class BlockedPackageInfo(Package):
+    """Information about a package that cannot be upgraded."""
+    latest_version: Version
+    blocked_by: List[str]  # List of "package_name (constraint)" strings
+    is_editable: bool = False
+
+
 def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
     """
     Inspect currently installed Python packages and return detailed information.
@@ -551,6 +559,119 @@ def resolve_upgradable_packages(
         ))
 
     return result
+
+
+def resolve_upgradable_packages_with_reasons(
+    upgrade_candidates: Dict[InstalledPackage, Package],
+    all_installed: List[InstalledPackage]
+) -> tuple[List[UpgradePackageInfo], List[BlockedPackageInfo]]:
+    """
+    Resolve upgradable packages and provide detailed blocking reasons.
+
+    Returns both upgradable packages and blocked packages with reasons.
+
+    :param upgrade_candidates: Dict mapping installed packages to their latest available versions
+    :param all_installed: List of all installed packages (for constraint checking)
+    :returns: Tuple of (upgradable_packages, blocked_packages_with_reasons)
+    """
+    # Build a reverse dependency map
+    constraints_on: Dict[str, List[tuple[InstalledPackage, str]]] = {}
+
+    for pkg in all_installed:
+        for dep_name, specifier_str in pkg.constrained_dependencies.items():
+            if dep_name not in constraints_on:
+                constraints_on[dep_name] = []
+            constraints_on[dep_name].append((pkg, specifier_str))
+
+    # Filter to only actual upgrades
+    actual_upgrades = {
+        pkg: latest_pkg
+        for pkg, latest_pkg in upgrade_candidates.items()
+        if latest_pkg.version > pkg.version
+    }
+
+    # Track blocking reasons for each package
+    blocking_reasons: Dict[str, List[str]] = {}
+
+    # Fixed-point iteration
+    upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
+    max_iterations = len(upgrading_packages) + 1
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+        packages_to_remove = set()
+
+        for installed_pkg, latest_pkg in actual_upgrades.items():
+            canonical_name = canonicalize_name(installed_pkg.name)
+
+            if canonical_name not in upgrading_packages:
+                continue
+
+            latest_version = latest_pkg.version
+
+            if canonical_name in constraints_on:
+                for constraining_pkg, specifier_str in constraints_on[canonical_name]:
+                    try:
+                        specifier = SpecifierSet(specifier_str)
+                        satisfies = latest_version in specifier
+
+                        if not satisfies:
+                            constraining_canonical = canonicalize_name(constraining_pkg.name)
+                            if constraining_canonical not in upgrading_packages:
+                                packages_to_remove.add(canonical_name)
+                                # Track blocking reason
+                                reason = f"{constraining_pkg.name} requires {specifier_str}"
+                                if canonical_name not in blocking_reasons:
+                                    blocking_reasons[canonical_name] = []
+                                blocking_reasons[canonical_name].append(reason)
+                                break
+                    except (InvalidSpecifier, Exception):
+                        constraining_canonical = canonicalize_name(constraining_pkg.name)
+                        if constraining_canonical not in upgrading_packages:
+                            packages_to_remove.add(canonical_name)
+                            reason = f"{constraining_pkg.name} (invalid constraint)"
+                            if canonical_name not in blocking_reasons:
+                                blocking_reasons[canonical_name] = []
+                            blocking_reasons[canonical_name].append(reason)
+                            break
+
+        if not packages_to_remove:
+            break
+
+        upgrading_packages -= packages_to_remove
+
+    # Build result lists
+    upgradable = []
+    blocked = []
+
+    for installed_pkg, latest_pkg in upgrade_candidates.items():
+        canonical_name = canonicalize_name(installed_pkg.name)
+        latest_version = latest_pkg.version
+
+        is_actual_upgrade = latest_version > installed_pkg.version
+        can_upgrade = is_actual_upgrade and canonical_name in upgrading_packages
+
+        if can_upgrade:
+            upgradable.append(UpgradePackageInfo(
+                name=installed_pkg.name,
+                version=installed_pkg.version,
+                upgradable=True,
+                latest_version=latest_version,
+                is_editable=installed_pkg.is_editable
+            ))
+        elif is_actual_upgrade:
+            # Blocked package
+            reasons = blocking_reasons.get(canonical_name, ["Unknown constraint"])
+            blocked.append(BlockedPackageInfo(
+                name=installed_pkg.name,
+                version=installed_pkg.version,
+                latest_version=latest_version,
+                blocked_by=reasons,
+                is_editable=installed_pkg.is_editable
+            ))
+
+    return upgradable, blocked
 
 
 def _stream_reader(pipe, stream, lock):

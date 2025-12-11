@@ -13,9 +13,15 @@ from pipu_cli.package_management import (
     inspect_installed_packages,
     get_latest_versions,
     resolve_upgradable_packages,
+    resolve_upgradable_packages_with_reasons,
     install_packages,
 )
-from pipu_cli.pretty import print_upgradable_packages_table, print_upgrade_results, ConsoleStream
+from pipu_cli.pretty import (
+    print_upgradable_packages_table,
+    print_upgrade_results,
+    print_blocked_packages_table,
+    ConsoleStream,
+)
 
 
 # Configure rich_click
@@ -57,7 +63,12 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     default="",
     help="Comma-separated list of packages to exclude from upgrade"
 )
-def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str) -> None:
+@click.option(
+    "--show-blocked",
+    is_flag=True,
+    help="Show packages that cannot be upgraded and why"
+)
+def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -140,10 +151,20 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude:
         # Step 3: Resolve upgradable packages
         console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
         step3_start = time.time()
-        upgradable_packages = resolve_upgradable_packages(
-            latest_versions,
-            installed_packages
-        )
+
+        if show_blocked:
+            upgradable_packages, blocked_packages = resolve_upgradable_packages_with_reasons(
+                latest_versions,
+                installed_packages
+            )
+        else:
+            all_upgradable = resolve_upgradable_packages(
+                latest_versions,
+                installed_packages
+            )
+            upgradable_packages = [pkg for pkg in all_upgradable if pkg.upgradable]
+            blocked_packages = []
+
         step3_time = time.time() - step3_start
 
         # Apply exclusions
@@ -156,11 +177,15 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude:
         # Filter to only upgradable packages (excluding excluded ones)
         can_upgrade = [
             pkg for pkg in upgradable_packages
-            if pkg.upgradable and pkg.name.lower() not in excluded_names
+            if pkg.name.lower() not in excluded_names
         ]
 
         if not can_upgrade:
             console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
+            # Show blocked packages if requested, even when no upgradable packages
+            if show_blocked and blocked_packages:
+                console.print()
+                print_blocked_packages_table(blocked_packages, console=console)
             sys.exit(0)
 
         num_upgradable = len(can_upgrade)
@@ -171,6 +196,11 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude:
         # Step 4: Display table and ask for confirmation
         console.print("\n[bold]Step 4/5:[/bold] Packages ready for upgrade:\n")
         print_upgradable_packages_table(can_upgrade, console=console)
+
+        # Show blocked packages if requested
+        if show_blocked and blocked_packages:
+            console.print()
+            print_blocked_packages_table(blocked_packages, console=console)
 
         # In dry-run mode, stop here
         if dry_run:

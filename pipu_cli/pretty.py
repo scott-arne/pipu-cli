@@ -5,7 +5,7 @@ from typing import List, Optional
 from rich.console import Console
 from rich.table import Table
 
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage
+from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
 
 
 class ConsoleStream:
@@ -75,6 +75,44 @@ def print_upgradable_packages_table(
             str(pkg.version),
             str(pkg.latest_version),
             editable_mark
+        )
+
+    console.print(table)
+
+
+def print_blocked_packages_table(
+    packages: List[BlockedPackageInfo],
+    console: Optional[Console] = None
+) -> None:
+    """
+    Print a table of blocked packages with reasons.
+
+    :param packages: List of BlockedPackageInfo objects to display
+    :param console: Optional Rich console instance
+    """
+    if console is None:
+        console = Console()
+
+    if not packages:
+        return
+
+    num_blocked = len(packages)
+    table = Table(title=f"[bold yellow]{num_blocked} Package(s) Blocked by Constraints[/bold yellow]")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Current", style="magenta")
+    table.add_column("Available", style="green")
+    table.add_column("Blocked By", style="red")
+
+    for pkg in packages:
+        blocked_by = ", ".join(pkg.blocked_by[:2])  # Show first 2 reasons
+        if len(pkg.blocked_by) > 2:
+            blocked_by += f" (+{len(pkg.blocked_by) - 2} more)"
+
+        table.add_row(
+            pkg.name,
+            str(pkg.version),
+            str(pkg.latest_version),
+            blocked_by
         )
 
     console.print(table)
