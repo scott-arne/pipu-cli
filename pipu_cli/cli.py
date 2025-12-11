@@ -22,6 +22,7 @@ from pipu_cli.pretty import (
     print_blocked_packages_table,
     ConsoleStream,
 )
+from pipu_cli.output import JsonOutputFormatter
 
 
 # Configure rich_click
@@ -69,7 +70,13 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     is_flag=True,
     help="Show packages that cannot be upgraded and why"
 )
-def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool) -> None:
+@click.option(
+    "--output",
+    type=click.Choice(["human", "json"]),
+    default="human",
+    help="Output format (human-readable or json)"
+)
+def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -80,8 +87,11 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
     """
     console = Console()
 
+    # Initialize JSON formatter if needed
+    json_formatter = JsonOutputFormatter() if output == "json" else None
+
     # Configure logging based on debug flag
-    if debug:
+    if debug and output != "json":
         # Use Rich's logging handler for clean integration with console
         logging.basicConfig(
             level=logging.DEBUG,
@@ -102,57 +112,78 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
 
     try:
         # Step 1: Inspect installed packages
-        console.print("[bold]Step 1/5:[/bold] Inspecting installed packages...")
+        if output != "json":
+            console.print("[bold]Step 1/5:[/bold] Inspecting installed packages...")
         step1_start = time.time()
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True
-        ) as progress:
-            task = progress.add_task("Loading packages...", total=None)
+        if output != "json":
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task("Loading packages...", total=None)
+                installed_packages = inspect_installed_packages(timeout=timeout)
+                progress.update(task, completed=True)
+        else:
             installed_packages = inspect_installed_packages(timeout=timeout)
-            progress.update(task, completed=True)
         step1_time = time.time() - step1_start
 
         num_installed = len(installed_packages)
-        console.print(f"  Found {num_installed} installed packages")
-        if debug:
-            console.print(f"  [dim]Time: {step1_time:.2f}s[/dim]")
+        if output != "json":
+            console.print(f"  Found {num_installed} installed packages")
+            if debug:
+                console.print(f"  [dim]Time: {step1_time:.2f}s[/dim]")
 
         if not installed_packages:
-            console.print("[yellow]No packages found.[/yellow]")
+            if output == "json":
+                print('{"error": "No packages found"}')
+            else:
+                console.print("[yellow]No packages found.[/yellow]")
             sys.exit(0)
 
         # Step 2: Check for updates
-        console.print("\n[bold]Step 2/5:[/bold] Checking for updates...")
+        if output != "json":
+            console.print("\n[bold]Step 2/5:[/bold] Checking for updates...")
         step2_start = time.time()
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True
-        ) as progress:
-            task = progress.add_task("Querying package indexes...", total=None)
+        if output != "json":
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task("Querying package indexes...", total=None)
+                latest_versions = get_latest_versions(
+                    installed_packages,
+                    timeout=timeout,
+                    include_prereleases=pre
+                )
+                progress.update(task, completed=True)
+        else:
             latest_versions = get_latest_versions(
                 installed_packages,
                 timeout=timeout,
                 include_prereleases=pre
             )
-            progress.update(task, completed=True)
         step2_time = time.time() - step2_start
 
         num_updates = len(latest_versions)
-        console.print(f"  Found {num_updates} packages with newer versions available")
-        if debug:
-            console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
+        if output != "json":
+            console.print(f"  Found {num_updates} packages with newer versions available")
+            if debug:
+                console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
 
         if not latest_versions:
-            console.print("\n[bold green]All packages are up to date![/bold green]")
+            if output == "json":
+                print('{"upgradable": [], "upgradable_count": 0, "message": "All packages are up to date"}')
+            else:
+                console.print("\n[bold green]All packages are up to date![/bold green]")
             sys.exit(0)
 
         # Step 3: Resolve upgradable packages
-        console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
+        if output != "json":
+            console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
         step3_start = time.time()
 
         if show_blocked:
@@ -192,33 +223,52 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
                 console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
 
         if not can_upgrade:
-            console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
-            # Show blocked packages if requested, even when no upgradable packages
-            if show_blocked and blocked_packages:
-                console.print()
-                print_blocked_packages_table(blocked_packages, console=console)
+            if output == "json":
+                # Output JSON for empty upgradable list
+                json_data = json_formatter.format_all(
+                    upgradable=[],
+                    blocked=blocked_packages if show_blocked else None
+                )
+                print(json_data)
+            else:
+                console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
+                # Show blocked packages if requested, even when no upgradable packages
+                if show_blocked and blocked_packages:
+                    console.print()
+                    print_blocked_packages_table(blocked_packages, console=console)
             sys.exit(0)
 
         num_upgradable = len(can_upgrade)
-        console.print(f"  {num_upgradable} packages can be safely upgraded")
-        if debug:
-            console.print(f"  [dim]Time: {step3_time:.2f}s[/dim]")
+        if output != "json":
+            console.print(f"  {num_upgradable} packages can be safely upgraded")
+            if debug:
+                console.print(f"  [dim]Time: {step3_time:.2f}s[/dim]")
 
         # Step 4: Display table and ask for confirmation
-        console.print("\n[bold]Step 4/5:[/bold] Packages ready for upgrade:\n")
-        print_upgradable_packages_table(can_upgrade, console=console)
+        if output == "json":
+            # In JSON mode, output the upgradable packages and stop (unless installing)
+            if dry_run:
+                json_data = json_formatter.format_all(
+                    upgradable=can_upgrade,
+                    blocked=blocked_packages if show_blocked else None
+                )
+                print(json_data)
+                sys.exit(0)
+        else:
+            console.print("\n[bold]Step 4/5:[/bold] Packages ready for upgrade:\n")
+            print_upgradable_packages_table(can_upgrade, console=console)
 
-        # Show blocked packages if requested
-        if show_blocked and blocked_packages:
-            console.print()
-            print_blocked_packages_table(blocked_packages, console=console)
+            # Show blocked packages if requested
+            if show_blocked and blocked_packages:
+                console.print()
+                print_blocked_packages_table(blocked_packages, console=console)
 
-        # In dry-run mode, stop here
-        if dry_run:
-            console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
-            sys.exit(0)
+            # In dry-run mode, stop here
+            if dry_run:
+                console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
+                sys.exit(0)
 
-        if not yes:
+        if not yes and output != "json":
             console.print()
             confirm = click.confirm("Do you want to proceed with the upgrade?", default=True)
             if not confirm:
@@ -226,24 +276,33 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
                 sys.exit(0)
 
         # Step 5: Install packages
-        console.print("\n[bold]Step 5/5:[/bold] Upgrading packages...\n")
+        if output != "json":
+            console.print("\n[bold]Step 5/5:[/bold] Upgrading packages...\n")
         step5_start = time.time()
 
-        stream = ConsoleStream(console)
+        stream = ConsoleStream(console) if output != "json" else None
         results = install_packages(can_upgrade, output_stream=stream, timeout=300)
         step5_time = time.time() - step5_start
 
         # Print results summary
-        print_upgrade_results(results, console=console)
+        if output == "json":
+            json_data = json_formatter.format_all(
+                upgradable=can_upgrade,
+                blocked=blocked_packages if show_blocked else None,
+                results=results
+            )
+            print(json_data)
+        else:
+            print_upgrade_results(results, console=console)
 
-        if debug:
-            console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
-            total_time = step1_time + step2_time + step3_time + step5_time
-            console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
-            console.print(f"[dim]  Step 1 (Inspect): {step1_time:.2f}s ({step1_time/total_time*100:.1f}%)[/dim]")
-            console.print(f"[dim]  Step 2 (Check updates): {step2_time:.2f}s ({step2_time/total_time*100:.1f}%)[/dim]")
-            console.print(f"[dim]  Step 3 (Resolve constraints): {step3_time:.2f}s ({step3_time/total_time*100:.1f}%)[/dim]")
-            console.print(f"[dim]  Step 5 (Install): {step5_time:.2f}s ({step5_time/total_time*100:.1f}%)[/dim]")
+            if debug:
+                console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
+                total_time = step1_time + step2_time + step3_time + step5_time
+                console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
+                console.print(f"[dim]  Step 1 (Inspect): {step1_time:.2f}s ({step1_time/total_time*100:.1f}%)[/dim]")
+                console.print(f"[dim]  Step 2 (Check updates): {step2_time:.2f}s ({step2_time/total_time*100:.1f}%)[/dim]")
+                console.print(f"[dim]  Step 3 (Resolve constraints): {step3_time:.2f}s ({step3_time/total_time*100:.1f}%)[/dim]")
+                console.print(f"[dim]  Step 5 (Install): {step5_time:.2f}s ({step5_time/total_time*100:.1f}%)[/dim]")
 
         # Exit with appropriate code
         failed = [pkg for pkg in results if not pkg.upgraded]
