@@ -46,7 +46,12 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     is_flag=True,
     help="Enable debug logging and show performance timing"
 )
-def cli(timeout: int, pre: bool, yes: bool, debug: bool) -> None:
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be upgraded without actually upgrading"
+)
+def cli(timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -150,6 +155,11 @@ def cli(timeout: int, pre: bool, yes: bool, debug: bool) -> None:
         # Step 4: Display table and ask for confirmation
         console.print("\n[bold]Step 4/5:[/bold] Packages ready for upgrade:\n")
         print_upgradable_packages_table(can_upgrade, console=console)
+
+        # In dry-run mode, stop here
+        if dry_run:
+            console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
+            sys.exit(0)
 
         if not yes:
             console.print()
