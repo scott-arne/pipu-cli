@@ -23,6 +23,7 @@ from pipu_cli.pretty import (
     print_upgrade_results,
     print_blocked_packages_table,
     ConsoleStream,
+    select_packages_interactively,
 )
 from pipu_cli.output import JsonOutputFormatter
 from pipu_cli.config_file import load_config, get_config_value
@@ -106,7 +107,12 @@ def parse_package_spec(spec: str) -> tuple[str, Optional[str]]:
     default=1,
     help="Number of parallel requests for version checking (default: 1)"
 )
-def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str, update_requirements: str, parallel: int) -> None:
+@click.option(
+    "--interactive", "-i",
+    is_flag=True,
+    help="Interactively select packages to upgrade"
+)
+def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool, exclude: str, show_blocked: bool, output: str, update_requirements: str, parallel: int, interactive: bool) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
@@ -170,6 +176,11 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
 
     # Initialize JSON formatter if needed
     json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    # Interactive mode only works in human output mode
+    if interactive and output == "json":
+        console.print("[yellow]Warning: --interactive is not compatible with --output json. Ignoring --interactive.[/yellow]")
+        interactive = False
 
     # Configure logging based on debug flag
     if debug and output != "json":
@@ -374,6 +385,13 @@ def cli(packages: tuple, timeout: int, pre: bool, yes: bool, debug: bool, dry_ru
             if show_blocked and blocked_packages:
                 console.print()
                 print_blocked_packages_table(blocked_packages, console=console)
+
+            # Interactive mode: let user select packages
+            if interactive:
+                can_upgrade = select_packages_interactively(can_upgrade, console)
+                if not can_upgrade:
+                    console.print("[yellow]No packages selected for upgrade.[/yellow]")
+                    sys.exit(0)
 
             # In dry-run mode, stop here
             if dry_run:

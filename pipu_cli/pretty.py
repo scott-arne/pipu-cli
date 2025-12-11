@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from rich.console import Console
 from rich.table import Table
+from rich.prompt import Prompt
 
 from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
 
@@ -175,3 +176,39 @@ def print_upgrade_results(
         console.print(f"[bold]Summary:[/bold] {num_successful}/{num_total} packages upgraded successfully")
     else:
         console.print("[bold green]All packages upgraded successfully![/bold green]")
+
+
+def select_packages_interactively(
+    packages: List[UpgradePackageInfo],
+    console: Console
+) -> List[UpgradePackageInfo]:
+    """Allow user to interactively select which packages to upgrade.
+
+    :param packages: Available packages to choose from
+    :param console: Rich console for output
+    :returns: Selected packages
+    """
+    console.print("\n[bold]Select packages to upgrade:[/bold]")
+    console.print("[dim](Enter comma-separated numbers, or 'all' for all packages)[/dim]\n")
+
+    for idx, pkg in enumerate(packages, 1):
+        console.print(f"  {idx}. {pkg.name}: {pkg.version} -> {pkg.latest_version}")
+
+    console.print()
+    selection = Prompt.ask("Selection", default="all")
+
+    if selection.lower() == "all":
+        return packages
+
+    try:
+        indices = [int(x.strip()) - 1 for x in selection.split(',')]
+        selected = [packages[i] for i in indices if 0 <= i < len(packages)]
+
+        if not selected:
+            console.print("[yellow]No valid packages selected, using all packages.[/yellow]")
+            return packages
+
+        return selected
+    except (ValueError, IndexError):
+        console.print("[yellow]Invalid selection, using all packages.[/yellow]")
+        return packages
