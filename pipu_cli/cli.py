@@ -46,7 +46,7 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
     is_flag=True,
     help="Enable debug logging and show performance timing"
 )
-def cli(timeout: int, pre: bool, yes: bool, debug: bool):
+def cli(timeout: int, pre: bool, yes: bool, debug: bool) -> None:
     """
     [bold cyan]pipu[/bold cyan] - A cute Python package updater
 
