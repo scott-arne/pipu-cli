@@ -28,7 +28,7 @@ class OutputFormatter:
 class JsonOutputFormatter(OutputFormatter):
     """JSON output formatter."""
 
-    def _package_to_dict(self, pkg: Any) -> Dict:
+    def _package_to_dict(self, pkg: Any) -> Dict[str, Any]:
         """Convert a package dataclass to a JSON-serializable dict."""
         result = {}
         for field_name in pkg.__dataclass_fields__:

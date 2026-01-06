@@ -155,19 +155,28 @@ def test_extract_constrained_dependencies_with_extras(mock_distribution):
 
 
 def test_extract_constrained_dependencies_with_markers(mock_distribution):
-    """Test that environment markers are handled correctly."""
+    """Test that environment markers are evaluated correctly.
+
+    - Markers that evaluate to True in current environment: constraint included
+    - Markers that evaluate to False: constraint skipped
+    - Extra markers: always skipped (can't know which extras were installed)
+    """
     requires = [
-        "typing-extensions>=4.0.0; python_version < '3.10'",
+        # This marker will be True on Python 3.x
+        "typing-extensions>=4.0.0; python_version >= '3.0'",
+        # This marker will be False on Python 3.8+
         "importlib-metadata>=1.0; python_version < '3.8'",
+        # Extra markers should always be skipped
+        "dask<2025.3.0; extra == 'dask'",
     ]
     dist = mock_distribution("test-package", "1.0.0", requires)
 
     result = _extract_constrained_dependencies(dist)
 
-    # Markers should not affect the constraint extraction
+    # Only constraints with markers that evaluate to True should be included
+    # Extra markers are always skipped
     assert result == {
         "typing-extensions": ">=4.0.0",
-        "importlib-metadata": ">=1.0",
     }
 
 
@@ -522,7 +531,9 @@ def test_inspect_installed_packages_complex_dependencies(mock_distribution):
             "pandas[excel]>=1.5.0",
             "scipy~=1.9.0",
             "matplotlib>3.0.0,<=3.6.0",
-            "typing-extensions>=4.0.0; python_version < '3.10'",
+            "typing-extensions>=4.0.0; python_version >= '3.0'",  # Marker that's True
+            "importlib-metadata>=1.0; python_version < '3.8'",  # Marker that's False - skipped
+            "dask<2025.3.0; extra == 'dask'",  # Extra marker - always skipped
             "unconstrained-package",  # Should not appear in constrained_dependencies
         ]),
     ]
@@ -539,15 +550,17 @@ def test_inspect_installed_packages_complex_dependencies(mock_distribution):
     pkg = result[0]
 
     # Note: packaging may reorder specifiers, so we match what it actually produces
+    # Markers that evaluate to False (python_version < '3.8') are skipped
+    # Extra markers (extra == 'dask') are always skipped
     assert pkg.constrained_dependencies == {
         "requests": "<3.0.0,>=2.28.0",  # Reordered by packaging
         "numpy": "!=1.21.0,<2.0.0,>=1.20.0",
         "pandas": ">=1.5.0",
         "scipy": "~=1.9.0",
         "matplotlib": "<=3.6.0,>3.0.0",  # Reordered by packaging
-        "typing-extensions": ">=4.0.0",
+        "typing-extensions": ">=4.0.0",  # Marker evaluates to True
     }
-    # unconstrained-package should not be in the dict
+    # unconstrained-package, importlib-metadata, dask should not be in the dict
     assert "unconstrained-package" not in pkg.constrained_dependencies
 
 

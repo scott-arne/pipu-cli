@@ -49,7 +49,7 @@ def test_dry_run_shows_packages_without_installing(runner, mock_packages):
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable), \
          patch('pipu_cli.cli.install_packages') as mock_install:
 
-        result = runner.invoke(cli, ['--dry-run', '--yes'])
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '--yes', '--no-cache'])
 
         # install_packages should NOT be called in dry-run mode
         mock_install.assert_not_called()
@@ -69,7 +69,7 @@ def test_dry_run_exit_code_zero_when_upgrades_available(runner, mock_packages):
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
 
-        result = runner.invoke(cli, ['--dry-run'])
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '--no-cache'])
 
         assert result.exit_code == 0
 
@@ -96,7 +96,7 @@ def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
             installed[1]: Mock(version=Version("1.26.0")),
         }
 
-        result = runner.invoke(cli, ['--exclude', 'numpy', '--dry-run'])
+        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy', '--dry-run', '--no-cache'])
 
         # Should show requests but NOT numpy
         assert 'requests' in result.output
@@ -128,7 +128,7 @@ def test_exclude_multiple_packages(runner):
             installed[2]: Mock(version=Version("2.1.0")),
         }
 
-        result = runner.invoke(cli, ['--exclude', 'numpy,pandas', '--dry-run'])
+        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy,pandas', '--dry-run', '--no-cache'])
 
         # Should show only requests
         assert 'requests' in result.output
@@ -172,7 +172,7 @@ def test_show_blocked_displays_blocked_packages(runner):
             )]
         )
 
-        result = runner.invoke(cli, ['--show-blocked', '--dry-run'])
+        result = runner.invoke(cli, ['upgrade', '--show-blocked', '--dry-run', '--no-cache'])
 
         assert 'Blocked' in result.output or 'blocked' in result.output.lower()
         assert 'package-b' in result.output
@@ -180,7 +180,7 @@ def test_show_blocked_displays_blocked_packages(runner):
 
 
 def test_single_package_upgrade_filters_to_specified_package(runner):
-    """Test pipu <package> only upgrades specified package."""
+    """Test pipu upgrade <package> only upgrades specified package."""
     installed = [
         InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
         InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={}),
@@ -200,7 +200,7 @@ def test_single_package_upgrade_filters_to_specified_package(runner):
             UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("1.26.0"), is_editable=False),
         ]
 
-        result = runner.invoke(cli, ['requests', '--dry-run'])
+        result = runner.invoke(cli, ['upgrade', 'requests', '--dry-run', '--no-cache'])
 
         # Should only show requests
         assert 'requests' in result.output
@@ -217,7 +217,8 @@ def test_version_constraint_upgrade(runner):
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
          patch('pipu_cli.cli.resolve_upgradable_packages') as mock_resolve, \
-         patch('pipu_cli.cli.install_packages') as mock_install:
+         patch('pipu_cli.cli.install_packages') as mock_install, \
+         patch('pipu_cli.rollback.save_state'):
 
         mock_latest.return_value = {
             installed[0]: Mock(version=Version("2.31.0")),
@@ -232,7 +233,7 @@ def test_version_constraint_upgrade(runner):
             UpgradedPackage(name="requests", version=Version("2.30.0"), upgraded=True, previous_version=Version("2.28.0"), is_editable=False)
         ]
 
-        result = runner.invoke(cli, ['requests==2.30.0', '--yes'])
+        result = runner.invoke(cli, ['upgrade', 'requests==2.30.0', '--yes', '--no-cache'])
 
         # Should attempt to install with version constraint
         mock_install.assert_called_once()
@@ -243,3 +244,91 @@ def test_version_constraint_upgrade(runner):
         assert call_args.kwargs['version_constraints'] == {'requests': '==2.30.0'}
 
         assert result.exit_code == 0
+
+
+# Rollback command tests
+
+def test_rollback_list_shows_states(runner, tmp_path):
+    """Test that rollback --list shows saved states."""
+    with patch('pipu_cli.rollback.list_states') as mock_list, \
+         patch('pipu_cli.rollback.ROLLBACK_DIR', tmp_path):
+
+        mock_list.return_value = [
+            {
+                "file": "state_20241205_143022.json",
+                "timestamp": "20241205_143022",
+                "description": "Pre-upgrade state",
+                "package_count": 3
+            }
+        ]
+
+        result = runner.invoke(cli, ['rollback', '--list'])
+
+        assert result.exit_code == 0
+        # Rich may truncate filenames in table, so check for key parts
+        assert 'state_20241205' in result.output or 'State File' in result.output
+        assert 'Pre-upgrade state' in result.output
+
+
+def test_rollback_list_empty(runner, tmp_path):
+    """Test rollback --list with no saved states."""
+    with patch('pipu_cli.rollback.list_states', return_value=[]), \
+         patch('pipu_cli.rollback.ROLLBACK_DIR', tmp_path):
+
+        result = runner.invoke(cli, ['rollback', '--list'])
+
+        assert result.exit_code == 0
+        assert 'No saved states found' in result.output
+
+
+def test_rollback_dry_run(runner):
+    """Test rollback --dry-run shows packages without modifying."""
+    with patch('pipu_cli.rollback.get_latest_state') as mock_state, \
+         patch('pipu_cli.rollback.rollback_to_state') as mock_rollback:
+
+        mock_state.return_value = {
+            "timestamp": "20241205_143022",
+            "description": "Pre-upgrade state",
+            "packages": [
+                {"name": "requests", "version": "2.28.0"},
+                {"name": "numpy", "version": "1.24.0"}
+            ]
+        }
+
+        result = runner.invoke(cli, ['rollback', '--dry-run'])
+
+        assert result.exit_code == 0
+        assert 'requests' in result.output
+        assert 'numpy' in result.output
+        assert 'Dry run complete' in result.output
+        # Should NOT call rollback_to_state in dry-run mode
+        mock_rollback.assert_not_called()
+
+
+def test_rollback_no_state_found(runner):
+    """Test rollback when no state is saved."""
+    with patch('pipu_cli.rollback.get_latest_state', return_value=None):
+
+        result = runner.invoke(cli, ['rollback'])
+
+        assert result.exit_code == 0
+        assert 'No saved state found' in result.output
+
+
+def test_rollback_with_yes_flag(runner):
+    """Test rollback --yes performs rollback without confirmation."""
+    with patch('pipu_cli.rollback.get_latest_state') as mock_state, \
+         patch('pipu_cli.rollback.rollback_to_state') as mock_rollback:
+
+        mock_state.return_value = {
+            "timestamp": "20241205_143022",
+            "description": "Pre-upgrade state",
+            "packages": [{"name": "requests", "version": "2.28.0"}]
+        }
+        mock_rollback.return_value = ["requests==2.28.0"]
+
+        result = runner.invoke(cli, ['rollback', '--yes'])
+
+        assert result.exit_code == 0
+        assert 'Successfully rolled back' in result.output
+        mock_rollback.assert_called_once()

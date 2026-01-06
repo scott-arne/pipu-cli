@@ -5,7 +5,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pipu_cli.package_management import UpgradedPackage
 
@@ -37,7 +37,7 @@ def save_state(packages: List[Dict[str, str]], description: str = "") -> Path:
     return state_file
 
 
-def get_latest_state() -> Optional[Dict]:
+def get_latest_state() -> Optional[Dict[str, Any]]:
     """Get the most recent saved state.
 
     :returns: State dictionary or None if no states saved
@@ -54,7 +54,7 @@ def get_latest_state() -> Optional[Dict]:
         return json.load(f)
 
 
-def rollback_to_state(state: Dict, dry_run: bool = False) -> List[str]:
+def rollback_to_state(state: Dict[str, Any], dry_run: bool = False) -> List[str]:
     """Rollback packages to a saved state.
 
     :param state: State dictionary from get_latest_state()
@@ -85,7 +85,7 @@ def rollback_to_state(state: Dict, dry_run: bool = False) -> List[str]:
     return rolled_back
 
 
-def list_states() -> List[Dict]:
+def list_states() -> List[Dict[str, Any]]:
     """List all saved states.
 
     :returns: List of state summaries

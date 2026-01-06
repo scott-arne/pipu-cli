@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, IO, List, Optional, Protocol, Callable, runtime_checkable
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version, InvalidVersion
@@ -201,12 +201,17 @@ def _get_editable_packages(timeout: int) -> Dict[str, str]:
     return editable_packages
 
 
-def _extract_constrained_dependencies(dist) -> Dict[str, str]:
+def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
     """
     Extract constrained dependencies from a package's metadata.
 
     A dependency is considered "constrained" if it has any version specifier
     (e.g., "requests>=2.28.0", "numpy>=1.20.0,<2.0.0", "pandas==1.5.0").
+
+    Only unconditional dependencies and dependencies whose markers are satisfied
+    in the current environment are included. Dependencies that are conditional on
+    extras (e.g., "dask<2025.3.0; extra == 'dask'") are skipped because we cannot
+    determine which extras were installed.
 
     The constraint strings returned can be used with packaging.specifiers.SpecifierSet
     for version comparison operations.
@@ -226,6 +231,24 @@ def _extract_constrained_dependencies(dist) -> Dict[str, str]:
             try:
                 # Parse the requirement
                 req = Requirement(req_string)
+
+                # Skip requirements with markers that don't apply
+                if req.marker:
+                    marker_str = str(req.marker)
+                    # Skip extra-only dependencies - we can't know which extras were installed
+                    # These look like: extra == "dev", extra == 'test', etc.
+                    if 'extra' in marker_str:
+                        logger.debug(f"Skipping extra-only dependency: {req_string}")
+                        continue
+                    # For other markers (e.g., python_version, sys_platform), evaluate them
+                    try:
+                        if not req.marker.evaluate():
+                            logger.debug(f"Skipping dependency with unsatisfied marker: {req_string}")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Could not evaluate marker for {req_string}: {e}")
+                        # If we can't evaluate, skip to be conservative
+                        continue
 
                 # Check if this requirement has any version specifier
                 if req.specifier:
@@ -249,7 +272,7 @@ def get_latest_versions_parallel(
     timeout: int = 10,
     include_prereleases: bool = False,
     max_workers: int = 10,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[Callable] = None
 ) -> Dict[InstalledPackage, Package]:
     """
     Get the latest available versions for a list of installed packages using parallel queries.
@@ -447,7 +470,7 @@ def get_latest_versions(
     installed_packages: List[InstalledPackage],
     timeout: int = 10,
     include_prereleases: bool = False,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[Callable] = None
 ) -> Dict[InstalledPackage, Package]:
     """
     Get the latest available versions for a list of installed packages.
@@ -884,7 +907,11 @@ def resolve_upgradable_packages_with_reasons(
     return upgradable, blocked
 
 
-def _stream_reader(pipe, stream, lock):
+def _stream_reader(
+    pipe: IO[str],
+    stream: Optional[OutputStream],
+    lock: threading.Lock
+) -> None:
     """
     Read lines from a pipe and write to a stream with thread-safe locking.
 

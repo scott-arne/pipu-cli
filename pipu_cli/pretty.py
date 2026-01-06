@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from rich.console import Console
 from rich.table import Table
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 
 from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
 
@@ -178,6 +178,49 @@ def print_upgrade_results(
         console.print("[bold green]All packages upgraded successfully![/bold green]")
 
 
+def _parse_selection(selection: str, max_index: int) -> List[int]:
+    """Parse a selection string supporting ranges and comma-separated values.
+
+    Examples:
+        "1,2,3" -> [0, 1, 2]
+        "1-3" -> [0, 1, 2]
+        "1-3, 5" -> [0, 1, 2, 4]
+        "1, 3-5, 7" -> [0, 2, 3, 4, 6]
+
+    :param selection: User input string
+    :param max_index: Maximum valid index (1-based)
+    :returns: List of 0-based indices
+    :raises ValueError: If selection cannot be parsed
+    """
+    indices = set()
+    parts = selection.split(',')
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        if '-' in part:
+            # Handle range like "1-3"
+            range_parts = part.split('-')
+            if len(range_parts) != 2:
+                raise ValueError(f"Invalid range: {part}")
+            start = int(range_parts[0].strip())
+            end = int(range_parts[1].strip())
+            if start > end:
+                start, end = end, start
+            for i in range(start, end + 1):
+                if 1 <= i <= max_index:
+                    indices.add(i - 1)  # Convert to 0-based
+        else:
+            # Handle single number
+            num = int(part)
+            if 1 <= num <= max_index:
+                indices.add(num - 1)  # Convert to 0-based
+
+    return sorted(indices)
+
+
 def select_packages_interactively(
     packages: List[UpgradePackageInfo],
     console: Console
@@ -189,7 +232,7 @@ def select_packages_interactively(
     :returns: Selected packages
     """
     console.print("\n[bold]Select packages to upgrade:[/bold]")
-    console.print("[dim](Enter comma-separated numbers, or 'all' for all packages)[/dim]\n")
+    console.print("[dim](Enter numbers, ranges, or 'all'. Examples: 1,3,5 or 1-3 or 1-3,5)[/dim]\n")
 
     for idx, pkg in enumerate(packages, 1):
         console.print(f"  {idx}. {pkg.name}: {pkg.version} -> {pkg.latest_version}")
@@ -198,17 +241,46 @@ def select_packages_interactively(
     selection = Prompt.ask("Selection", default="all")
 
     if selection.lower() == "all":
-        return packages
+        selected = packages
+    else:
+        try:
+            indices = _parse_selection(selection, len(packages))
+            selected = [packages[i] for i in indices]
 
-    try:
-        indices = [int(x.strip()) - 1 for x in selection.split(',')]
-        selected = [packages[i] for i in indices if 0 <= i < len(packages)]
+            if not selected:
+                console.print("[yellow]No valid packages selected, using all packages.[/yellow]")
+                selected = packages
+        except (ValueError, IndexError):
+            console.print("[yellow]Invalid selection, using all packages.[/yellow]")
+            selected = packages
 
-        if not selected:
-            console.print("[yellow]No valid packages selected, using all packages.[/yellow]")
-            return packages
+    # Show confirmation table with selected packages highlighted
+    selected_names = {pkg.name for pkg in selected}
+    num_selected = len(selected)
 
-        return selected
-    except (ValueError, IndexError):
-        console.print("[yellow]Invalid selection, using all packages.[/yellow]")
-        return packages
+    console.print()
+    table = Table(title=f"[bold]{num_selected} Package(s) Selected for Upgrade[/bold]")
+    table.add_column("", style="bold green", no_wrap=True, width=3)
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Current", style="magenta")
+    table.add_column("Latest", style="green")
+
+    for pkg in packages:
+        is_selected = pkg.name in selected_names
+        marker = "[green]\u2713[/green]" if is_selected else ""
+        style = "" if is_selected else "dim"
+        table.add_row(
+            marker,
+            f"[{style}]{pkg.name}[/{style}]" if style else pkg.name,
+            f"[{style}]{pkg.version}[/{style}]" if style else str(pkg.version),
+            f"[{style}]{pkg.latest_version}[/{style}]" if style else str(pkg.latest_version),
+        )
+
+    console.print(table)
+
+    # Ask for confirmation
+    if not Confirm.ask("\nProceed with upgrade?", default=True):
+        console.print("[yellow]Upgrade cancelled.[/yellow]")
+        return []
+
+    return selected
