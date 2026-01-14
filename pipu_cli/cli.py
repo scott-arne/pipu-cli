@@ -267,6 +267,225 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
         sys.exit(1)
 
 
+# --- Helper functions for upgrade command ---
+
+def _step1_inspect_packages(
+    console: Console, output: str, timeout: int, debug: bool
+) -> tuple[list, float]:
+    """Step 1: Inspect installed packages."""
+    if output != "json":
+        console.print("[bold]Step 1/5:[/bold] Inspecting installed packages...")
+
+    step_start = time.time()
+    if output != "json":
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True
+        ) as progress:
+            progress.add_task("Loading packages...", total=None)
+            installed_packages = inspect_installed_packages(timeout=timeout)
+    else:
+        installed_packages = inspect_installed_packages(timeout=timeout)
+    step_time = time.time() - step_start
+
+    if output != "json":
+        console.print(f"  Found {len(installed_packages)} installed packages")
+        if debug:
+            console.print(f"  [dim]Time: {step_time:.2f}s[/dim]")
+
+    return installed_packages, step_time
+
+
+def _step2_get_latest_versions(
+    console: Console, output: str, debug: bool,
+    installed_packages: list, use_cache: bool, cache_enabled: bool,
+    timeout: int, pre: bool, parallel: int
+) -> tuple[dict, float, bool]:
+    """Step 2: Get latest versions from cache or network."""
+    if output != "json":
+        if use_cache:
+            console.print("\n[bold]Step 2/5:[/bold] Loading cached version data...")
+        else:
+            console.print("\n[bold]Step 2/5:[/bold] Fetching latest versions from PyPI...")
+
+    step_start = time.time()
+    latest_versions: dict = {}
+    cache_was_used = False
+
+    if use_cache:
+        cache_data = load_cache()
+        if cache_data and cache_data.latest_versions:
+            for installed_pkg in installed_packages:
+                name_lower = installed_pkg.name.lower()
+                if name_lower in cache_data.latest_versions:
+                    cached_version = cache_data.latest_versions[name_lower]
+                    try:
+                        latest_ver = Version(cached_version)
+                        if latest_ver > installed_pkg.version:
+                            latest_pkg = Package(name=installed_pkg.name, version=latest_ver)
+                            latest_versions[installed_pkg] = latest_pkg
+                    except Exception:
+                        pass
+            cache_was_used = True
+        else:
+            use_cache = False
+
+    if not use_cache:
+        if output != "json":
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task("Checking packages...", total=len(installed_packages))
+
+                def update_progress(current: int, total: int) -> None:
+                    progress.update(task, completed=current)
+
+                if parallel > 1:
+                    latest_versions = get_latest_versions_parallel(
+                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        max_workers=parallel, progress_callback=update_progress
+                    )
+                else:
+                    latest_versions = get_latest_versions(
+                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        progress_callback=update_progress
+                    )
+        else:
+            if parallel > 1:
+                latest_versions = get_latest_versions_parallel(
+                    installed_packages, timeout=timeout, include_prereleases=pre, max_workers=parallel
+                )
+            else:
+                latest_versions = get_latest_versions(
+                    installed_packages, timeout=timeout, include_prereleases=pre
+                )
+
+        if cache_enabled:
+            version_cache = build_version_cache(latest_versions)
+            save_cache(version_cache, include_prereleases=pre)
+
+    step_time = time.time() - step_start
+
+    if output != "json":
+        console.print(f"  Found {len(latest_versions)} packages with newer versions available")
+        if cache_was_used:
+            console.print("  [dim](from cache)[/dim]")
+        if debug:
+            console.print(f"  [dim]Time: {step_time:.2f}s[/dim]")
+
+    return latest_versions, step_time, cache_was_used
+
+
+def _step3_resolve_packages(
+    console: Console, output: str, debug: bool,
+    latest_versions: dict, installed_packages: list, show_blocked: bool,
+    exclude: str, packages: tuple
+) -> tuple[list, list, dict, float]:
+    """Step 3: Resolve upgradable packages and apply filters."""
+    if output != "json":
+        console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
+    step_start = time.time()
+
+    if show_blocked:
+        upgradable_packages, blocked_packages = resolve_upgradable_packages_with_reasons(
+            latest_versions, installed_packages
+        )
+    else:
+        all_upgradable = resolve_upgradable_packages(latest_versions, installed_packages)
+        upgradable_packages = [pkg for pkg in all_upgradable if pkg.upgradable]
+        blocked_packages = []
+
+    step_time = time.time() - step_start
+
+    # Apply exclusions
+    excluded_names = set()
+    if exclude:
+        excluded_names = {name.strip().lower() for name in exclude.split(',')}
+        if debug and excluded_names:
+            console.print(f"  [dim]Excluding: {', '.join(sorted(excluded_names))}[/dim]")
+
+    can_upgrade = [pkg for pkg in upgradable_packages if pkg.name.lower() not in excluded_names]
+
+    # Parse package specifications and filter
+    package_constraints: dict = {}
+    if packages:
+        requested_packages = set()
+        for spec in packages:
+            name, constraint = parse_package_spec(spec)
+            requested_packages.add(name.lower())
+            if constraint:
+                package_constraints[name.lower()] = constraint
+
+        can_upgrade = [pkg for pkg in can_upgrade if pkg.name.lower() in requested_packages]
+
+        if debug:
+            console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
+            if package_constraints:
+                console.print(f"  [dim]Version constraints: {package_constraints}[/dim]")
+
+    if output != "json":
+        console.print(f"  {len(can_upgrade)} packages can be safely upgraded")
+        if debug:
+            console.print(f"  [dim]Time: {step_time:.2f}s[/dim]")
+
+    return can_upgrade, blocked_packages, package_constraints, step_time
+
+
+def _step5_install_packages(
+    console: Console, output: str,
+    can_upgrade: list, package_constraints: dict
+) -> tuple[list, float]:
+    """Step 5: Install/upgrade packages."""
+    editable_packages = [pkg for pkg in can_upgrade if pkg.is_editable]
+    non_editable_packages = [pkg for pkg in can_upgrade if not pkg.is_editable]
+
+    if output != "json":
+        total_to_upgrade = len(non_editable_packages) + len(editable_packages)
+        console.print(f"[bold]Step 5/5:[/bold] Upgrading {total_to_upgrade} package(s)...\n")
+    step_start = time.time()
+
+    # Save state for potential rollback
+    from pipu_cli.rollback import save_state
+    pre_upgrade_packages = [
+        {"name": pkg.name, "version": str(pkg.version)}
+        for pkg in can_upgrade
+    ]
+    save_state(pre_upgrade_packages, "Pre-upgrade state")
+
+    stream = ConsoleStream(console) if output != "json" else None
+    results = []
+
+    if non_editable_packages:
+        if output != "json":
+            console.print(f"Upgrading {len(non_editable_packages)} regular package(s)...\n")
+        regular_results = install_packages(
+            non_editable_packages,
+            output_stream=stream,
+            timeout=300,
+            version_constraints=package_constraints if package_constraints else None
+        )
+        results.extend(regular_results)
+
+    if editable_packages:
+        if output != "json":
+            console.print(f"\nReinstalling {len(editable_packages)} editable package(s)...\n")
+        editable_results = reinstall_editable_packages(
+            editable_packages,
+            output_stream=stream,
+            timeout=300
+        )
+        results.extend(editable_results)
+
+    step_time = time.time() - step_start
+    return results, step_time
+
+
 @cli.command()
 @click.argument('packages', nargs=-1)
 @click.option(
@@ -418,29 +637,7 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
             console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
 
         # Step 1: Inspect installed packages
-        if output != "json":
-            console.print("[bold]Step 1/5:[/bold] Inspecting installed packages...")
-
-        step1_start = time.time()
-        if output != "json":
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-                transient=True
-            ) as progress:
-                task = progress.add_task("Loading packages...", total=None)
-                installed_packages = inspect_installed_packages(timeout=timeout)
-                progress.update(task, completed=True)
-        else:
-            installed_packages = inspect_installed_packages(timeout=timeout)
-        step1_time = time.time() - step1_start
-
-        num_installed = len(installed_packages)
-        if output != "json":
-            console.print(f"  Found {num_installed} installed packages")
-            if debug:
-                console.print(f"  [dim]Time: {step1_time:.2f}s[/dim]")
+        installed_packages, step1_time = _step1_inspect_packages(console, output, timeout, debug)
 
         if not installed_packages:
             if output == "json":
@@ -450,90 +647,10 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
             sys.exit(0)
 
         # Step 2: Get latest versions (from cache or network)
-        if output != "json":
-            if use_cache:
-                console.print("\n[bold]Step 2/5:[/bold] Loading cached version data...")
-            else:
-                console.print("\n[bold]Step 2/5:[/bold] Fetching latest versions from PyPI...")
-
-        step2_start = time.time()
-        latest_versions: dict = {}
-        cache_was_used = False
-
-        if use_cache:
-            # Load latest versions from cache (skip PyPI queries entirely)
-            cache_data = load_cache()
-            if cache_data and cache_data.latest_versions:
-                # Reconstruct latest_versions dict from cache
-                # Maps InstalledPackage -> Package with latest version
-                for installed_pkg in installed_packages:
-                    name_lower = installed_pkg.name.lower()
-                    if name_lower in cache_data.latest_versions:
-                        cached_version = cache_data.latest_versions[name_lower]
-                        try:
-                            latest_ver = Version(cached_version)
-                            # Only include if it's actually newer
-                            if latest_ver > installed_pkg.version:
-                                latest_pkg = Package(
-                                    name=installed_pkg.name,
-                                    version=latest_ver
-                                )
-                                latest_versions[installed_pkg] = latest_pkg
-                        except Exception:
-                            pass  # Skip invalid versions
-                cache_was_used = True
-            else:
-                use_cache = False
-
-        if not use_cache:
-            # Fetch from network
-            if output != "json":
-                with Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TaskProgressColumn(),
-                    console=console,
-                    transient=True
-                ) as progress:
-                    task = progress.add_task("Checking packages...", total=len(installed_packages))
-
-                    def update_progress(current: int, total: int) -> None:
-                        progress.update(task, completed=current)
-
-                    if parallel > 1:
-                        latest_versions = get_latest_versions_parallel(
-                            installed_packages, timeout=timeout, include_prereleases=pre,
-                            max_workers=parallel, progress_callback=update_progress
-                        )
-                    else:
-                        latest_versions = get_latest_versions(
-                            installed_packages, timeout=timeout, include_prereleases=pre,
-                            progress_callback=update_progress
-                        )
-            else:
-                if parallel > 1:
-                    latest_versions = get_latest_versions_parallel(
-                        installed_packages, timeout=timeout, include_prereleases=pre, max_workers=parallel
-                    )
-                else:
-                    latest_versions = get_latest_versions(
-                        installed_packages, timeout=timeout, include_prereleases=pre
-                    )
-
-            # Update cache with fresh data
-            if cache_enabled:
-                version_cache = build_version_cache(latest_versions)
-                save_cache(version_cache, include_prereleases=pre)
-
-        step2_time = time.time() - step2_start
-
-        num_updates = len(latest_versions)
-        if output != "json":
-            console.print(f"  Found {num_updates} packages with newer versions available")
-            if cache_was_used:
-                console.print("  [dim](from cache)[/dim]")
-            if debug:
-                console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
+        latest_versions, step2_time, _ = _step2_get_latest_versions(
+            console, output, debug, installed_packages, use_cache, cache_enabled,
+            timeout, pre, parallel
+        )
 
         if not latest_versions:
             if output == "json":
@@ -543,47 +660,10 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
             sys.exit(0)
 
         # Step 3: Resolve upgradable packages
-        if output != "json":
-            console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
-        step3_start = time.time()
-
-        if show_blocked:
-            upgradable_packages, blocked_packages = resolve_upgradable_packages_with_reasons(
-                latest_versions, installed_packages
-            )
-        else:
-            all_upgradable = resolve_upgradable_packages(latest_versions, installed_packages)
-            upgradable_packages = [pkg for pkg in all_upgradable if pkg.upgradable]
-            blocked_packages = []
-
-        step3_time = time.time() - step3_start
-
-        # Apply exclusions
-        excluded_names = set()
-        if exclude:
-            excluded_names = {name.strip().lower() for name in exclude.split(',')}
-            if debug and excluded_names:
-                console.print(f"  [dim]Excluding: {', '.join(sorted(excluded_names))}[/dim]")
-
-        # Filter to only upgradable packages (excluding excluded ones)
-        can_upgrade = [pkg for pkg in upgradable_packages if pkg.name.lower() not in excluded_names]
-
-        # Parse package specifications and filter to specific packages if provided
-        package_constraints = {}
-        if packages:
-            requested_packages = set()
-            for spec in packages:
-                name, constraint = parse_package_spec(spec)
-                requested_packages.add(name.lower())
-                if constraint:
-                    package_constraints[name.lower()] = constraint
-
-            can_upgrade = [pkg for pkg in can_upgrade if pkg.name.lower() in requested_packages]
-
-            if debug:
-                console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
-                if package_constraints:
-                    console.print(f"  [dim]Version constraints: {package_constraints}[/dim]")
+        can_upgrade, blocked_packages, package_constraints, step3_time = _step3_resolve_packages(
+            console, output, debug, latest_versions, installed_packages, show_blocked,
+            exclude, packages
+        )
 
         if not can_upgrade:
             if output == "json":
@@ -599,12 +679,6 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                     console.print()
                     print_blocked_packages_table(blocked_packages, console=console)
             sys.exit(0)
-
-        num_upgradable = len(can_upgrade)
-        if output != "json":
-            console.print(f"  {num_upgradable} packages can be safely upgraded")
-            if debug:
-                console.print(f"  [dim]Time: {step3_time:.2f}s[/dim]")
 
         # Step 4: Display table and ask for confirmation
         if output == "json":
@@ -642,51 +716,8 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                 console.print("[yellow]Upgrade cancelled.[/yellow]")
                 sys.exit(0)
 
-        # Separate editable and non-editable packages
-        editable_packages = [pkg for pkg in can_upgrade if pkg.is_editable]
-        non_editable_packages = [pkg for pkg in can_upgrade if not pkg.is_editable]
-
         # Step 5: Install packages
-        if output != "json":
-            total_to_upgrade = len(non_editable_packages) + len(editable_packages)
-            console.print(f"[bold]Step 5/5:[/bold] Upgrading {total_to_upgrade} package(s)...\n")
-        step5_start = time.time()
-
-        # Save state for potential rollback
-        from pipu_cli.rollback import save_state
-        pre_upgrade_packages = [
-            {"name": pkg.name, "version": str(pkg.version)}
-            for pkg in can_upgrade
-        ]
-        save_state(pre_upgrade_packages, "Pre-upgrade state")
-
-        stream = ConsoleStream(console) if output != "json" else None
-        results = []
-
-        # First, upgrade non-editable packages via pip install --upgrade
-        if non_editable_packages:
-            if output != "json":
-                console.print(f"Upgrading {len(non_editable_packages)} regular package(s)...\n")
-            regular_results = install_packages(
-                non_editable_packages,
-                output_stream=stream,
-                timeout=300,
-                version_constraints=package_constraints if package_constraints else None
-            )
-            results.extend(regular_results)
-
-        # Then, reinstall editable packages to update their versions
-        if editable_packages:
-            if output != "json":
-                console.print(f"\nReinstalling {len(editable_packages)} editable package(s)...\n")
-            editable_results = reinstall_editable_packages(
-                editable_packages,
-                output_stream=stream,
-                timeout=300
-            )
-            results.extend(editable_results)
-
-        step5_time = time.time() - step5_start
+        results, step5_time = _step5_install_packages(console, output, can_upgrade, package_constraints)
 
         # Update requirements file if requested
         if update_requirements:
