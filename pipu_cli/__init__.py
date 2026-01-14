@@ -1,7 +1,7 @@
 import logging
 from .config import LOG_LEVEL
 
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 
 
 # Configure logging
