@@ -20,12 +20,11 @@ from pipu_cli.cache import (
     format_cache_age,
     clear_cache,
     clear_all_caches,
-    get_cached_package,
-    build_cache_from_results,
+    build_version_cache,
     get_cache_info,
     CacheData,
 )
-from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo
+from pipu_cli.package_management import InstalledPackage
 
 
 class TestEnvironmentId:
@@ -102,7 +101,8 @@ class TestLoadCache:
                 "environment_id": "wrongenvid123",
                 "python_executable": "/wrong/python",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "packages": {}
+                "include_prereleases": False,
+                "latest_versions": {}
             }
             cache_path.write_text(json.dumps(cache_data))
 
@@ -121,15 +121,10 @@ class TestLoadCache:
                 "environment_id": env_id,
                 "python_executable": sys.executable,
                 "updated_at": now,
-                "packages": {
-                    "requests": {
-                        "name": "requests",
-                        "installed_version": "2.28.0",
-                        "latest_version": "2.31.0",
-                        "is_upgradable": True,
-                        "is_editable": False,
-                        "checked_at": now
-                    }
+                "include_prereleases": False,
+                "latest_versions": {
+                    "requests": "2.31.0",
+                    "numpy": "1.26.0"
                 }
             }
             cache_path.write_text(json.dumps(cache_data))
@@ -137,7 +132,8 @@ class TestLoadCache:
             result = load_cache()
             assert result is not None
             assert result.environment_id == env_id
-            assert "requests" in result.packages
+            assert "requests" in result.latest_versions
+            assert result.latest_versions["requests"] == "2.31.0"
 
 
 class TestSaveCache:
@@ -146,10 +142,8 @@ class TestSaveCache:
     def test_save_cache_creates_directory(self, tmp_path):
         """Test that save_cache creates the cache directory."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            packages = {
-                "test": {"name": "test", "installed_version": "1.0.0"}
-            }
-            cache_path = save_cache(packages)
+            latest_versions = {"test": "1.0.0"}
+            cache_path = save_cache(latest_versions)
 
             assert cache_path.exists()
             assert cache_path.parent.exists()
@@ -157,39 +151,43 @@ class TestSaveCache:
     def test_save_cache_writes_valid_json(self, tmp_path):
         """Test that save_cache writes valid JSON."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            packages = {
-                "requests": {
-                    "name": "requests",
-                    "installed_version": "2.28.0",
-                    "latest_version": "2.31.0"
-                }
+            latest_versions = {
+                "requests": "2.31.0",
+                "numpy": "1.26.0"
             }
-            cache_path = save_cache(packages)
+            cache_path = save_cache(latest_versions)
 
             data = json.loads(cache_path.read_text())
             assert "environment_id" in data
             assert "python_executable" in data
             assert "updated_at" in data
-            assert "packages" in data
-            assert data["packages"]["requests"]["name"] == "requests"
+            assert "include_prereleases" in data
+            assert "latest_versions" in data
+            assert data["latest_versions"]["requests"] == "2.31.0"
+
+    def test_save_cache_with_prereleases_flag(self, tmp_path):
+        """Test that save_cache stores prereleases flag."""
+        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
+            latest_versions = {"test": "1.0.0"}
+            save_cache(latest_versions, include_prereleases=True)
+
+            loaded = load_cache()
+            assert loaded is not None
+            assert loaded.include_prereleases is True
 
     def test_save_and_load_roundtrip(self, tmp_path):
         """Test that saved cache can be loaded back."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            packages = {
-                "numpy": {
-                    "name": "numpy",
-                    "installed_version": "1.24.0",
-                    "latest_version": "1.26.0",
-                    "is_upgradable": True
-                }
+            latest_versions = {
+                "numpy": "1.26.0",
+                "requests": "2.31.0"
             }
-            save_cache(packages)
+            save_cache(latest_versions)
             loaded = load_cache()
 
             assert loaded is not None
-            assert "numpy" in loaded.packages
-            assert loaded.packages["numpy"]["installed_version"] == "1.24.0"
+            assert "numpy" in loaded.latest_versions
+            assert loaded.latest_versions["numpy"] == "1.26.0"
 
 
 class TestCacheFreshness:
@@ -203,7 +201,7 @@ class TestCacheFreshness:
     def test_is_cache_fresh_returns_true_for_recent_cache(self, tmp_path):
         """Test is_cache_fresh returns True for fresh cache."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({"test": {"name": "test"}})
+            save_cache({"test": "1.0.0"})
             assert is_cache_fresh(ttl_seconds=3600) is True
 
     def test_is_cache_fresh_returns_false_for_old_cache(self, tmp_path):
@@ -219,7 +217,8 @@ class TestCacheFreshness:
                 "environment_id": env_id,
                 "python_executable": sys.executable,
                 "updated_at": old_time,
-                "packages": {}
+                "include_prereleases": False,
+                "latest_versions": {}
             }
             cache_path.write_text(json.dumps(cache_data))
 
@@ -234,7 +233,7 @@ class TestCacheFreshness:
     def test_get_cache_age_seconds_returns_age(self, tmp_path):
         """Test get_cache_age_seconds returns correct age."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({"test": {"name": "test"}})
+            save_cache({"test": "1.0.0"})
             age = get_cache_age_seconds()
 
             assert age is not None
@@ -289,7 +288,7 @@ class TestClearCache:
     def test_clear_cache_deletes_cache(self, tmp_path):
         """Test clear_cache deletes the cache file."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({"test": {"name": "test"}})
+            save_cache({"test": "1.0.0"})
             cache_path = get_cache_path()
             assert cache_path.exists()
 
@@ -314,49 +313,11 @@ class TestClearCache:
             assert count == 3
 
 
-class TestGetCachedPackage:
-    """Tests for get_cached_package function."""
+class TestBuildVersionCache:
+    """Tests for build_version_cache function."""
 
-    def test_get_cached_package_returns_none_when_no_cache(self, tmp_path):
-        """Test get_cached_package returns None when no cache exists."""
-        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            assert get_cached_package("requests") is None
-
-    def test_get_cached_package_returns_none_for_missing_package(self, tmp_path):
-        """Test get_cached_package returns None for missing package."""
-        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({"numpy": {"name": "numpy"}})
-            assert get_cached_package("requests") is None
-
-    def test_get_cached_package_returns_package_data(self, tmp_path):
-        """Test get_cached_package returns package data."""
-        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({
-                "requests": {
-                    "name": "requests",
-                    "installed_version": "2.28.0",
-                    "latest_version": "2.31.0"
-                }
-            })
-            result = get_cached_package("requests")
-
-            assert result is not None
-            assert result["name"] == "requests"
-
-    def test_get_cached_package_case_insensitive(self, tmp_path):
-        """Test get_cached_package is case insensitive."""
-        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
-            save_cache({"requests": {"name": "requests"}})
-
-            assert get_cached_package("REQUESTS") is not None
-            assert get_cached_package("Requests") is not None
-
-
-class TestBuildCacheFromResults:
-    """Tests for build_cache_from_results function."""
-
-    def test_build_cache_from_results(self):
-        """Test building cache from analysis results."""
+    def test_build_version_cache(self):
+        """Test building cache from version check results."""
         installed = [
             InstalledPackage(
                 name="requests",
@@ -372,32 +333,28 @@ class TestBuildCacheFromResults:
             ),
         ]
 
-        latest_mock = Mock()
-        latest_mock.version = Version("2.31.0")
+        latest_mock_requests = Mock()
+        latest_mock_requests.version = Version("2.31.0")
+
+        latest_mock_numpy = Mock()
+        latest_mock_numpy.version = Version("1.26.0")
 
         latest_versions = {
-            installed[0]: latest_mock,
+            installed[0]: latest_mock_requests,
+            installed[1]: latest_mock_numpy,
         }
 
-        upgradable = [
-            UpgradePackageInfo(
-                name="requests",
-                version=Version("2.28.0"),
-                upgradable=True,
-                latest_version=Version("2.31.0"),
-                is_editable=False
-            )
-        ]
-
-        result = build_cache_from_results(installed, latest_versions, upgradable)
+        result = build_version_cache(latest_versions)
 
         assert "requests" in result
-        assert result["requests"]["installed_version"] == "2.28.0"
-        assert result["requests"]["latest_version"] == "2.31.0"
-        assert result["requests"]["is_upgradable"] is True
-
+        assert result["requests"] == "2.31.0"
         assert "numpy" in result
-        assert result["numpy"]["is_upgradable"] is False
+        assert result["numpy"] == "1.26.0"
+
+    def test_build_version_cache_empty(self):
+        """Test building cache with no packages."""
+        result = build_version_cache({})
+        assert result == {}
 
 
 class TestGetCacheInfo:
@@ -416,8 +373,8 @@ class TestGetCacheInfo:
         """Test get_cache_info when cache exists."""
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
             save_cache({
-                "requests": {"name": "requests"},
-                "numpy": {"name": "numpy"}
+                "requests": "2.31.0",
+                "numpy": "1.26.0"
             })
 
             info = get_cache_info()
@@ -426,3 +383,4 @@ class TestGetCacheInfo:
             assert info["package_count"] == 2
             assert "updated_at" in info
             assert "age_human" in info
+            assert "include_prereleases" in info

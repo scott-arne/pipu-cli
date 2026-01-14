@@ -1,6 +1,5 @@
 """Configuration file support for pipu."""
 
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 

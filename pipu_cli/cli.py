@@ -13,6 +13,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 
 from pipu_cli.package_management import (
+    Package,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
@@ -20,6 +21,7 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages_with_reasons,
     install_packages,
 )
+from packaging.version import Version
 from pipu_cli.pretty import (
     print_upgradable_packages_table,
     print_upgrade_results,
@@ -34,7 +36,7 @@ from pipu_cli.cache import (
     is_cache_fresh,
     load_cache,
     save_cache,
-    build_cache_from_results,
+    build_version_cache,
     get_cache_info,
     format_cache_age,
     get_cache_age_seconds,
@@ -122,6 +124,8 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
     packages and stores it locally. This speeds up subsequent upgrade
     commands by avoiding repeated network requests.
 
+    Constraint resolution is performed at upgrade time, not during update.
+
     [bold]Examples:[/bold]
       pipu update              Update cache with defaults
       pipu update --parallel 4 Update with parallel requests
@@ -154,7 +158,7 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
     try:
         # Step 1: Inspect installed packages
         if output != "json":
-            console.print("[bold]Step 1/3:[/bold] Inspecting installed packages...")
+            console.print("[bold]Step 1/2:[/bold] Inspecting installed packages...")
 
         step1_start = time.time()
         if output != "json":
@@ -184,9 +188,9 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
                 console.print("[yellow]No packages found.[/yellow]")
             sys.exit(0)
 
-        # Step 2: Check for updates
+        # Step 2: Fetch latest versions from PyPI and save to cache
         if output != "json":
-            console.print("\n[bold]Step 2/3:[/bold] Fetching latest versions...")
+            console.print("\n[bold]Step 2/2:[/bold] Fetching latest versions from PyPI...")
 
         step2_start = time.time()
         if output != "json":
@@ -199,7 +203,7 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
             ) as progress:
                 task = progress.add_task("Checking packages...", total=len(installed_packages))
 
-                def update_progress(current, total):
+                def update_progress(current: int, total: int) -> None:
                     progress.update(task, completed=current)
 
                 if parallel > 1:
@@ -223,45 +227,29 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
                 )
         step2_time = time.time() - step2_start
 
-        num_updates = len(latest_versions)
-        if output != "json":
-            console.print(f"  Found {num_updates} packages with newer versions available")
-            if debug:
-                console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
+        # Build and save cache (only latest versions, no constraint resolution)
+        cache_data = build_version_cache(latest_versions)
+        cache_path = save_cache(cache_data, include_prereleases=pre)
 
-        # Step 3: Resolve and cache
-        if output != "json":
-            console.print("\n[bold]Step 3/3:[/bold] Resolving constraints and saving cache...")
-
-        step3_start = time.time()
-        all_upgradable = resolve_upgradable_packages(latest_versions, installed_packages)
-        upgradable_packages = [pkg for pkg in all_upgradable if pkg.upgradable]
-        step3_time = time.time() - step3_start
-
-        # Build and save cache
-        cache_data = build_cache_from_results(installed_packages, latest_versions, upgradable_packages)
-        cache_path = save_cache(cache_data)
-
-        num_upgradable = len(upgradable_packages)
+        num_with_updates = len(latest_versions)
 
         if output == "json":
             result = {
                 "status": "success",
                 "packages_checked": num_installed,
-                "packages_with_updates": num_updates,
-                "packages_upgradable": num_upgradable,
+                "packages_with_updates": num_with_updates,
                 "cache_path": str(cache_path)
             }
             print(json.dumps(result, indent=2))
         else:
-            console.print(f"  {num_upgradable} packages can be safely upgraded")
+            console.print(f"  Cached {num_with_updates} packages with updates available")
             if debug:
-                console.print(f"  [dim]Time: {step3_time:.2f}s[/dim]")
+                console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
                 console.print(f"  [dim]Cache saved to: {cache_path}[/dim]")
 
-            console.print("\n[bold green]Package list updated![/bold green] Run [cyan]pipu upgrade[/cyan] to upgrade your packages.")
+            console.print("\n[bold green]Cache updated![/bold green] Run [cyan]pipu upgrade[/cyan] to upgrade your packages.")
 
-            total_time = step1_time + step2_time + step3_time
+            total_time = step1_time + step2_time
             if debug:
                 console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
 
@@ -460,55 +448,39 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                 console.print("[yellow]No packages found.[/yellow]")
             sys.exit(0)
 
-        # Step 2: Check for updates (from cache or network)
+        # Step 2: Get latest versions (from cache or network)
         if output != "json":
             if use_cache:
                 console.print("\n[bold]Step 2/5:[/bold] Loading cached version data...")
             else:
-                console.print("\n[bold]Step 2/5:[/bold] Checking for updates...")
+                console.print("\n[bold]Step 2/5:[/bold] Fetching latest versions from PyPI...")
 
         step2_start = time.time()
         latest_versions: dict = {}
+        cache_was_used = False
 
         if use_cache:
-            # Load from cache
+            # Load latest versions from cache (skip PyPI queries entirely)
             cache_data = load_cache()
-            if cache_data and cache_data.packages:
-                # Reconstruct latest_versions from cache
-                # We need to fetch fresh for accurate constraint resolution
-                # Cache is mainly to avoid the slow PyPI queries
-                if output != "json":
-                    with Progress(
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(),
-                        TaskProgressColumn(),
-                        console=console,
-                        transient=True
-                    ) as progress:
-                        task = progress.add_task("Checking packages...", total=len(installed_packages))
-
-                        def update_progress(current, total):
-                            progress.update(task, completed=current)
-
-                        if parallel > 1:
-                            latest_versions = get_latest_versions_parallel(
-                                installed_packages, timeout=timeout, include_prereleases=pre,
-                                max_workers=parallel, progress_callback=update_progress
-                            )
-                        else:
-                            latest_versions = get_latest_versions(
-                                installed_packages, timeout=timeout, include_prereleases=pre,
-                                progress_callback=update_progress
-                            )
-                else:
-                    if parallel > 1:
-                        latest_versions = get_latest_versions_parallel(
-                            installed_packages, timeout=timeout, include_prereleases=pre, max_workers=parallel
-                        )
-                    else:
-                        latest_versions = get_latest_versions(
-                            installed_packages, timeout=timeout, include_prereleases=pre
-                        )
+            if cache_data and cache_data.latest_versions:
+                # Reconstruct latest_versions dict from cache
+                # Maps InstalledPackage -> Package with latest version
+                for installed_pkg in installed_packages:
+                    name_lower = installed_pkg.name.lower()
+                    if name_lower in cache_data.latest_versions:
+                        cached_version = cache_data.latest_versions[name_lower]
+                        try:
+                            latest_ver = Version(cached_version)
+                            # Only include if it's actually newer
+                            if latest_ver > installed_pkg.version:
+                                latest_pkg = Package(
+                                    name=installed_pkg.name,
+                                    version=latest_ver
+                                )
+                                latest_versions[installed_pkg] = latest_pkg
+                        except Exception:
+                            pass  # Skip invalid versions
+                cache_was_used = True
             else:
                 use_cache = False
 
@@ -524,7 +496,7 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                 ) as progress:
                     task = progress.add_task("Checking packages...", total=len(installed_packages))
 
-                    def update_progress(current, total):
+                    def update_progress(current: int, total: int) -> None:
                         progress.update(task, completed=current)
 
                     if parallel > 1:
@@ -547,11 +519,18 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                         installed_packages, timeout=timeout, include_prereleases=pre
                     )
 
+            # Update cache with fresh data
+            if cache_enabled:
+                version_cache = build_version_cache(latest_versions)
+                save_cache(version_cache, include_prereleases=pre)
+
         step2_time = time.time() - step2_start
 
         num_updates = len(latest_versions)
         if output != "json":
             console.print(f"  Found {num_updates} packages with newer versions available")
+            if cache_was_used:
+                console.print("  [dim](from cache)[/dim]")
             if debug:
                 console.print(f"  [dim]Time: {step2_time:.2f}s[/dim]")
 
@@ -577,11 +556,6 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
             blocked_packages = []
 
         step3_time = time.time() - step3_start
-
-        # Update cache with fresh data (if we fetched from network)
-        if not use_cache and cache_enabled:
-            cache_data = build_cache_from_results(installed_packages, latest_versions, upgradable_packages)
-            save_cache(cache_data)
 
         # Apply exclusions
         excluded_names = set()

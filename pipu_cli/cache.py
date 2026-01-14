@@ -1,15 +1,18 @@
-"""Package metadata caching for pipu.
+"""Package version caching for pipu.
 
-This module provides caching of package version information to speed up
+This module provides caching of latest package versions from PyPI to speed up
 repeated runs of pipu. The cache is per-environment, identified by the
 Python executable path, making it compatible with venv, conda, mise, etc.
+
+The cache stores only the latest available versions - constraint resolution
+is performed at upgrade time with the current installed package state.
 """
 
 import hashlib
 import json
 import logging
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -23,23 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class CachedPackage:
-    """Cached information about a single package."""
-    name: str
-    installed_version: str
-    latest_version: str
-    is_upgradable: bool
-    is_editable: bool
-    checked_at: str  # ISO format timestamp
-
-
-@dataclass
 class CacheData:
-    """Complete cache data structure."""
+    """Cache data structure - stores latest versions from PyPI."""
     environment_id: str
     python_executable: str
     updated_at: str  # ISO format timestamp
-    packages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    include_prereleases: bool
+    # Maps package name (lowercase) to latest version string
+    latest_versions: Dict[str, str]
 
 
 def get_environment_id() -> str:
@@ -52,7 +46,6 @@ def get_environment_id() -> str:
     :returns: Short hash identifying the environment
     """
     executable = sys.executable
-    # Create a short hash of the executable path
     hash_obj = hashlib.sha256(executable.encode())
     return hash_obj.hexdigest()[:12]
 
@@ -99,17 +92,19 @@ def load_cache() -> Optional[CacheData]:
             environment_id=data["environment_id"],
             python_executable=data["python_executable"],
             updated_at=data["updated_at"],
-            packages=data.get("packages", {})
+            include_prereleases=data.get("include_prereleases", False),
+            latest_versions=data.get("latest_versions", {})
         )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.debug(f"Failed to load cache: {e}")
         return None
 
 
-def save_cache(packages: Dict[str, Dict[str, Any]]) -> Path:
-    """Save package data to the cache.
+def save_cache(latest_versions: Dict[str, str], include_prereleases: bool = False) -> Path:
+    """Save latest version data to the cache.
 
-    :param packages: Dictionary mapping package names to their cached info
+    :param latest_versions: Dictionary mapping package names (lowercase) to latest version strings
+    :param include_prereleases: Whether prereleases were included in version check
     :returns: Path to the saved cache file
     """
     cache_dir = get_cache_dir()
@@ -121,7 +116,8 @@ def save_cache(packages: Dict[str, Dict[str, Any]]) -> Path:
         environment_id=get_environment_id(),
         python_executable=sys.executable,
         updated_at=datetime.now(timezone.utc).isoformat(),
-        packages=packages
+        include_prereleases=include_prereleases,
+        latest_versions=latest_versions
     )
 
     with open(cache_path, 'w') as f:
@@ -143,7 +139,6 @@ def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL) -> bool:
 
     try:
         updated_at = datetime.fromisoformat(cache.updated_at)
-        # Ensure updated_at is timezone-aware
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
 
@@ -237,61 +232,6 @@ def clear_all_caches() -> int:
     return count
 
 
-def get_cached_package(name: str) -> Optional[Dict[str, Any]]:
-    """Get cached data for a specific package.
-
-    :param name: Package name (case-insensitive)
-    :returns: Package cache data or None
-    """
-    cache = load_cache()
-    if cache is None:
-        return None
-
-    # Normalize name for lookup
-    name_lower = name.lower()
-    return cache.packages.get(name_lower)
-
-
-def build_cache_from_results(
-    installed_packages: List[Any],
-    latest_versions: Dict[Any, Any],
-    upgradable_packages: List[Any]
-) -> Dict[str, Dict[str, Any]]:
-    """Build cache data from pipu's package analysis results.
-
-    :param installed_packages: List of InstalledPackage objects
-    :param latest_versions: Dict mapping InstalledPackage to LatestVersionInfo
-    :param upgradable_packages: List of UpgradePackageInfo objects
-    :returns: Dictionary suitable for save_cache()
-    """
-    # Create lookup for upgradable packages
-    upgradable_names = {pkg.name.lower() for pkg in upgradable_packages}
-
-    packages = {}
-    now = datetime.now(timezone.utc).isoformat()
-
-    for installed in installed_packages:
-        name_lower = installed.name.lower()
-
-        # Find latest version if available
-        latest_version = None
-        for inst_pkg, latest_info in latest_versions.items():
-            if inst_pkg.name.lower() == name_lower:
-                latest_version = str(latest_info.version)
-                break
-
-        packages[name_lower] = {
-            "name": installed.name,
-            "installed_version": str(installed.version),
-            "latest_version": latest_version or str(installed.version),
-            "is_upgradable": name_lower in upgradable_names,
-            "is_editable": installed.is_editable,
-            "checked_at": now
-        }
-
-    return packages
-
-
 def get_cache_info() -> Dict[str, Any]:
     """Get information about the current cache.
 
@@ -300,7 +240,7 @@ def get_cache_info() -> Dict[str, Any]:
     cache = load_cache()
     cache_path = get_cache_path()
 
-    info = {
+    info: Dict[str, Any] = {
         "exists": cache is not None,
         "path": str(cache_path),
         "environment_id": get_environment_id(),
@@ -309,8 +249,27 @@ def get_cache_info() -> Dict[str, Any]:
 
     if cache:
         info["updated_at"] = cache.updated_at
-        info["package_count"] = len(cache.packages)
-        info["age_seconds"] = get_cache_age_seconds()
-        info["age_human"] = format_cache_age(info["age_seconds"])
+        info["package_count"] = len(cache.latest_versions)
+        info["include_prereleases"] = cache.include_prereleases
+        age_seconds = get_cache_age_seconds()
+        info["age_seconds"] = age_seconds
+        info["age_human"] = format_cache_age(age_seconds)
 
     return info
+
+
+def build_version_cache(
+    latest_versions: Dict[Any, Any]
+) -> Dict[str, str]:
+    """Build cache data from pipu's version check results.
+
+    :param latest_versions: Dict mapping InstalledPackage to Package with latest version
+    :returns: Dictionary mapping package names (lowercase) to latest version strings
+    """
+    result: Dict[str, str] = {}
+
+    for installed_pkg, latest_pkg in latest_versions.items():
+        name_lower = installed_pkg.name.lower()
+        result[name_lower] = str(latest_pkg.version)
+
+    return result
