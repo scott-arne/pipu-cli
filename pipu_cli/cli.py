@@ -20,6 +20,7 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
     install_packages,
+    reinstall_editable_packages,
 )
 from packaging.version import Version
 from pipu_cli.pretty import (
@@ -641,9 +642,14 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
                 console.print("[yellow]Upgrade cancelled.[/yellow]")
                 sys.exit(0)
 
+        # Separate editable and non-editable packages
+        editable_packages = [pkg for pkg in can_upgrade if pkg.is_editable]
+        non_editable_packages = [pkg for pkg in can_upgrade if not pkg.is_editable]
+
         # Step 5: Install packages
         if output != "json":
-            console.print("\n[bold]Step 5/5:[/bold] Upgrading packages...\n")
+            total_to_upgrade = len(non_editable_packages) + len(editable_packages)
+            console.print(f"[bold]Step 5/5:[/bold] Upgrading {total_to_upgrade} package(s)...\n")
         step5_start = time.time()
 
         # Save state for potential rollback
@@ -655,12 +661,31 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
         save_state(pre_upgrade_packages, "Pre-upgrade state")
 
         stream = ConsoleStream(console) if output != "json" else None
-        results = install_packages(
-            can_upgrade,
-            output_stream=stream,
-            timeout=300,
-            version_constraints=package_constraints if package_constraints else None
-        )
+        results = []
+
+        # First, upgrade non-editable packages via pip install --upgrade
+        if non_editable_packages:
+            if output != "json":
+                console.print(f"Upgrading {len(non_editable_packages)} regular package(s)...\n")
+            regular_results = install_packages(
+                non_editable_packages,
+                output_stream=stream,
+                timeout=300,
+                version_constraints=package_constraints if package_constraints else None
+            )
+            results.extend(regular_results)
+
+        # Then, reinstall editable packages to update their versions
+        if editable_packages:
+            if output != "json":
+                console.print(f"\nReinstalling {len(editable_packages)} editable package(s)...\n")
+            editable_results = reinstall_editable_packages(
+                editable_packages,
+                output_stream=stream,
+                timeout=300
+            )
+            results.extend(editable_results)
+
         step5_time = time.time() - step5_start
 
         # Update requirements file if requested

@@ -54,6 +54,7 @@ class InstalledPackage(Package):
     """Information about an installed package."""
     constrained_dependencies: Dict[str, str] = field(default_factory=dict, hash=False, compare=False)
     is_editable: bool = False
+    editable_location: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class UpgradePackageInfo(Package):
     upgradable: bool
     latest_version: Version
     is_editable: bool = False
+    editable_location: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class UpgradedPackage(Package):
     upgraded: bool
     previous_version: Version
     is_editable: bool = False
+    editable_location: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class BlockedPackageInfo(Package):
     latest_version: Version
     blocked_by: List[str]  # List of "package_name (constraint)" strings
     is_editable: bool = False
+    editable_location: Optional[str] = None
 
 
 def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
@@ -115,8 +119,9 @@ def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
                     logger.warning(f"Invalid version for {package_name}: {dist.version}. Skipping.")
                     continue
 
-                # Check if package is editable
+                # Check if package is editable and get its location
                 is_editable = canonical_name in editable_packages
+                editable_location = editable_packages.get(canonical_name) if is_editable else None
 
                 # Extract constrained dependencies
                 constrained_dependencies = _extract_constrained_dependencies(dist)
@@ -126,6 +131,7 @@ def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
                     name=package_name,
                     version=package_version,
                     is_editable=is_editable,
+                    editable_location=editable_location,
                     constrained_dependencies=constrained_dependencies
                 )
 
@@ -788,7 +794,8 @@ def resolve_upgradable_packages(
             version=installed_pkg.version,
             upgradable=can_upgrade,
             latest_version=latest_version,
-            is_editable=installed_pkg.is_editable
+            is_editable=installed_pkg.is_editable,
+            editable_location=installed_pkg.editable_location
         ))
 
     return result
@@ -891,7 +898,8 @@ def resolve_upgradable_packages_with_reasons(
                 version=installed_pkg.version,
                 upgradable=True,
                 latest_version=latest_version,
-                is_editable=installed_pkg.is_editable
+                is_editable=installed_pkg.is_editable,
+                editable_location=installed_pkg.editable_location
             ))
         elif is_actual_upgrade:
             # Blocked package
@@ -901,7 +909,8 @@ def resolve_upgradable_packages_with_reasons(
                 version=installed_pkg.version,
                 latest_version=latest_version,
                 blocked_by=reasons,
-                is_editable=installed_pkg.is_editable
+                is_editable=installed_pkg.is_editable,
+                editable_location=installed_pkg.editable_location
             ))
 
     return upgradable, blocked
@@ -1035,7 +1044,8 @@ def install_packages(
                     version=pkg.version,
                     upgraded=False,
                     previous_version=pkg.version,
-                    is_editable=pkg.is_editable
+                    is_editable=pkg.is_editable,
+                    editable_location=pkg.editable_location
                 )
                 for pkg in packages_to_upgrade
             ]
@@ -1078,7 +1088,8 @@ def install_packages(
                     version=current_version,
                     upgraded=True,
                     previous_version=previous_version,
-                    is_editable=pkg_info.is_editable
+                    is_editable=pkg_info.is_editable,
+                    editable_location=pkg_info.editable_location
                 )
                 results.append(upgraded_pkg)
                 logger.info(f"Successfully upgraded {pkg_info.name} from {previous_version} to {current_version}")
@@ -1090,7 +1101,8 @@ def install_packages(
                     version=actual_version,
                     upgraded=False,
                     previous_version=previous_version,
-                    is_editable=pkg_info.is_editable
+                    is_editable=pkg_info.is_editable,
+                    editable_location=pkg_info.editable_location
                 )
                 results.append(upgraded_pkg)
                 logger.info(f"Package {pkg_info.name} was not upgraded (still at {actual_version})")
@@ -1119,7 +1131,8 @@ def install_packages(
                 version=pkg.version,
                 upgraded=False,
                 previous_version=pkg.version,
-                is_editable=pkg.is_editable
+                is_editable=pkg.is_editable,
+                editable_location=pkg.editable_location
             )
             for pkg in packages_to_upgrade
         ]
@@ -1139,7 +1152,139 @@ def install_packages(
                 version=pkg.version,
                 upgraded=False,
                 previous_version=pkg.version,
-                is_editable=pkg.is_editable
+                is_editable=pkg.is_editable,
+                editable_location=pkg.editable_location
             )
             for pkg in packages_to_upgrade
         ]
+
+
+def reinstall_editable_packages(
+    editable_packages: List[UpgradePackageInfo],
+    output_stream: Optional[OutputStream] = None,
+    timeout: int = 300,
+) -> List[UpgradedPackage]:
+    """
+    Reinstall editable packages to update their version metadata.
+
+    Uses `pip install --config-settings editable_mode=compat -e <path>` to reinstall
+    each editable package. This updates the package version in the environment
+    while maintaining the editable install.
+
+    :param editable_packages: List of UpgradePackageInfo objects for editable packages
+    :param output_stream: Optional stream implementing write() and flush() for live progress updates
+    :param timeout: Timeout in seconds for each installation (default: 300)
+    :returns: List of UpgradedPackage objects with upgrade status
+    """
+    if not editable_packages:
+        return []
+
+    results = []
+
+    for pkg in editable_packages:
+        if not pkg.editable_location:
+            logger.warning(f"Editable package {pkg.name} has no location, skipping")
+            results.append(UpgradedPackage(
+                name=pkg.name,
+                version=pkg.version,
+                upgraded=False,
+                previous_version=pkg.version,
+                is_editable=True,
+                editable_location=pkg.editable_location
+            ))
+            continue
+
+        if output_stream:
+            output_stream.write(f"Reinstalling editable package: {pkg.name} from {pkg.editable_location}\n")
+            output_stream.flush()
+
+        cmd = [
+            sys.executable, '-m', 'pip', 'install',
+            '--config-settings', 'editable_mode=compat',
+            '-e', pkg.editable_location
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+
+            # Read output
+            stdout, stderr = process.communicate(timeout=timeout)
+            returncode = process.returncode
+
+            if output_stream and stdout:
+                output_stream.write(stdout)
+            if output_stream and stderr:
+                output_stream.write(stderr)
+            if output_stream:
+                output_stream.flush()
+
+            if returncode == 0:
+                # Get the new version after reinstall
+                env = get_default_environment()
+                canonical_name = canonicalize_name(pkg.name)
+                new_version = pkg.version  # Default to old version
+
+                for dist in env.iter_all_distributions():
+                    dist_name = dist.metadata.get("name", "")
+                    if canonicalize_name(dist_name) == canonical_name:
+                        try:
+                            new_version = Version(str(dist.version))
+                        except InvalidVersion:
+                            pass
+                        break
+
+                results.append(UpgradedPackage(
+                    name=pkg.name,
+                    version=new_version,
+                    upgraded=new_version > pkg.version,
+                    previous_version=pkg.version,
+                    is_editable=True,
+                    editable_location=pkg.editable_location
+                ))
+                logger.info(f"Reinstalled editable package {pkg.name}: {pkg.version} -> {new_version}")
+            else:
+                results.append(UpgradedPackage(
+                    name=pkg.name,
+                    version=pkg.version,
+                    upgraded=False,
+                    previous_version=pkg.version,
+                    is_editable=True,
+                    editable_location=pkg.editable_location
+                ))
+                logger.warning(f"Failed to reinstall editable package {pkg.name}")
+
+        except subprocess.TimeoutExpired:
+            if output_stream:
+                output_stream.write(f"ERROR: Timeout reinstalling {pkg.name}\n")
+                output_stream.flush()
+            results.append(UpgradedPackage(
+                name=pkg.name,
+                version=pkg.version,
+                upgraded=False,
+                previous_version=pkg.version,
+                is_editable=True,
+                editable_location=pkg.editable_location
+            ))
+            logger.error(f"Timeout reinstalling editable package {pkg.name}")
+
+        except Exception as e:
+            if output_stream:
+                output_stream.write(f"ERROR: Failed to reinstall {pkg.name}: {e}\n")
+                output_stream.flush()
+            results.append(UpgradedPackage(
+                name=pkg.name,
+                version=pkg.version,
+                upgraded=False,
+                previous_version=pkg.version,
+                is_editable=True,
+                editable_location=pkg.editable_location
+            ))
+            logger.error(f"Error reinstalling editable package {pkg.name}: {e}")
+
+    return results
