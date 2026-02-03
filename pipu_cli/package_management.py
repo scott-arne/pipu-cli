@@ -18,6 +18,7 @@ from pip._internal.index.collector import LinkCollector
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.network.session import PipSession
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.release_control import ReleaseControl
 
 # Set up module logger
 logger = logging.getLogger(__name__)
@@ -370,9 +371,10 @@ def get_latest_versions_parallel(
         raise ConnectionError(f"Failed to create network session: {e}") from e
 
     # Set up package finder with configured indexes
+    release_control = ReleaseControl(all_releases={":all:"}) if include_prereleases else None
     selection_prefs = SelectionPreferences(
         allow_yanked=False,
-        allow_all_prereleases=include_prereleases
+        release_control=release_control
     )
 
     search_scope = SearchScope.create(
@@ -565,9 +567,10 @@ def get_latest_versions(
         raise ConnectionError(f"Failed to create network session: {e}") from e
 
     # Set up package finder with configured indexes
+    release_control = ReleaseControl(all_releases={":all:"}) if include_prereleases else None
     selection_prefs = SelectionPreferences(
         allow_yanked=False,
-        allow_all_prereleases=include_prereleases
+        release_control=release_control
     )
 
     search_scope = SearchScope.create(
