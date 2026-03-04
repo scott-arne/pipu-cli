@@ -2,6 +2,7 @@
 
 import json
 import logging
+import multiprocessing as mp
 import sys
 import time
 from typing import Optional
@@ -101,10 +102,10 @@ def cli(ctx: click.Context) -> None:
     help="Include pre-release versions"
 )
 @click.option(
-    "--parallel",
+    "--parallel", "-p",
     type=int,
-    default=1,
-    help="Number of parallel requests for version checking (default: 1)"
+    default=min(4, mp.cpu_count()),
+    help=f"Number of parallel requests for version checking (default: {min(4, mp.cpu_count())})"
 )
 @click.option(
     "--debug",
@@ -142,8 +143,9 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
         pre = get_config_value(config, 'pre', False)
     if not debug:
         debug = get_config_value(config, 'debug', False)
-    if parallel == 1:
-        parallel = get_config_value(config, 'parallel', 1)
+    default_parallel = min(4, mp.cpu_count())
+    if parallel == default_parallel:
+        parallel = get_config_value(config, 'parallel', default_parallel)
 
     # Configure logging
     if debug and output != "json":
@@ -538,10 +540,10 @@ def _step5_install_packages(
     help="Update the specified requirements.txt file with new versions"
 )
 @click.option(
-    "--parallel",
+    "--parallel", "-p",
     type=int,
-    default=1,
-    help="Number of parallel requests for version checking (default: 1)"
+    default=min(4, mp.cpu_count()),
+    help=f"Number of parallel requests for version checking (default: {min(4, mp.cpu_count())})"
 )
 @click.option(
     "--interactive", "-i",
