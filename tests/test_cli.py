@@ -361,3 +361,31 @@ def test_explicit_cli_pre_flag_overrides_config(runner):
         # The command should have used pre=True from CLI, not False from config
         # We can't easily assert the value directly, but the command should succeed
         assert result.exit_code == 0
+
+
+def test_exclude_accepts_repeated_flag(runner):
+    """Test --exclude works as repeatable flag (-e numpy -e pandas)."""
+    installed = [
+        InstalledPackage(name="requests", version=Version("2.28.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={}),
+        InstalledPackage(name="pandas", version=Version("2.0.0"), is_editable=False, constrained_dependencies={}),
+    ]
+    upgradable = [
+        UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0"), is_editable=False),
+        UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("2.0.0"), is_editable=False),
+        UpgradePackageInfo(name="pandas", version=Version("2.0.0"), upgradable=True, latest_version=Version("2.1.0"), is_editable=False),
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions', return_value={
+             installed[0]: Mock(version=Version("2.31.0")),
+             installed[1]: Mock(version=Version("2.0.0")),
+             installed[2]: Mock(version=Version("2.1.0")),
+         }), \
+         patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
+
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '-e', 'numpy', '-e', 'pandas', '--no-cache'])
+
+        assert result.exit_code == 0
+        assert 'requests' in result.output
+        # numpy and pandas should be excluded

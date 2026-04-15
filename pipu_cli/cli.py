@@ -115,7 +115,7 @@ def cli(ctx: click.Context) -> None:
     help="Enable debug logging"
 )
 @click.option(
-    "--output",
+    "--output", "-o",
     type=click.Choice(["human", "json"]),
     default="human",
     help="Output format (human-readable or json)"
@@ -387,6 +387,18 @@ def _step2_get_latest_versions(
     return latest_versions, step_time, cache_was_used
 
 
+def _parse_excludes(exclude_tuple: tuple) -> str:
+    """Flatten repeatable --exclude values into comma-separated string.
+
+    :param exclude_tuple: Tuple of exclude values from Click multiple option
+    :returns: Comma-separated string of package names
+    """
+    result = []
+    for item in exclude_tuple:
+        result.extend(name.strip() for name in item.split(",") if name.strip())
+    return ",".join(result)
+
+
 def _step3_resolve_packages(
     console: Console, output: str, debug: bool,
     latest_versions: dict, installed_packages: list, show_blocked: bool,
@@ -521,18 +533,17 @@ def _step5_install_packages(
     help="Show what would be upgraded without actually upgrading"
 )
 @click.option(
-    "--exclude",
-    type=str,
-    default="",
-    help="Comma-separated list of packages to exclude from upgrade"
+    "--exclude", "-e",
+    multiple=True,
+    help="Packages to exclude from upgrade (repeatable, comma-separated)"
 )
 @click.option(
-    "--show-blocked",
+    "--show-blocked", "-b",
     is_flag=True,
     help="Show packages that cannot be upgraded and why"
 )
 @click.option(
-    "--output",
+    "--output", "-o",
     type=click.Choice(["human", "json"]),
     default="human",
     help="Output format (human-readable or json)"
@@ -566,7 +577,7 @@ def _step5_install_packages(
     help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})"
 )
 def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
-            exclude: str, show_blocked: bool, output: str, update_requirements: Optional[str],
+            exclude: tuple, show_blocked: bool, output: str, update_requirements: Optional[str],
             parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int]) -> None:
     """
     Upgrade installed packages.
@@ -594,8 +605,9 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         timeout = get_config_value(config, 'timeout', 10)
     if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
         exclude_list = get_config_value(config, 'exclude', [])
-        if exclude_list:
-            exclude = ','.join(exclude_list)
+        exclude_str = ','.join(exclude_list) if exclude_list else ""
+    else:
+        exclude_str = _parse_excludes(exclude)
     if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
         pre = get_config_value(config, 'pre', False)
     if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
@@ -668,7 +680,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         # Step 3: Resolve upgradable packages
         can_upgrade, blocked_packages, package_constraints, step3_time = _step3_resolve_packages(
             console, output, debug, latest_versions, installed_packages, show_blocked,
-            exclude, packages
+            exclude_str, packages
         )
 
         if not can_upgrade:
