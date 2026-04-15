@@ -979,7 +979,13 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
     default=None,
     help="Specific state file to rollback to (use --list to see available states)"
 )
-def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[str]) -> None:
+@click.option(
+    "--output", "-o",
+    type=click.Choice(["human", "json"]),
+    default="human",
+    help="Output format (human-readable or json)"
+)
+def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[str], output: str) -> None:
     """
     Restore packages to a previous state.
 
@@ -1000,8 +1006,15 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     if list_states_flag:
         states = get_states()
         if not states:
-            console.print("[yellow]No saved states found.[/yellow]")
-            console.print(f"[dim]States are saved in: {ROLLBACK_DIR}[/dim]")
+            if output == "json":
+                print(json.dumps({"states": []}, indent=2))
+            else:
+                console.print("[yellow]No saved states found.[/yellow]")
+                console.print(f"[dim]States are saved in: {ROLLBACK_DIR}[/dim]")
+            sys.exit(0)
+
+        if output == "json":
+            print(json.dumps({"states": states}, indent=2))
             sys.exit(0)
 
         table = Table(title="[bold]Saved Rollback States[/bold]")
@@ -1035,8 +1048,11 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     if state:
         state_path = ROLLBACK_DIR / state
         if not state_path.exists():
-            console.print(f"[red]State file not found:[/red] {state}")
-            console.print("[dim]Use 'pipu rollback --list' to see available states[/dim]")
+            if output == "json":
+                print(json.dumps({"error": f"State file not found: {state}"}, indent=2))
+            else:
+                console.print(f"[red]State file not found:[/red] {state}")
+                console.print("[dim]Use 'pipu rollback --list' to see available states[/dim]")
             sys.exit(1)
 
         with open(state_path, 'r') as f:
@@ -1045,8 +1061,11 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
         state_data = get_latest_state()
 
     if state_data is None:
-        console.print("[yellow]No saved state found.[/yellow]")
-        console.print("[dim]A state is automatically saved before each upgrade.[/dim]")
+        if output == "json":
+            print(json.dumps({"error": "No saved state found"}, indent=2))
+        else:
+            console.print("[yellow]No saved state found.[/yellow]")
+            console.print("[dim]A state is automatically saved before each upgrade.[/dim]")
         sys.exit(0)
 
     # Show what will be rolled back
@@ -1059,23 +1078,28 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     else:
         formatted_ts = timestamp
 
-    console.print(f"\n[bold]Rollback State:[/bold] {formatted_ts}")
-    if description:
-        console.print(f"[dim]{description}[/dim]")
-    console.print()
+    if output == "json":
+        if dry_run:
+            print(json.dumps({"packages": packages, "timestamp": formatted_ts, "description": description}, indent=2))
+            sys.exit(0)
+    else:
+        console.print(f"\n[bold]Rollback State:[/bold] {formatted_ts}")
+        if description:
+            console.print(f"[dim]{description}[/dim]")
+        console.print()
 
-    table = Table(title=f"[bold]{len(packages)} Package(s) to Restore[/bold]")
-    table.add_column("Package", style="cyan")
-    table.add_column("Version", style="green")
+        table = Table(title=f"[bold]{len(packages)} Package(s) to Restore[/bold]")
+        table.add_column("Package", style="cyan")
+        table.add_column("Version", style="green")
 
-    for pkg in packages:
-        table.add_row(pkg["name"], pkg["version"])
+        for pkg in packages:
+            table.add_row(pkg["name"], pkg["version"])
 
-    console.print(table)
+        console.print(table)
 
-    if dry_run:
-        console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
-        sys.exit(0)
+        if dry_run:
+            console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
+            sys.exit(0)
 
     if not yes:
         console.print()
@@ -1084,16 +1108,20 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
             console.print("[yellow]Rollback cancelled.[/yellow]")
             sys.exit(0)
 
-    console.print("\n[bold]Rolling back packages...[/bold]\n")
+    if output != "json":
+        console.print("\n[bold]Rolling back packages...[/bold]\n")
 
     rolled_back = rollback_to_state(state_data, dry_run=False)
 
-    if rolled_back:
-        console.print(f"\n[bold green]Successfully rolled back {len(rolled_back)} package(s):[/bold green]")
-        for pkg in rolled_back:
-            console.print(f"  - {pkg}")
+    if output == "json":
+        print(json.dumps({"rolled_back": rolled_back or []}, indent=2))
     else:
-        console.print("[yellow]No packages were rolled back.[/yellow]")
+        if rolled_back:
+            console.print(f"\n[bold green]Successfully rolled back {len(rolled_back)} package(s):[/bold green]")
+            for pkg in rolled_back:
+                console.print(f"  - {pkg}")
+        else:
+            console.print("[yellow]No packages were rolled back.[/yellow]")
 
     sys.exit(0)
 

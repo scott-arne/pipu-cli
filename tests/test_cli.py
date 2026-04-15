@@ -1,5 +1,6 @@
 """Tests for CLI module."""
 
+import json
 import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, Mock
@@ -431,4 +432,20 @@ def test_outdated_shows_blocked_by_default(runner):
 
         assert 'numpy' in result.output
         assert 'scipy' in result.output
+        assert result.exit_code == 0
+
+
+def test_rollback_list_json_output(runner):
+    """Test pipu rollback --list --output json returns valid JSON."""
+    mock_states = [
+        {"file": "state_20260101_120000.json", "timestamp": "20260101_120000",
+         "package_count": 3, "description": "Pre-upgrade state"}
+    ]
+
+    with patch('pipu_cli.rollback.list_states', return_value=mock_states):
+        result = runner.invoke(cli, ['rollback', '--list', '--output', 'json'])
+
+        data = json.loads(result.output)
+        assert "states" in data
+        assert len(data["states"]) == 1
         assert result.exit_code == 0
