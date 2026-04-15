@@ -11,6 +11,7 @@ from pipu_cli.package_management import (
     InstalledPackage,
     Package,
     UpgradePackageInfo,
+    UpgradedPackage,
     inspect_installed_packages,
     get_latest_versions,
     resolve_upgradable_packages,
@@ -2823,3 +2824,27 @@ def test_install_packages_interleaves_stdout_stderr(mock_popen):
     assert "STDOUT: Installing\n" in output
     assert "STDERR: Warning 1\n" in output
     assert "STDERR: Warning 2\n" in output
+
+
+# ============================================================================
+# Tests for UpgradedPackage failure_reason field
+# ============================================================================
+
+def test_upgraded_package_has_failure_reason_field():
+    """Test that UpgradedPackage has an optional failure_reason field."""
+    pkg = UpgradedPackage(
+        name="requests",
+        version=Version("2.28.0"),
+        upgraded=False,
+        previous_version=Version("2.28.0"),
+        failure_reason="Version unchanged — may be constrained by dependency resolver"
+    )
+    assert pkg.failure_reason == "Version unchanged — may be constrained by dependency resolver"
+
+    pkg_ok = UpgradedPackage(
+        name="requests",
+        version=Version("2.31.0"),
+        upgraded=True,
+        previous_version=Version("2.28.0"),
+    )
+    assert pkg_ok.failure_reason is None

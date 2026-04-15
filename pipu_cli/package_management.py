@@ -74,6 +74,7 @@ class UpgradedPackage(Package):
     previous_version: Version
     is_editable: bool = False
     editable_location: Optional[str] = None
+    failure_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1048,7 +1049,8 @@ def install_packages(
                     upgraded=False,
                     previous_version=pkg.version,
                     is_editable=pkg.is_editable,
-                    editable_location=pkg.editable_location
+                    editable_location=pkg.editable_location,
+                    failure_reason=f"Installation failed (pip exit code {returncode})"
                 )
                 for pkg in packages_to_upgrade
             ]
@@ -1105,7 +1107,8 @@ def install_packages(
                     upgraded=False,
                     previous_version=previous_version,
                     is_editable=pkg_info.is_editable,
-                    editable_location=pkg_info.editable_location
+                    editable_location=pkg_info.editable_location,
+                    failure_reason="Version unchanged \u2014 may be constrained by dependency resolver"
                 )
                 results.append(upgraded_pkg)
                 logger.info(f"Package {pkg_info.name} was not upgraded (still at {actual_version})")
@@ -1135,7 +1138,8 @@ def install_packages(
                 upgraded=False,
                 previous_version=pkg.version,
                 is_editable=pkg.is_editable,
-                editable_location=pkg.editable_location
+                editable_location=pkg.editable_location,
+                failure_reason="Installation timed out"
             )
             for pkg in packages_to_upgrade
         ]
@@ -1156,7 +1160,8 @@ def install_packages(
                 upgraded=False,
                 previous_version=pkg.version,
                 is_editable=pkg.is_editable,
-                editable_location=pkg.editable_location
+                editable_location=pkg.editable_location,
+                failure_reason=f"Installation failed: {e}"
             )
             for pkg in packages_to_upgrade
         ]
@@ -1193,7 +1198,8 @@ def reinstall_editable_packages(
                 upgraded=False,
                 previous_version=pkg.version,
                 is_editable=True,
-                editable_location=pkg.editable_location
+                editable_location=pkg.editable_location,
+                failure_reason="Editable package has no source location"
             ))
             continue
 
@@ -1242,10 +1248,13 @@ def reinstall_editable_packages(
                             pass
                         break
 
+                # For editable packages, a successful pip install is sufficient
+                # to consider the reinstall successful. The version is determined
+                # by the local source, not PyPI, so it may not increase.
                 results.append(UpgradedPackage(
                     name=pkg.name,
                     version=new_version,
-                    upgraded=new_version > pkg.version,
+                    upgraded=True,
                     previous_version=pkg.version,
                     is_editable=True,
                     editable_location=pkg.editable_location
@@ -1258,7 +1267,8 @@ def reinstall_editable_packages(
                     upgraded=False,
                     previous_version=pkg.version,
                     is_editable=True,
-                    editable_location=pkg.editable_location
+                    editable_location=pkg.editable_location,
+                    failure_reason=f"Installation failed (pip exit code {returncode})"
                 ))
                 logger.warning(f"Failed to reinstall editable package {pkg.name}")
 
@@ -1272,7 +1282,8 @@ def reinstall_editable_packages(
                 upgraded=False,
                 previous_version=pkg.version,
                 is_editable=True,
-                editable_location=pkg.editable_location
+                editable_location=pkg.editable_location,
+                failure_reason="Installation timed out"
             ))
             logger.error(f"Timeout reinstalling editable package {pkg.name}")
 
@@ -1286,7 +1297,8 @@ def reinstall_editable_packages(
                 upgraded=False,
                 previous_version=pkg.version,
                 is_editable=True,
-                editable_location=pkg.editable_location
+                editable_location=pkg.editable_location,
+                failure_reason=f"Installation failed: {e}"
             ))
             logger.error(f"Error reinstalling editable package {pkg.name}: {e}")
 
