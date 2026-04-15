@@ -79,9 +79,10 @@ def cli(ctx: click.Context) -> None:
     constraint resolution.
 
     [bold]Commands:[/bold]
-      pipu update      Refresh package version cache
       pipu upgrade     Upgrade packages (default command)
-      pipu outdated    Show outdated packages
+      pipu outdated    Show packages with updates available
+      pipu update      Refresh package version cache
+      pipu clean       Clear caches
       pipu rollback    Restore packages to a previous state
 
     Run [cyan]pipu <command> --help[/cyan] for command-specific help.
@@ -654,6 +655,19 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         logging.getLogger('pip._vendor').setLevel(logging.WARNING)
         console.print("[dim]Debug mode enabled[/dim]\n")
 
+        # Show cache diagnostics
+        info = get_cache_info()
+        console.print("[dim]Cache diagnostics:[/dim]")
+        console.print(f"  [dim]Cache path: {info['path']}[/dim]")
+        console.print(f"  [dim]Environment ID: {info['environment_id']}[/dim]")
+        console.print(f"  [dim]Python: {info['python_executable']}[/dim]")
+        if info['exists']:
+            console.print(f"  [dim]Packages cached: {info.get('package_count', 0)}[/dim]")
+            console.print(f"  [dim]Cache age: {info.get('age_human', 'unknown')}[/dim]")
+        else:
+            console.print("  [dim]No cache exists[/dim]")
+        console.print()
+
     try:
         # Check cache freshness
         effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
@@ -855,6 +869,19 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         logging.getLogger('pip._internal').setLevel(logging.WARNING)
         logging.getLogger('pip._vendor').setLevel(logging.WARNING)
         console.print("[dim]Debug mode enabled[/dim]\n")
+
+        # Show cache diagnostics
+        info = get_cache_info()
+        console.print("[dim]Cache diagnostics:[/dim]")
+        console.print(f"  [dim]Cache path: {info['path']}[/dim]")
+        console.print(f"  [dim]Environment ID: {info['environment_id']}[/dim]")
+        console.print(f"  [dim]Python: {info['python_executable']}[/dim]")
+        if info['exists']:
+            console.print(f"  [dim]Packages cached: {info.get('package_count', 0)}[/dim]")
+            console.print(f"  [dim]Cache age: {info.get('age_human', 'unknown')}[/dim]")
+        else:
+            console.print("  [dim]No cache exists[/dim]")
+        console.print()
 
     try:
         effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
@@ -1067,46 +1094,6 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
             console.print(f"  - {pkg}")
     else:
         console.print("[yellow]No packages were rolled back.[/yellow]")
-
-    sys.exit(0)
-
-
-@cli.command()
-def cache() -> None:
-    """
-    Show cache information.
-
-    Displays details about the package version cache for the current
-    Python environment, including age and freshness status.
-
-    [bold]Examples:[/bold]
-      pipu cache           Show cache status
-      pipu clean           Clear current environment cache
-      pipu clean --all     Clear all environment caches
-    """
-    console = Console()
-
-    # Show cache info
-    info = get_cache_info()
-
-    console.print("[bold]Cache Information[/bold]\n")
-    console.print(f"  Environment ID: [cyan]{info['environment_id']}[/cyan]")
-    console.print(f"  Python: [dim]{info['python_executable']}[/dim]")
-    console.print(f"  Cache path: [dim]{info['path']}[/dim]")
-
-    if info['exists']:
-        console.print("\n  [green]Cache exists[/green]")
-        console.print(f"  Updated: {info.get('age_human', 'unknown')}")
-        console.print(f"  Packages cached: {info.get('package_count', 0)}")
-
-        # Check if fresh
-        if is_cache_fresh():
-            console.print("  Status: [green]Fresh[/green] (within TTL)")
-        else:
-            console.print("  Status: [yellow]Stale[/yellow] (will refresh on next upgrade)")
-    else:
-        console.print("\n  [yellow]No cache[/yellow]")
-        console.print("  Run [cyan]pipu update[/cyan] to create cache")
 
     sys.exit(0)
 
