@@ -1,5 +1,6 @@
 """Configuration file support for pipu."""
 
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -7,6 +8,8 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 def find_config_file() -> Optional[Path]:
@@ -32,8 +35,8 @@ def find_config_file() -> Optional[Path]:
                 data = tomllib.load(f)
             if "tool" in data and "pipu" in data["tool"]:
                 return pyproject
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse {pyproject}: {e}")
 
     # Check user config directory
     user_config = Path.home() / ".config" / "pipu" / "config.toml"
@@ -64,7 +67,8 @@ def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             return data.get("tool", {}).get("pipu", {})
 
         return data
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to load config from {config_path}: {e}")
         return {}
 
 

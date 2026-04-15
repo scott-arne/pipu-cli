@@ -1,5 +1,6 @@
 """Tests for configuration file support."""
 
+import logging
 import pytest
 from pathlib import Path
 from unittest.mock import patch, mock_open
@@ -189,3 +190,15 @@ delay = 1.5
     assert isinstance(config["debug"], bool)
     assert isinstance(config["retries"], int)
     assert isinstance(config["delay"], float)
+
+
+def test_load_config_invalid_toml_logs_warning(tmp_path, caplog):
+    """Test that invalid TOML logs a warning."""
+    config_file = tmp_path / "invalid.toml"
+    config_file.write_text("this is not valid TOML {[}")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(config_file)
+
+    assert config == {}
+    assert any("Failed to load" in record.message for record in caplog.records)
