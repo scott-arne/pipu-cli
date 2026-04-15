@@ -389,3 +389,46 @@ def test_exclude_accepts_repeated_flag(runner):
         assert result.exit_code == 0
         assert 'requests' in result.output
         # numpy and pandas should be excluded
+
+
+def test_outdated_shows_upgradable_packages(runner, mock_packages):
+    """Test pipu outdated shows packages without installing."""
+    installed, upgradable = mock_packages
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
+         patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, [])), \
+         patch('pipu_cli.cli.install_packages') as mock_install:
+
+        result = runner.invoke(cli, ['outdated', '--no-cache'])
+
+        mock_install.assert_not_called()
+        assert 'requests' in result.output
+        assert result.exit_code == 0
+
+
+def test_outdated_shows_blocked_by_default(runner):
+    """Test pipu outdated shows blocked packages by default (--show-blocked=True)."""
+    installed = [
+        InstalledPackage(name="numpy", version=Version("1.24.0"), is_editable=False, constrained_dependencies={})
+    ]
+    upgradable = []
+    blocked = [
+        BlockedPackageInfo(
+            name="numpy",
+            version=Version("1.24.0"),
+            latest_version=Version("2.0.0"),
+            blocked_by=["scipy requires >=1.20,<1.25"],
+            is_editable=False
+        )
+    ]
+
+    with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
+         patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.0.0"))}), \
+         patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, blocked)):
+
+        result = runner.invoke(cli, ['outdated', '--no-cache'])
+
+        assert 'numpy' in result.output
+        assert 'scipy' in result.output
+        assert result.exit_code == 0

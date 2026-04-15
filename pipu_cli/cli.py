@@ -81,6 +81,7 @@ def cli(ctx: click.Context) -> None:
     [bold]Commands:[/bold]
       pipu update      Refresh package version cache
       pipu upgrade     Upgrade packages (default command)
+      pipu outdated    Show outdated packages
       pipu rollback    Restore packages to a previous state
 
     Run [cyan]pipu <command> --help[/cyan] for command-specific help.
@@ -778,6 +779,145 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         sys.exit(130)
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.pass_context
+@click.option("--timeout", type=int, default=10, help="Network timeout in seconds for package queries")
+@click.option("--pre", is_flag=True, help="Include pre-release versions")
+@click.option("--debug", is_flag=True, help="Enable debug logging and show performance timing")
+@click.option("--exclude", "-e", multiple=True, help="Packages to exclude (repeatable, comma-separated)")
+@click.option("--show-blocked", "-b", is_flag=True, default=True,
+              help="Show packages blocked by constraints (default: enabled)")
+@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
+              help="Output format (human-readable or json)")
+@click.option("--parallel", "-p", type=int, default=min(4, mp.cpu_count()),
+              help=f"Number of parallel requests for version checking (default: {min(4, mp.cpu_count())})")
+@click.option("--no-cache", is_flag=True, help="Skip cache and fetch fresh version data")
+@click.option("--cache-ttl", type=int, default=None,
+              help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})")
+def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, no_cache, cache_ttl):
+    """
+    Show outdated packages.
+
+    Displays packages that have newer versions available, along with any
+    packages blocked by dependency constraints. Does not install anything.
+
+    [bold]Examples:[/bold]
+      pipu outdated              Show all outdated packages
+      pipu outdated --no-cache   Force fresh version check
+      pipu outdated -o json      Machine-readable output
+    """
+    console = Console()
+
+    # Load config and apply defaults (same pattern as upgrade)
+    config = load_config()
+    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
+        timeout = get_config_value(config, 'timeout', 10)
+    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
+        pre = get_config_value(config, 'pre', False)
+    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
+        debug = get_config_value(config, 'debug', False)
+    if ctx.get_parameter_source('show_blocked') == ParameterSource.DEFAULT:
+        show_blocked = get_config_value(config, 'show_blocked', True)
+    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
+        output = get_config_value(config, 'output', 'human')
+    if ctx.get_parameter_source('parallel') == ParameterSource.DEFAULT:
+        parallel = get_config_value(config, 'parallel', min(4, mp.cpu_count()))
+    if ctx.get_parameter_source('cache_ttl') == ParameterSource.DEFAULT:
+        cache_ttl = get_config_value(config, 'cache_ttl', DEFAULT_CACHE_TTL)
+
+    # Process excludes
+    if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
+        exclude_list = get_config_value(config, 'exclude', [])
+        exclude_str = ','.join(exclude_list) if exclude_list else ""
+    else:
+        exclude_str = _parse_excludes(exclude)
+
+    cache_enabled = get_config_value(config, 'cache_enabled', True) and not no_cache
+    json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    if debug and output != "json":
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(message)s',
+            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
+        )
+        logging.getLogger('pip._internal').setLevel(logging.WARNING)
+        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
+        console.print("[dim]Debug mode enabled[/dim]\n")
+
+    try:
+        effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+        use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl)
+
+        if use_cache and output != "json":
+            cache_age = get_cache_age_seconds()
+            console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+
+        # Step 1: Inspect
+        installed_packages, step1_time = _step1_inspect_packages(console, output, timeout, debug)
+        if not installed_packages:
+            if output == "json":
+                print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
+            else:
+                console.print("[yellow]No packages found.[/yellow]")
+            sys.exit(0)
+
+        # Step 2: Get latest versions
+        latest_versions, step2_time, _ = _step2_get_latest_versions(
+            console, output, debug, installed_packages, use_cache, cache_enabled,
+            timeout, pre, parallel
+        )
+
+        if not latest_versions:
+            if output == "json":
+                print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
+            else:
+                console.print("\n[bold green]All packages are up to date![/bold green]")
+            sys.exit(0)
+
+        # Step 3: Resolve
+        can_upgrade, blocked_packages, _, step3_time = _step3_resolve_packages(
+            console, output, debug, latest_versions, installed_packages, show_blocked,
+            exclude_str, ()
+        )
+
+        # Display results
+        if output == "json":
+            assert json_formatter is not None
+            json_data = json_formatter.format_all(
+                upgradable=can_upgrade,
+                blocked=blocked_packages if show_blocked else None
+            )
+            print(json_data)
+        else:
+            if can_upgrade:
+                console.print("\n[bold]Packages with updates available:\n")
+                print_upgradable_packages_table(can_upgrade, console=console)
+
+            if not can_upgrade:
+                console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
+
+            if show_blocked and blocked_packages:
+                console.print()
+                print_blocked_packages_table(blocked_packages, console=console)
+
+            if debug:
+                total_time = step1_time + step2_time + step3_time
+                console.print(f"\n[dim]Total time: {total_time:.2f}s[/dim]")
+
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        sys.exit(130)
+    except Exception as e:
+        if output == "json":
+            print(json.dumps({"error": str(e)}))
+        else:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)
 
 
