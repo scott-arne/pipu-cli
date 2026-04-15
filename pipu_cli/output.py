@@ -2,10 +2,6 @@
 
 import json
 from typing import List, Optional, Any, Dict
-from dataclasses import asdict
-
-from rich.console import Console
-
 from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
 
 
@@ -75,25 +71,26 @@ class JsonOutputFormatter(OutputFormatter):
         blocked: Optional[List[BlockedPackageInfo]] = None,
         results: Optional[List[UpgradedPackage]] = None
     ) -> str:
-        """Format all data as a single JSON object."""
-        data = {
+        """Format all data as a single JSON object with standardized schema."""
+        data: Dict[str, Any] = {
             "upgradable": [self._package_to_dict(pkg) for pkg in upgradable],
-            "upgradable_count": len(upgradable)
+            "blocked": [self._package_to_dict(pkg) for pkg in blocked] if blocked else [],
+            "results": [],
+            "summary": {
+                "total": 0,
+                "upgraded": 0,
+                "failed": 0
+            }
         }
 
-        if blocked is not None:
-            data["blocked"] = [self._package_to_dict(pkg) for pkg in blocked]
-            data["blocked_count"] = len(blocked)
-
         if results is not None:
-            successful = [self._package_to_dict(pkg) for pkg in results if pkg.upgraded]
-            failed = [self._package_to_dict(pkg) for pkg in results if not pkg.upgraded]
-            data["results"] = {
-                "successful": successful,
-                "failed": failed,
+            data["results"] = [self._package_to_dict(pkg) for pkg in results]
+            successful = [pkg for pkg in results if pkg.upgraded]
+            failed = [pkg for pkg in results if not pkg.upgraded]
+            data["summary"] = {
                 "total": len(results),
-                "success_count": len(successful),
-                "failure_count": len(failed)
+                "upgraded": len(successful),
+                "failed": len(failed)
             }
 
         return json.dumps(data, indent=2)

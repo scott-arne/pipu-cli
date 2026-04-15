@@ -695,7 +695,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
         if not latest_versions:
             if output == "json":
-                print('{"upgradable": [], "upgradable_count": 0, "message": "All packages are up to date"}')
+                print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
             else:
                 console.print("\n[bold green]All packages are up to date![/bold green]")
             sys.exit(0)
