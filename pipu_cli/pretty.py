@@ -105,9 +105,7 @@ def print_blocked_packages_table(
     table.add_column("Blocked By", style="red")
 
     for pkg in packages:
-        blocked_by = ", ".join(pkg.blocked_by[:2])  # Show first 2 reasons
-        if len(pkg.blocked_by) > 2:
-            blocked_by += f" (+{len(pkg.blocked_by) - 2} more)"
+        blocked_by = ", ".join(pkg.blocked_by)
 
         table.add_row(
             pkg.name,
@@ -160,10 +158,11 @@ def print_upgrade_results(
         table.add_column("Reason", style="dim")
 
         for pkg in failed:
+            reason = pkg.failure_reason or "Unknown failure"
             table.add_row(
                 pkg.name,
                 str(pkg.version),
-                "Blocked by runtime constraints"
+                reason
             )
 
         console.print(table)

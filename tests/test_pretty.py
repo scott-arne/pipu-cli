@@ -4,7 +4,11 @@ import pytest
 from io import StringIO
 from unittest.mock import Mock
 
-from pipu_cli.pretty import ConsoleStream, _parse_selection
+from rich.console import Console
+from packaging.version import Version
+
+from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table
+from pipu_cli.package_management import UpgradedPackage, BlockedPackageInfo
 
 
 def test_console_stream_write_text():
@@ -99,3 +103,60 @@ class TestParseSelection:
         """Test handling of various whitespace."""
         assert _parse_selection("  1  ,  2  ", 5) == [0, 1]
         assert _parse_selection("1-3,4", 5) == [0, 1, 2, 3]
+
+
+def test_print_upgrade_results_shows_failure_reason():
+    """Test that failure reason is shown instead of hardcoded message."""
+    console = Console(file=StringIO(), force_terminal=True)
+    results = [
+        UpgradedPackage(
+            name="numpy",
+            version=Version("1.24.0"),
+            upgraded=False,
+            previous_version=Version("1.24.0"),
+            failure_reason="Version unchanged — may be constrained by dependency resolver"
+        )
+    ]
+    print_upgrade_results(results, console=console)
+    output = console.file.getvalue()
+    assert "Version unchanged" in output
+    assert "Blocked by runtime constraints" not in output
+
+
+def test_print_upgrade_results_fallback_when_no_reason():
+    """Test fallback message when failure_reason is None."""
+    console = Console(file=StringIO(), force_terminal=True)
+    results = [
+        UpgradedPackage(
+            name="numpy",
+            version=Version("1.24.0"),
+            upgraded=False,
+            previous_version=Version("1.24.0"),
+        )
+    ]
+    print_upgrade_results(results, console=console)
+    output = console.file.getvalue()
+    assert "Unknown failure" in output
+
+
+def test_print_blocked_packages_shows_all_reasons():
+    """Test that all blocked reasons are shown (no truncation)."""
+    console = Console(file=StringIO(), force_terminal=True)
+    packages = [
+        BlockedPackageInfo(
+            name="numpy",
+            version=Version("1.24.0"),
+            latest_version=Version("2.0.0"),
+            blocked_by=[
+                "scipy requires >=1.20,<1.25",
+                "pandas requires >=1.22,<1.25",
+                "matplotlib requires >=1.20,<1.26",
+            ]
+        )
+    ]
+    print_blocked_packages_table(packages, console=console)
+    output = console.file.getvalue()
+    assert "scipy" in output
+    assert "pandas" in output
+    assert "matplotlib" in output
+    assert "+1 more" not in output
