@@ -276,11 +276,11 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
 # --- Helper functions for upgrade command ---
 
 def _step1_inspect_packages(
-    console: Console, output: str, timeout: int, debug: bool
+    console: Console, output: str, timeout: int, debug: bool, total_steps: int = 5
 ) -> tuple[list, float]:
     """Step 1: Inspect installed packages."""
     if output != "json":
-        console.print("[bold]Step 1/5:[/bold] Inspecting installed packages...")
+        console.print(f"[bold]Step 1/{total_steps}:[/bold] Inspecting installed packages...")
 
     step_start = time.time()
     if output != "json":
@@ -307,14 +307,14 @@ def _step1_inspect_packages(
 def _step2_get_latest_versions(
     console: Console, output: str, debug: bool,
     installed_packages: list, use_cache: bool, cache_enabled: bool,
-    timeout: int, pre: bool, parallel: int
+    timeout: int, pre: bool, parallel: int, total_steps: int = 5
 ) -> tuple[dict, float, bool]:
     """Step 2: Get latest versions from cache or network."""
     if output != "json":
         if use_cache:
-            console.print("\n[bold]Step 2/5:[/bold] Loading cached version data...")
+            console.print(f"\n[bold]Step 2/{total_steps}:[/bold] Loading cached version data...")
         else:
-            console.print("\n[bold]Step 2/5:[/bold] Fetching latest versions from PyPI...")
+            console.print(f"\n[bold]Step 2/{total_steps}:[/bold] Fetching latest versions from PyPI...")
 
     step_start = time.time()
     latest_versions: dict = {}
@@ -403,11 +403,11 @@ def _parse_excludes(exclude_tuple: tuple) -> str:
 def _step3_resolve_packages(
     console: Console, output: str, debug: bool,
     latest_versions: dict, installed_packages: list, show_blocked: bool,
-    exclude: str, packages: tuple
+    exclude: str, packages: tuple, total_steps: int = 5
 ) -> tuple[list, list, dict, float]:
     """Step 3: Resolve upgradable packages and apply filters."""
     if output != "json":
-        console.print("\n[bold]Step 3/5:[/bold] Resolving dependency constraints...")
+        console.print(f"\n[bold]Step 3/{total_steps}:[/bold] Resolving dependency constraints...")
     step_start = time.time()
 
     if show_blocked:
@@ -531,6 +531,7 @@ def _step5_install_packages(
 @click.option(
     "--dry-run",
     is_flag=True,
+    hidden=True,
     help="Show what would be upgraded without actually upgrading"
 )
 @click.option(
@@ -857,7 +858,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
             console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
 
         # Step 1: Inspect
-        installed_packages, step1_time = _step1_inspect_packages(console, output, timeout, debug)
+        installed_packages, step1_time = _step1_inspect_packages(console, output, timeout, debug, total_steps=3)
         if not installed_packages:
             if output == "json":
                 print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
@@ -868,7 +869,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         # Step 2: Get latest versions
         latest_versions, step2_time, _ = _step2_get_latest_versions(
             console, output, debug, installed_packages, use_cache, cache_enabled,
-            timeout, pre, parallel
+            timeout, pre, parallel, total_steps=3
         )
 
         if not latest_versions:
@@ -881,7 +882,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         # Step 3: Resolve
         can_upgrade, blocked_packages, _, step3_time = _step3_resolve_packages(
             console, output, debug, latest_versions, installed_packages, show_blocked,
-            exclude_str, ()
+            exclude_str, (), total_steps=3
         )
 
         # Display results
