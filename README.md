@@ -30,13 +30,15 @@ pip install pipu-cli
 
 ## Quick Start
 
-Simply run `pipu` in your Python environment:
+The fastest way to upgrade all your packages:
 
 ```bash
 pipu
 ```
 
-That's it! pipu will:
+This runs `pipu upgrade` — it checks for updates and upgrades everything safely.
+
+Both `pipu` and `pipu upgrade` will:
 
 1. Check all your installed packages
 2. Find available updates (using cache if fresh, or fetching from PyPI)
@@ -44,6 +46,12 @@ That's it! pipu will:
 4. Show you a table of what will be upgraded
 5. Ask for confirmation (press Y to proceed)
 6. Upgrade everything safely
+
+To preview what can be upgraded without installing anything:
+
+```bash
+pipu outdated
+```
 
 ## Example Session
 
@@ -102,37 +110,33 @@ pipu upgrade requests==2.31.0
 pipu upgrade "requests>=2.30,<3.0"
 ```
 
-### Preview changes without installing (dry run)
+### Check for outdated packages
 
 ```bash
-pipu --dry-run
+pipu outdated
 ```
+
+Shows all packages that have updates available without installing anything.
 
 ### Exclude packages from upgrade
 
 ```bash
 # Exclude single package
-pipu --exclude numpy
+pipu upgrade --exclude numpy
+pipu upgrade -e numpy
 
-# Exclude multiple packages
-pipu --exclude numpy,pandas,scipy
+# Exclude multiple packages (repeatable flag)
+pipu upgrade -e numpy -e pandas -e scipy
 ```
 
 ### See why packages can't be upgraded
 
 ```bash
-pipu --show-blocked
+pipu upgrade --show-blocked
+pipu upgrade -b
 ```
 
 This displays packages that have updates available but can't be upgraded due to dependency constraints, along with the specific constraints blocking them.
-
-### Interactive package selection
-
-```bash
-pipu -i
-```
-
-This shows a numbered list of upgradable packages and lets you choose which ones to upgrade.
 
 ### Skip confirmation prompt (for scripts/automation)
 
@@ -143,7 +147,9 @@ pipu -y
 ### Machine-readable JSON output
 
 ```bash
-pipu --output json --dry-run
+pipu outdated --output json
+pipu upgrade --output json
+pipu upgrade -o json
 ```
 
 Useful for CI/CD pipelines and scripting.
@@ -151,15 +157,15 @@ Useful for CI/CD pipelines and scripting.
 ### Speed up version checking with parallel requests
 
 ```bash
-pipu --parallel 10
+pipu upgrade --parallel 10
 ```
 
-Uses multiple concurrent requests to check for updates (default: 1, sequential).
+Uses multiple concurrent requests to check for updates (default: min(4, CPU count)).
 
 ### Update requirements.txt after upgrade
 
 ```bash
-pipu --update-requirements requirements.txt
+pipu upgrade --update-requirements requirements.txt
 ```
 
 Automatically updates your requirements file with the new versions after a successful upgrade.
@@ -167,13 +173,13 @@ Automatically updates your requirements file with the new versions after a succe
 ### Include pre-release versions
 
 ```bash
-pipu --pre
+pipu upgrade --pre
 ```
 
 ### Debug mode
 
 ```bash
-pipu --debug
+pipu upgrade --debug
 ```
 
 Shows timing information and explains why packages can or cannot be upgraded.
@@ -212,11 +218,11 @@ pipu upgrade
 # Force fresh version check, ignoring cache
 pipu upgrade --no-cache
 
-# View cache status
-pipu cache
+# Clear cache for current environment
+pipu clean
 
 # Clear all caches
-pipu cache --all
+pipu clean --all
 ```
 
 By default, the cache is considered fresh for 1 hour. You can adjust this:
@@ -232,22 +238,21 @@ pipu upgrade --cache-ttl 300
 
 | Command | Description |
 |---------|-------------|
-| `pipu` or `pipu upgrade` | Upgrade packages (default command) |
+| `pipu upgrade` | Upgrade packages (default command) |
+| `pipu outdated` | Show packages with updates available |
 | `pipu update` | Refresh the package version cache |
+| `pipu clean` | Clear caches |
 | `pipu rollback` | Restore packages to a previous state |
-| `pipu cache` | Show cache information or clear cache |
 
 ### Upgrade Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `PACKAGES` | | Optional package names to upgrade (default: all) |
-| `--dry-run` | | Show what would be upgraded without installing |
-| `--exclude TEXT` | | Comma-separated list of packages to exclude |
-| `--show-blocked` | | Show packages blocked by constraints |
-| `--interactive` | `-i` | Interactively select packages to upgrade |
-| `--output [human\|json]` | | Output format (default: human) |
-| `--parallel INTEGER` | | Number of parallel version check requests (default: 1) |
+| `--exclude TEXT` | `-e` | Package to exclude (repeatable) |
+| `--show-blocked` | `-b` | Show packages blocked by constraints |
+| `--output [human\|json]` | `-o` | Output format (default: human) |
+| `--parallel INTEGER` | | Number of parallel version check requests (default: min(4, CPU count)) |
 | `--update-requirements PATH` | | Update a requirements.txt file after upgrade |
 | `--no-cache` | | Skip cache and fetch fresh version data |
 | `--cache-ttl INTEGER` | | Cache freshness threshold in seconds (default: 3600) |
@@ -265,7 +270,7 @@ pipu upgrade --cache-ttl 300
 | `--state FILE` | | Rollback to a specific state file |
 | `--yes` | `-y` | Skip confirmation prompt |
 
-### Cache Options
+### Clean Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
@@ -340,8 +345,8 @@ A: Use `--parallel 10` (or higher) to check multiple packages concurrently.
 
 ## Tips
 
-- **Run pipu regularly** to keep your packages up-to-date
-- **Use `--dry-run`** first to preview changes before committing
+- **Run `pipu` regularly** to keep your packages up-to-date
+- **Use `pipu outdated`** first to preview what can be upgraded
 - **Use `--show-blocked`** to understand why certain packages can't be upgraded
 - **Use `--update-requirements`** to keep your requirements.txt in sync
 - **Use `pipu update`** to refresh the cache before checking for updates
