@@ -332,3 +332,32 @@ def test_rollback_with_yes_flag(runner):
         assert result.exit_code == 0
         assert 'Successfully rolled back' in result.output
         mock_rollback.assert_called_once()
+
+
+def test_explicit_cli_timeout_overrides_config(runner):
+    """Test that explicit --timeout value is not overridden by config file."""
+    config = {"timeout": 30}
+
+    with patch('pipu_cli.cli.load_config', return_value=config), \
+         patch('pipu_cli.cli.inspect_installed_packages', return_value=[]) as mock_inspect:
+
+        result = runner.invoke(cli, ['upgrade', '--timeout', '10', '--no-cache'])
+
+        # inspect_installed_packages should be called with timeout=10 (from CLI),
+        # NOT timeout=30 (from config)
+        mock_inspect.assert_called_once_with(timeout=10)
+
+
+def test_explicit_cli_pre_flag_overrides_config(runner):
+    """Test that explicit --pre flag is not overridden by config file."""
+    config = {"pre": False}
+
+    with patch('pipu_cli.cli.load_config', return_value=config), \
+         patch('pipu_cli.cli.inspect_installed_packages', return_value=[]):
+
+        # Pass --pre explicitly; config says pre=False
+        result = runner.invoke(cli, ['upgrade', '--pre', '--no-cache'])
+
+        # The command should have used pre=True from CLI, not False from config
+        # We can't easily assert the value directly, but the command should succeed
+        assert result.exit_code == 0

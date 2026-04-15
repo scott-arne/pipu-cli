@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 import rich_click as click
+from click.core import ParameterSource
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -90,6 +91,7 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.pass_context
 @click.option(
     "--timeout",
     type=int,
@@ -118,7 +120,7 @@ def cli(ctx: click.Context) -> None:
     default="human",
     help="Output format (human-readable or json)"
 )
-def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> None:
+def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> None:
     """
     Refresh the package version cache.
 
@@ -137,15 +139,16 @@ def update(timeout: int, pre: bool, parallel: int, debug: bool, output: str) -> 
 
     # Load configuration file
     config = load_config()
-    if timeout == 10:
+    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
         timeout = get_config_value(config, 'timeout', 10)
-    if not pre:
+    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
         pre = get_config_value(config, 'pre', False)
-    if not debug:
+    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
         debug = get_config_value(config, 'debug', False)
-    default_parallel = min(4, mp.cpu_count())
-    if parallel == default_parallel:
-        parallel = get_config_value(config, 'parallel', default_parallel)
+    if ctx.get_parameter_source('parallel') == ParameterSource.DEFAULT:
+        parallel = get_config_value(config, 'parallel', min(4, mp.cpu_count()))
+    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
+        output = get_config_value(config, 'output', 'human')
 
     # Configure logging
     if debug and output != "json":
@@ -489,6 +492,7 @@ def _step5_install_packages(
 
 
 @cli.command()
+@click.pass_context
 @click.argument('packages', nargs=-1)
 @click.option(
     "--timeout",
@@ -561,7 +565,7 @@ def _step5_install_packages(
     default=None,
     help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})"
 )
-def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
+def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
             exclude: str, show_blocked: bool, output: str, update_requirements: Optional[str],
             parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int]) -> None:
     """
@@ -585,26 +589,26 @@ def upgrade(packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug
     # Load configuration file
     config = load_config()
 
-    # Apply config file values for options at defaults
-    if timeout == 10:
+    # Apply config file values only when CLI option is at its default
+    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
         timeout = get_config_value(config, 'timeout', 10)
-    if not exclude:
+    if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
         exclude_list = get_config_value(config, 'exclude', [])
         if exclude_list:
             exclude = ','.join(exclude_list)
-    if not pre:
+    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
         pre = get_config_value(config, 'pre', False)
-    if not yes:
+    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
         yes = get_config_value(config, 'yes', False)
-    if not debug:
+    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
         debug = get_config_value(config, 'debug', False)
-    if not dry_run:
+    if ctx.get_parameter_source('dry_run') == ParameterSource.DEFAULT:
         dry_run = get_config_value(config, 'dry_run', False)
-    if not show_blocked:
+    if ctx.get_parameter_source('show_blocked') == ParameterSource.DEFAULT:
         show_blocked = get_config_value(config, 'show_blocked', False)
-    if output == "human":
+    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
         output = get_config_value(config, 'output', 'human')
-    if cache_ttl is None:
+    if ctx.get_parameter_source('cache_ttl') == ParameterSource.DEFAULT:
         cache_ttl = get_config_value(config, 'cache_ttl', DEFAULT_CACHE_TTL)
 
     # Check if caching is enabled
@@ -981,6 +985,12 @@ def clean(clean_all: bool) -> None:
             console.print("[yellow]No cache to clear for current environment.[/yellow]")
 
     sys.exit(0)
+
+
+def pipuu() -> None:
+    """Shorthand CLI that runs ``pipu upgrade``."""
+    sys.argv = ["pipu", "upgrade"] + sys.argv[1:]
+    cli()
 
 
 if __name__ == "__main__":
