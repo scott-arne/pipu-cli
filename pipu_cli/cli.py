@@ -565,6 +565,7 @@ def _step5_install_packages(
 @click.option(
     "--interactive", "-i",
     is_flag=True,
+    hidden=True,
     help="Interactively select packages to upgrade"
 )
 @click.option(
@@ -630,6 +631,12 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
     # Initialize JSON formatter if needed
     json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    # Interactive mode deprecation warning
+    if interactive:
+        if output != "json":
+            console.print("[yellow]Warning: --interactive/-i is deprecated. "
+                         "Use positional args instead: pipu upgrade requests numpy[/yellow]\n")
 
     # Interactive mode only works in human output mode
     if interactive and output == "json":
@@ -1142,6 +1149,9 @@ def clean(clean_all: bool) -> None:
 
 def pipuu() -> None:
     """Shorthand CLI that runs ``pipu upgrade``."""
+    from rich.console import Console
+    console = Console(stderr=True)
+    console.print("[yellow]Warning: 'pipuu' is deprecated. Use 'pipu upgrade' (or just 'pipu') instead.[/yellow]\n")
     sys.argv = ["pipu", "upgrade"] + sys.argv[1:]
     cli()
 
