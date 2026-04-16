@@ -11,6 +11,7 @@ import rich_click as click
 from click.core import ParameterSource
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
@@ -1182,7 +1183,13 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     is_flag=True,
     help="Clean up files for all environments"
 )
-def clean(clean_all: bool) -> None:
+@click.option(
+    "--group", "-g",
+    "group_name",
+    default=None,
+    help="Clean caches for all environments in a named group"
+)
+def clean(clean_all: bool, group_name: Optional[str]) -> None:
     """
     Clean up pipu caches and temporary files.
 
@@ -1192,10 +1199,15 @@ def clean(clean_all: bool) -> None:
 
     \b
     Examples:
-      pipu clean           Clean current environment
-      pipu clean --all     Clean all environments
+      pipu clean              Clean current environment
+      pipu clean --all        Clean all environments
+      pipu clean -g mygroup   Clean all environments in a group
     """
     console = Console()
+
+    if clean_all and group_name:
+        console.print("[red]Cannot use --all and --group together.[/red]")
+        sys.exit(1)
 
     if clean_all:
         count = clear_all_caches()
@@ -1203,6 +1215,21 @@ def clean(clean_all: bool) -> None:
             console.print(f"[bold green]Cleared {count} cache(s).[/bold green]")
         else:
             console.print("[yellow]No caches to clear.[/yellow]")
+    elif group_name:
+        environments = get_group(group_name)
+        if environments is None:
+            console.print(f"[red]Group '{group_name}' not found.[/red]")
+            sys.exit(1)
+
+        cleared = 0
+        for env_path in environments:
+            if clear_cache(python_path=env_path):
+                cleared += 1
+
+        if cleared > 0:
+            console.print(f"[bold green]Cleared {cleared} cache(s) for group '{group_name}'.[/bold green]")
+        else:
+            console.print(f"[yellow]No caches to clear for group '{group_name}'.[/yellow]")
     else:
         if clear_cache():
             console.print("[bold green]Cache cleared for current environment.[/bold green]")
@@ -1373,9 +1400,9 @@ def _run_group_upgrade(
                 continue
 
             if output != "json":
-                console.print(f"\n[bold]{'═' * 60}[/bold]")
-                console.print(f"[bold]Environment: {env_path}[/bold]")
-                console.print(f"[bold]{'═' * 60}[/bold]\n")
+                console.print()
+                console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
+                console.print()
 
             try:
                 env_result = _run_single_env_upgrade(
@@ -1556,9 +1583,9 @@ def _run_group_outdated(
                 continue
 
             if output != "json":
-                console.print(f"\n[bold]{'═' * 60}[/bold]")
-                console.print(f"[bold]Environment: {env_path}[/bold]")
-                console.print(f"[bold]{'═' * 60}[/bold]\n")
+                console.print()
+                console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
+                console.print()
 
             try:
                 effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
@@ -1818,9 +1845,9 @@ def _run_group_install(
                 continue
 
             if output != "json":
-                console.print(f"\n[bold]{'═' * 60}[/bold]")
-                console.print(f"[bold]Environment: {env_path}[/bold]")
-                console.print(f"[bold]{'═' * 60}[/bold]\n")
+                console.print()
+                console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
+                console.print()
 
             try:
                 if not yes and output != "json":

@@ -201,12 +201,13 @@ def format_cache_age(seconds: Optional[float]) -> str:
         return f"{days} day{'s' if days != 1 else ''} ago"
 
 
-def clear_cache() -> bool:
-    """Delete the cache file for the current environment.
+def clear_cache(python_path: Optional[str] = None) -> bool:
+    """Delete the cache file for an environment.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: True if cache was deleted, False if it didn't exist
     """
-    cache_path = get_cache_path()
+    cache_path = get_cache_path(python_path=python_path)
 
     if cache_path.exists():
         cache_path.unlink()
