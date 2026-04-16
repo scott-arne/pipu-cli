@@ -1,6 +1,7 @@
 """Tests for CLI module."""
 
 import json
+import sys
 import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, Mock
@@ -449,3 +450,87 @@ def test_rollback_list_json_output(runner):
         assert "states" in data
         assert len(data["states"]) == 1
         assert result.exit_code == 0
+
+
+class TestGroupCommands:
+    """Tests for pipu group subcommands."""
+
+    def test_group_list_empty(self, runner):
+        """group list shows message when no groups exist."""
+        with patch("pipu_cli.cli.list_groups", return_value={}):
+            result = runner.invoke(cli, ["group", "list"])
+        assert "No groups defined" in result.output
+        assert result.exit_code == 0
+
+    def test_group_list_with_groups(self, runner):
+        """group list shows groups in a table."""
+        with patch("pipu_cli.cli.list_groups", return_value={
+            "dev": ["/usr/bin/python3", "/opt/python/bin/python"],
+            "prod": ["/home/user/.venv/bin/python"],
+        }):
+            result = runner.invoke(cli, ["group", "list"])
+        assert "dev" in result.output
+        assert "prod" in result.output
+        assert result.exit_code == 0
+
+    def test_group_add_default_python(self, runner):
+        """group add without --python uses sys.executable."""
+        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+             patch("pipu_cli.cli.add_environment", return_value=True) as mock_add:
+            result = runner.invoke(cli, ["group", "add", "mygroup"])
+        assert result.exit_code == 0
+        mock_add.assert_called_once_with("mygroup", sys.executable)
+
+    def test_group_add_with_python_path(self, runner):
+        """group add with --python uses specified path."""
+        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+             patch("pipu_cli.cli.add_environment", return_value=True) as mock_add:
+            result = runner.invoke(cli, ["group", "add", "mygroup", "--python", "/other/python"])
+        assert result.exit_code == 0
+        mock_add.assert_called_once_with("mygroup", "/other/python")
+
+    def test_group_add_validation_failure(self, runner):
+        """group add fails when validation fails."""
+        with patch("pipu_cli.cli.validate_python_path", return_value=(False, "Not a Python interpreter")):
+            result = runner.invoke(cli, ["group", "add", "mygroup", "--python", "/not/python"])
+        assert "Not a Python interpreter" in result.output
+        assert result.exit_code == 1
+
+    def test_group_add_force_skips_validation(self, runner):
+        """group add --force skips validation."""
+        with patch("pipu_cli.cli.add_environment", return_value=True) as mock_add:
+            result = runner.invoke(cli, ["group", "add", "mygroup", "--python", "/any/path", "--force"])
+        assert result.exit_code == 0
+        mock_add.assert_called_once()
+
+    def test_group_add_duplicate(self, runner):
+        """group add with duplicate shows notice."""
+        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+             patch("pipu_cli.cli.add_environment", return_value=False):
+            result = runner.invoke(cli, ["group", "add", "mygroup"])
+        assert "already in group" in result.output.lower()
+        assert result.exit_code == 0
+
+    def test_group_remove(self, runner):
+        """group remove removes environment."""
+        with patch("pipu_cli.cli.remove_environment", return_value=True):
+            result = runner.invoke(cli, ["group", "remove", "mygroup"])
+        assert result.exit_code == 0
+
+    def test_group_remove_not_found(self, runner):
+        """group remove shows error when not found."""
+        with patch("pipu_cli.cli.remove_environment", return_value=False):
+            result = runner.invoke(cli, ["group", "remove", "mygroup"])
+        assert result.exit_code == 1
+
+    def test_group_delete(self, runner):
+        """group delete removes group."""
+        with patch("pipu_cli.cli.delete_group", return_value=True):
+            result = runner.invoke(cli, ["group", "delete", "mygroup"])
+        assert result.exit_code == 0
+
+    def test_group_delete_not_found(self, runner):
+        """group delete shows error when group doesn't exist."""
+        with patch("pipu_cli.cli.delete_group", return_value=False):
+            result = runner.invoke(cli, ["group", "delete", "mygroup"])
+        assert result.exit_code == 1

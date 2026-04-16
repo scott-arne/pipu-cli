@@ -34,6 +34,14 @@ from pipu_cli.pretty import (
 )
 from pipu_cli.output import JsonOutputFormatter
 from pipu_cli.config_file import load_config, get_config_value
+from pipu_cli.groups import (
+    add_environment,
+    remove_environment,
+    delete_group,
+    list_groups,
+    get_group,
+    validate_python_path,
+)
 from pipu_cli.config import DEFAULT_CACHE_TTL
 from pipu_cli.cache import (
     is_cache_fresh,
@@ -78,12 +86,7 @@ def cli(ctx: click.Context) -> None:
     Automatically checks for package updates and upgrades them with proper
     constraint resolution.
 
-    [bold]Commands:[/bold]
-      pipu upgrade     Upgrade packages (default command)
-      pipu outdated    Show packages with updates available
-      pipu update      Refresh package version cache
-      pipu clean       Clear caches
-      pipu rollback    Restore packages to a previous state
+    Running [cyan]pipu[/cyan] with no subcommand defaults to [cyan]pipu upgrade[/cyan].
 
     Run [cyan]pipu <command> --help[/cyan] for command-specific help.
     """
@@ -132,7 +135,8 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
 
     Constraint resolution is performed at upgrade time, not during update.
 
-    [bold]Examples:[/bold]
+    \b
+    Examples:
       pipu update              Update cache with defaults
       pipu update --parallel 4 Update with parallel requests
       pipu update --pre        Include pre-release versions
@@ -592,12 +596,12 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     Uses cached version data if available and fresh. Run [cyan]pipu update[/cyan]
     to refresh the cache manually.
 
-    [bold]Examples:[/bold]
+    \b
+    Examples:
       pipu upgrade                    Upgrade all packages
       pipu upgrade requests numpy     Upgrade specific packages
-      pipu upgrade --dry-run          Preview without installing
-      pipu upgrade -i                 Interactive package selection
       pipu upgrade --no-cache         Force fresh version check
+      pipu upgrade -e numpy -e pandas Exclude packages
     """
     console = Console()
 
@@ -826,7 +830,8 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
     Displays packages that have newer versions available, along with any
     packages blocked by dependency constraints. Does not install anything.
 
-    [bold]Examples:[/bold]
+    \b
+    Examples:
       pipu outdated              Show all outdated packages
       pipu outdated --no-cache   Force fresh version check
       pipu outdated -o json      Machine-readable output
@@ -992,7 +997,8 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     Before each upgrade, pipu saves the current package versions. Use this
     command to restore packages to their pre-upgrade state.
 
-    [bold]Examples:[/bold]
+    \b
+    Examples:
       pipu rollback --list       List all saved states
       pipu rollback --dry-run    Preview what would be restored
       pipu rollback --yes        Rollback without confirmation
@@ -1141,7 +1147,8 @@ def clean(clean_all: bool) -> None:
     created by pipu. By default, cleans up files for the current
     Python environment only.
 
-    [bold]Examples:[/bold]
+    \b
+    Examples:
       pipu clean           Clean current environment
       pipu clean --all     Clean all environments
     """
@@ -1159,6 +1166,131 @@ def clean(clean_all: bool) -> None:
         else:
             console.print("[yellow]No cache to clear for current environment.[/yellow]")
 
+    sys.exit(0)
+
+
+@cli.group("group")
+def group_cmd() -> None:
+    """Manage groups of Python environments.
+
+    Groups allow you to run pipu commands across multiple Python
+    environments at once.
+
+    \b
+    Examples:
+      pipu group list                          List all groups
+      pipu group add mygroup                   Add current env to group
+      pipu group add mygroup --python /path    Add specific env
+      pipu group remove mygroup                Remove current env
+      pipu group delete mygroup                Delete entire group
+    """
+    pass
+
+
+@group_cmd.command("list")
+def group_list() -> None:
+    """List all groups and their environments."""
+    console = Console()
+    groups = list_groups()
+
+    if not groups:
+        console.print("[yellow]No groups defined. Use `pipu group add` to create one.[/yellow]")
+        sys.exit(0)
+
+    table = Table(title="[bold]Environment Groups[/bold]")
+    table.add_column("Group Name", style="cyan", no_wrap=True)
+    table.add_column("Environments", style="magenta", justify="right")
+    table.add_column("Python Paths", style="dim")
+
+    for name, environments in sorted(groups.items()):
+        paths = "\n".join(environments)
+        table.add_row(name, str(len(environments)), paths)
+
+    console.print(table)
+    sys.exit(0)
+
+
+@group_cmd.command("add")
+@click.argument("group_name")
+@click.option("--python", "python_path", default=None,
+              help="Path to Python interpreter (defaults to current Python)")
+@click.option("--force", "-f", is_flag=True,
+              help="Skip Python path validation")
+def group_add(group_name: str, python_path: Optional[str], force: bool) -> None:
+    """Add a Python environment to a group.
+
+    Creates the group if it doesn't exist.
+
+    \b
+    Examples:
+      pipu group add mygroup                    Add current Python
+      pipu group add mygroup --python /path     Add specific Python
+      pipu group add mygroup --python /path -f  Skip validation
+    """
+    console = Console()
+
+    if python_path is None:
+        python_path = sys.executable
+
+    if not force:
+        is_valid, error = validate_python_path(python_path)
+        if not is_valid:
+            console.print(f"[red]Invalid Python path:[/red] {error}")
+            sys.exit(1)
+
+    added = add_environment(group_name, python_path)
+    if added:
+        console.print(f"[green]Added[/green] {python_path} to group [cyan]{group_name}[/cyan]")
+    else:
+        console.print(f"[yellow]{python_path} is already in group {group_name}[/yellow]")
+    sys.exit(0)
+
+
+@group_cmd.command("remove")
+@click.argument("group_name")
+@click.option("--python", "python_path", default=None,
+              help="Path to Python interpreter (defaults to current Python)")
+def group_remove(group_name: str, python_path: Optional[str]) -> None:
+    """Remove a Python environment from a group.
+
+    If this removes the last environment, the group is deleted.
+
+    \b
+    Examples:
+      pipu group remove mygroup                Remove current Python
+      pipu group remove mygroup --python /path Remove specific Python
+    """
+    console = Console()
+
+    if python_path is None:
+        python_path = sys.executable
+
+    removed = remove_environment(group_name, python_path)
+    if not removed:
+        console.print(f"[red]Environment not found[/red] in group [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    console.print(f"[green]Removed[/green] {python_path} from group [cyan]{group_name}[/cyan]")
+    sys.exit(0)
+
+
+@group_cmd.command("delete")
+@click.argument("group_name")
+def group_delete(group_name: str) -> None:
+    """Delete an entire group.
+
+    \b
+    Examples:
+      pipu group delete mygroup    Delete the group
+    """
+    console = Console()
+
+    deleted = delete_group(group_name)
+    if not deleted:
+        console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    console.print(f"[green]Deleted[/green] group [cyan]{group_name}[/cyan]")
     sys.exit(0)
 
 
