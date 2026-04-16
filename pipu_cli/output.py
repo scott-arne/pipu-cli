@@ -94,3 +94,11 @@ class JsonOutputFormatter(OutputFormatter):
             }
 
         return json.dumps(data, indent=2)
+
+    def format_group_results(self, env_results: List[Dict[str, Any]]) -> str:
+        """Format group results as a JSON array of per-environment results.
+
+        :param env_results: List of dicts, each with 'environment' key plus standard schema
+        :returns: JSON string
+        """
+        return json.dumps(env_results, indent=2)

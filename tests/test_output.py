@@ -96,3 +96,37 @@ def test_json_formatter_format_all_standardized_schema():
     # Old keys should NOT exist
     assert "upgradable_count" not in data
     assert "success_count" not in data
+
+
+class TestGroupJsonOutput:
+    """Tests for group JSON output."""
+
+    def test_format_group_results_structure(self):
+        """Group output is an array of per-environment results."""
+        formatter = JsonOutputFormatter()
+
+        env_results = [
+            {
+                "environment": "/python/a",
+                "upgradable": [],
+                "blocked": [],
+                "results": [],
+                "summary": {"total": 0, "upgraded": 0, "failed": 0},
+            },
+            {
+                "environment": "/python/b",
+                "upgradable": [],
+                "blocked": [],
+                "results": [],
+                "summary": {"total": 0, "upgraded": 0, "failed": 0},
+            },
+        ]
+
+        output = formatter.format_group_results(env_results)
+        data = json.loads(output)
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert data[0]["environment"] == "/python/a"
+        assert data[1]["environment"] == "/python/b"
+        assert "upgradable" in data[0]
+        assert "summary" in data[0]
