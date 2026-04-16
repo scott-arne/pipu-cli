@@ -384,3 +384,55 @@ class TestGetCacheInfo:
             assert "updated_at" in info
             assert "age_human" in info
             assert "include_prereleases" in info
+
+
+class TestPythonPathParameter:
+    """Tests for python_path parameter in cache functions."""
+
+    def test_get_environment_id_with_python_path(self):
+        """Environment ID differs when python_path is provided."""
+        default_id = get_environment_id()
+        remote_id = get_environment_id(python_path="/some/other/python")
+        assert default_id != remote_id
+
+    def test_get_environment_id_python_path_consistent(self):
+        """Same python_path always produces the same ID."""
+        id1 = get_environment_id(python_path="/some/python")
+        id2 = get_environment_id(python_path="/some/python")
+        assert id1 == id2
+
+    def test_get_cache_dir_with_python_path(self, tmp_path):
+        """Cache dir uses python_path-based env ID when provided."""
+        with patch("pipu_cli.cache.CACHE_BASE_DIR", tmp_path):
+            default_dir = get_cache_dir()
+            remote_dir = get_cache_dir(python_path="/other/python")
+        assert default_dir != remote_dir
+
+    def test_save_and_load_with_python_path(self, tmp_path):
+        """Cache save/load works with python_path."""
+        with patch("pipu_cli.cache.CACHE_BASE_DIR", tmp_path):
+            versions = {"requests": "2.31.0"}
+            save_cache(versions, python_path="/other/python")
+            cache = load_cache(python_path="/other/python")
+        assert cache is not None
+        assert cache.latest_versions == versions
+
+    def test_separate_caches_per_python_path(self, tmp_path):
+        """Different python_paths get separate caches."""
+        with patch("pipu_cli.cache.CACHE_BASE_DIR", tmp_path):
+            save_cache({"pkg": "1.0"}, python_path="/python/a")
+            save_cache({"pkg": "2.0"}, python_path="/python/b")
+
+            cache_a = load_cache(python_path="/python/a")
+            cache_b = load_cache(python_path="/python/b")
+
+        assert cache_a.latest_versions["pkg"] == "1.0"
+        assert cache_b.latest_versions["pkg"] == "2.0"
+
+    def test_is_cache_fresh_with_python_path(self, tmp_path):
+        """is_cache_fresh works with python_path."""
+        with patch("pipu_cli.cache.CACHE_BASE_DIR", tmp_path):
+            save_cache({"pkg": "1.0"}, python_path="/other/python")
+            assert is_cache_fresh(3600, python_path="/other/python") is True
+            # Different python_path has no cache
+            assert is_cache_fresh(3600, python_path="/no/cache/here") is False

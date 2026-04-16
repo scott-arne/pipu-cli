@@ -36,43 +36,48 @@ class CacheData:
     latest_versions: Dict[str, str]
 
 
-def get_environment_id() -> str:
+def get_environment_id(python_path: Optional[str] = None) -> str:
     """Get a unique identifier for the current Python environment.
 
     Uses a hash of the Python executable path to uniquely identify
     the environment. This works with venv, conda, mise, and other
     environment managers.
 
+    :param python_path: Optional path to Python executable. If provided, uses this
+                        instead of sys.executable to generate the environment ID.
     :returns: Short hash identifying the environment
     """
-    executable = sys.executable
+    executable = python_path if python_path is not None else sys.executable
     hash_obj = hashlib.sha256(executable.encode())
     return hash_obj.hexdigest()[:12]
 
 
-def get_cache_dir() -> Path:
+def get_cache_dir(python_path: Optional[str] = None) -> Path:
     """Get the cache directory for the current environment.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: Path to environment-specific cache directory
     """
-    env_id = get_environment_id()
+    env_id = get_environment_id(python_path=python_path)
     return CACHE_BASE_DIR / env_id
 
 
-def get_cache_path() -> Path:
+def get_cache_path(python_path: Optional[str] = None) -> Path:
     """Get the path to the cache file for the current environment.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: Path to the cache JSON file
     """
-    return get_cache_dir() / "versions.json"
+    return get_cache_dir(python_path=python_path) / "versions.json"
 
 
-def load_cache() -> Optional[CacheData]:
+def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
     """Load cache data from disk.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: CacheData object or None if cache doesn't exist or is invalid
     """
-    cache_path = get_cache_path()
+    cache_path = get_cache_path(python_path=python_path)
 
     if not cache_path.exists():
         logger.debug(f"Cache file does not exist: {cache_path}")
@@ -83,7 +88,7 @@ def load_cache() -> Optional[CacheData]:
             data = json.load(f)
 
         # Validate the cache is for the current environment
-        env_id = get_environment_id()
+        env_id = get_environment_id(python_path=python_path)
         if data.get("environment_id") != env_id:
             logger.debug("Cache environment mismatch, ignoring")
             return None
@@ -100,21 +105,22 @@ def load_cache() -> Optional[CacheData]:
         return None
 
 
-def save_cache(latest_versions: Dict[str, str], include_prereleases: bool = False) -> Path:
+def save_cache(latest_versions: Dict[str, str], include_prereleases: bool = False, python_path: Optional[str] = None) -> Path:
     """Save latest version data to the cache.
 
     :param latest_versions: Dictionary mapping package names (lowercase) to latest version strings
     :param include_prereleases: Whether prereleases were included in version check
+    :param python_path: Optional path to Python executable for environment identification
     :returns: Path to the saved cache file
     """
-    cache_dir = get_cache_dir()
+    cache_dir = get_cache_dir(python_path=python_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    cache_path = get_cache_path()
+    cache_path = get_cache_path(python_path=python_path)
 
     cache_data = CacheData(
-        environment_id=get_environment_id(),
-        python_executable=sys.executable,
+        environment_id=get_environment_id(python_path=python_path),
+        python_executable=python_path if python_path is not None else sys.executable,
         updated_at=datetime.now(timezone.utc).isoformat(),
         include_prereleases=include_prereleases,
         latest_versions=latest_versions
@@ -127,13 +133,14 @@ def save_cache(latest_versions: Dict[str, str], include_prereleases: bool = Fals
     return cache_path
 
 
-def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL) -> bool:
+def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL, python_path: Optional[str] = None) -> bool:
     """Check if the cache is fresh (within TTL).
 
     :param ttl_seconds: Time-to-live in seconds
+    :param python_path: Optional path to Python executable for environment identification
     :returns: True if cache exists and is within TTL
     """
-    cache = load_cache()
+    cache = load_cache(python_path=python_path)
     if cache is None:
         return False
 
@@ -152,12 +159,13 @@ def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL) -> bool:
         return False
 
 
-def get_cache_age_seconds() -> Optional[float]:
+def get_cache_age_seconds(python_path: Optional[str] = None) -> Optional[float]:
     """Get the age of the cache in seconds.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: Age in seconds or None if cache doesn't exist
     """
-    cache = load_cache()
+    cache = load_cache(python_path=python_path)
     if cache is None:
         return None
 
@@ -232,26 +240,27 @@ def clear_all_caches() -> int:
     return count
 
 
-def get_cache_info() -> Dict[str, Any]:
+def get_cache_info(python_path: Optional[str] = None) -> Dict[str, Any]:
     """Get information about the current cache.
 
+    :param python_path: Optional path to Python executable for environment identification
     :returns: Dictionary with cache metadata
     """
-    cache = load_cache()
-    cache_path = get_cache_path()
+    cache = load_cache(python_path=python_path)
+    cache_path = get_cache_path(python_path=python_path)
 
     info: Dict[str, Any] = {
         "exists": cache is not None,
         "path": str(cache_path),
-        "environment_id": get_environment_id(),
-        "python_executable": sys.executable,
+        "environment_id": get_environment_id(python_path=python_path),
+        "python_executable": python_path if python_path is not None else sys.executable,
     }
 
     if cache:
         info["updated_at"] = cache.updated_at
         info["package_count"] = len(cache.latest_versions)
         info["include_prereleases"] = cache.include_prereleases
-        age_seconds = get_cache_age_seconds()
+        age_seconds = get_cache_age_seconds(python_path=python_path)
         info["age_seconds"] = age_seconds
         info["age_human"] = format_cache_age(age_seconds)
 
