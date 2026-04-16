@@ -281,7 +281,8 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
 # --- Helper functions for upgrade command ---
 
 def _step1_inspect_packages(
-    console: Console, output: str, timeout: int, debug: bool, total_steps: int = 5
+    console: Console, output: str, timeout: int, debug: bool,
+    total_steps: int = 5, python_path: Optional[str] = None
 ) -> tuple[list, float]:
     """Step 1: Inspect installed packages."""
     if output != "json":
@@ -296,9 +297,9 @@ def _step1_inspect_packages(
             transient=True
         ) as progress:
             progress.add_task("Loading packages...", total=None)
-            installed_packages = inspect_installed_packages(timeout=timeout)
+            installed_packages = inspect_installed_packages(timeout=timeout, python_path=python_path)
     else:
-        installed_packages = inspect_installed_packages(timeout=timeout)
+        installed_packages = inspect_installed_packages(timeout=timeout, python_path=python_path)
     step_time = time.time() - step_start
 
     if output != "json":
@@ -312,7 +313,8 @@ def _step1_inspect_packages(
 def _step2_get_latest_versions(
     console: Console, output: str, debug: bool,
     installed_packages: list, use_cache: bool, cache_enabled: bool,
-    timeout: int, pre: bool, parallel: int, total_steps: int = 5
+    timeout: int, pre: bool, parallel: int, total_steps: int = 5,
+    python_path: Optional[str] = None
 ) -> tuple[dict, float, bool]:
     """Step 2: Get latest versions from cache or network."""
     if output != "json":
@@ -326,7 +328,7 @@ def _step2_get_latest_versions(
     cache_was_used = False
 
     if use_cache:
-        cache_data = load_cache()
+        cache_data = load_cache(python_path=python_path)
         if cache_data and cache_data.latest_versions:
             for installed_pkg in installed_packages:
                 name_lower = installed_pkg.name.lower()
@@ -379,7 +381,7 @@ def _step2_get_latest_versions(
 
         if cache_enabled:
             version_cache = build_version_cache(latest_versions)
-            save_cache(version_cache, include_prereleases=pre)
+            save_cache(version_cache, include_prereleases=pre, python_path=python_path)
 
     step_time = time.time() - step_start
 
@@ -462,7 +464,8 @@ def _step3_resolve_packages(
 
 def _step5_install_packages(
     console: Console, output: str,
-    can_upgrade: list, package_constraints: dict
+    can_upgrade: list, package_constraints: dict,
+    python_path: Optional[str] = None
 ) -> tuple[list, float]:
     """Step 5: Install/upgrade packages."""
     editable_packages = [pkg for pkg in can_upgrade if pkg.is_editable]
@@ -479,7 +482,10 @@ def _step5_install_packages(
         {"name": pkg.name, "version": str(pkg.version)}
         for pkg in can_upgrade
     ]
-    save_state(pre_upgrade_packages, "Pre-upgrade state")
+    description = "Pre-upgrade state"
+    if python_path is not None:
+        description = f"Pre-upgrade state ({python_path})"
+    save_state(pre_upgrade_packages, description)
 
     stream = ConsoleStream(console) if output != "json" else None
     results = []
@@ -491,7 +497,8 @@ def _step5_install_packages(
             non_editable_packages,
             output_stream=stream,
             timeout=300,
-            version_constraints=package_constraints if package_constraints else None
+            version_constraints=package_constraints if package_constraints else None,
+            python_path=python_path
         )
         results.extend(regular_results)
 
@@ -501,7 +508,8 @@ def _step5_install_packages(
         editable_results = reinstall_editable_packages(
             editable_packages,
             output_stream=stream,
-            timeout=300
+            timeout=300,
+            python_path=python_path
         )
         results.extend(editable_results)
 
@@ -584,9 +592,16 @@ def _step5_install_packages(
     default=None,
     help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})"
 )
+@click.option(
+    "--group", "-g",
+    "group_name",
+    default=None,
+    help="Run upgrade across all environments in a named group"
+)
 def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
             exclude: tuple, show_blocked: bool, output: str, update_requirements: Optional[str],
-            parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int]) -> None:
+            parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int],
+            group_name: Optional[str] = None) -> None:
     """
     Upgrade installed packages.
 
@@ -636,6 +651,19 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
     # Initialize JSON formatter if needed
     json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    # Group mode: dispatch to group execution loop
+    if group_name is not None:
+        _run_group_upgrade(
+            group_name=group_name, console=console, output=output,
+            timeout=timeout, pre=pre, yes=yes, debug=debug,
+            exclude_str=exclude_str, show_blocked=show_blocked,
+            parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
+            packages=packages, package_constraints={},
+            update_requirements=update_requirements,
+            json_formatter=json_formatter, cache_enabled=cache_enabled,
+        )
+        return
 
     # Interactive mode deprecation warning
     if interactive:
@@ -823,7 +851,10 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 @click.option("--no-cache", is_flag=True, help="Skip cache and fetch fresh version data")
 @click.option("--cache-ttl", type=int, default=None,
               help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})")
-def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, no_cache, cache_ttl):
+@click.option("--group", "-g", "group_name", default=None,
+              help="Show outdated packages across all environments in a named group")
+def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, no_cache, cache_ttl,
+             group_name=None):
     """
     Show outdated packages.
 
@@ -864,6 +895,16 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
 
     cache_enabled = get_config_value(config, 'cache_enabled', True) and not no_cache
     json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    if group_name is not None:
+        _run_group_outdated(
+            group_name=group_name, console=console, output=output,
+            timeout=timeout, pre=pre, debug=debug,
+            exclude_str=exclude_str, show_blocked=show_blocked,
+            parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
+            json_formatter=json_formatter, cache_enabled=cache_enabled,
+        )
+        return
 
     if debug and output != "json":
         logging.basicConfig(
@@ -1291,6 +1332,304 @@ def group_delete(group_name: str) -> None:
         sys.exit(1)
 
     console.print(f"[green]Deleted[/green] group [cyan]{group_name}[/cyan]")
+    sys.exit(0)
+
+
+def _run_group_upgrade(
+    group_name: str, console: Console, output: str,
+    timeout: int, pre: bool, yes: bool, debug: bool,
+    exclude_str: str, show_blocked: bool,
+    parallel: int, no_cache: bool, cache_ttl: Optional[int],
+    packages: tuple, package_constraints: dict,
+    update_requirements: Optional[str],
+    json_formatter: Optional[JsonOutputFormatter],
+    cache_enabled: bool,
+) -> None:
+    """Execute upgrade across all environments in a group."""
+    import os
+
+    environments = get_group(group_name)
+    if environments is None:
+        if output == "json":
+            print(json.dumps({"error": f"Group '{group_name}' not found"}))
+        else:
+            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    group_results = []  # For JSON output
+    total_upgraded = 0
+    total_failed = 0
+    envs_processed = 0
+    envs_skipped = 0
+
+    try:
+        for env_path in environments:
+            if not os.path.exists(env_path):
+                if output != "json":
+                    console.print(f"\n[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
+                envs_skipped += 1
+                continue
+
+            if output != "json":
+                console.print(f"\n[bold]{'═' * 60}[/bold]")
+                console.print(f"[bold]Environment: {env_path}[/bold]")
+                console.print(f"[bold]{'═' * 60}[/bold]\n")
+
+            try:
+                env_result = _run_single_env_upgrade(
+                    python_path=env_path, console=console, output=output,
+                    timeout=timeout, pre=pre, yes=yes, debug=debug,
+                    exclude_str=exclude_str, show_blocked=show_blocked,
+                    parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
+                    packages=packages, package_constraints=package_constraints,
+                    update_requirements=update_requirements,
+                    cache_enabled=cache_enabled,
+                )
+                envs_processed += 1
+
+                if env_result is not None:
+                    upgraded = len([r for r in env_result["results"] if r.upgraded])
+                    failed = len([r for r in env_result["results"] if not r.upgraded])
+                    total_upgraded += upgraded
+                    total_failed += failed
+
+                    if json_formatter is not None:
+                        group_results.append({
+                            "environment": env_path,
+                            "upgradable": [json_formatter._package_to_dict(p) for p in env_result.get("upgradable", [])],
+                            "blocked": [json_formatter._package_to_dict(p) for p in env_result.get("blocked", [])],
+                            "results": [json_formatter._package_to_dict(p) for p in env_result.get("results", [])],
+                            "summary": {
+                                "total": upgraded + failed,
+                                "upgraded": upgraded,
+                                "failed": failed,
+                            },
+                        })
+            except Exception as e:
+                envs_processed += 1
+                total_failed += 1
+                if output != "json":
+                    console.print(f"\n[red]Error in {env_path}:[/red] {e}")
+                else:
+                    group_results.append({
+                        "environment": env_path,
+                        "error": str(e),
+                        "upgradable": [], "blocked": [], "results": [],
+                        "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                    })
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        sys.exit(130)
+
+    # Print group summary
+    if output == "json":
+        assert json_formatter is not None
+        print(json_formatter.format_group_results(group_results))
+    else:
+        console.print(f"\n[bold]{'═' * 60}[/bold]")
+        console.print("[bold]Group Summary[/bold]")
+        console.print(f"[bold]{'═' * 60}[/bold]")
+        console.print(f"  {envs_processed} environment(s) processed")
+        if envs_skipped:
+            console.print(f"  [yellow]{envs_skipped} environment(s) skipped (path not found)[/yellow]")
+        console.print(f"  {total_upgraded} package(s) upgraded")
+        if total_failed:
+            console.print(f"  [red]{total_failed} package(s) failed[/red]")
+        else:
+            console.print(f"  0 failures")
+
+    if total_failed:
+        sys.exit(1)
+    sys.exit(0)
+
+
+def _run_single_env_upgrade(
+    python_path: str, console: Console, output: str,
+    timeout: int, pre: bool, yes: bool, debug: bool,
+    exclude_str: str, show_blocked: bool,
+    parallel: int, no_cache: bool, cache_ttl: Optional[int],
+    packages: tuple, package_constraints: dict,
+    update_requirements: Optional[str],
+    cache_enabled: bool,
+) -> Optional[dict]:
+    """Run upgrade workflow for a single environment.
+
+    :returns: Dict with 'upgradable', 'blocked', 'results' keys, or None if nothing to do
+    """
+    effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+    use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl, python_path=python_path)
+
+    if use_cache and output != "json":
+        cache_age = get_cache_age_seconds(python_path=python_path)
+        console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+
+    # Step 1: Inspect
+    installed_packages, _ = _step1_inspect_packages(
+        console, output, timeout, debug, python_path=python_path
+    )
+    if not installed_packages:
+        if output != "json":
+            console.print("[yellow]No packages found.[/yellow]")
+        return None
+
+    # Step 2: Get latest versions
+    latest_versions, _, _ = _step2_get_latest_versions(
+        console, output, debug, installed_packages, use_cache, cache_enabled,
+        timeout, pre, parallel, python_path=python_path
+    )
+    if not latest_versions:
+        if output != "json":
+            console.print("\n[bold green]All packages are up to date![/bold green]")
+        return None
+
+    # Step 3: Resolve
+    can_upgrade, blocked_packages, pkg_constraints, _ = _step3_resolve_packages(
+        console, output, debug, latest_versions, installed_packages,
+        show_blocked, exclude_str, packages
+    )
+    if package_constraints:
+        pkg_constraints.update(package_constraints)
+
+    if not can_upgrade:
+        if output != "json":
+            console.print("\n[yellow]No packages can be upgraded.[/yellow]")
+            if show_blocked and blocked_packages:
+                console.print()
+                print_blocked_packages_table(blocked_packages, console=console)
+        return {"upgradable": [], "blocked": blocked_packages, "results": []}
+
+    # Step 4: Display and confirm
+    if output != "json":
+        console.print("\n[bold]Step 4/5:[/bold] Packages ready for upgrade:\n")
+        print_upgradable_packages_table(can_upgrade, console=console)
+        if show_blocked and blocked_packages:
+            console.print()
+            print_blocked_packages_table(blocked_packages, console=console)
+
+    if not yes and output != "json":
+        console.print()
+        confirm = click.confirm("Proceed with upgrade?", default=True)
+        if not confirm:
+            console.print("[yellow]Skipped.[/yellow]")
+            return {"upgradable": can_upgrade, "blocked": blocked_packages, "results": []}
+
+    # Step 5: Install
+    results, _ = _step5_install_packages(
+        console, output, can_upgrade, pkg_constraints, python_path=python_path
+    )
+
+    if output != "json":
+        print_upgrade_results(results, console=console)
+
+    return {"upgradable": can_upgrade, "blocked": blocked_packages, "results": results}
+
+
+def _run_group_outdated(
+    group_name: str, console: Console, output: str,
+    timeout: int, pre: bool, debug: bool,
+    exclude_str: str, show_blocked: bool,
+    parallel: int, no_cache: bool, cache_ttl: Optional[int],
+    json_formatter: Optional[JsonOutputFormatter],
+    cache_enabled: bool,
+) -> None:
+    """Execute outdated check across all environments in a group."""
+    import os
+
+    environments = get_group(group_name)
+    if environments is None:
+        if output == "json":
+            print(json.dumps({"error": f"Group '{group_name}' not found"}))
+        else:
+            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    group_results = []
+
+    try:
+        for env_path in environments:
+            if not os.path.exists(env_path):
+                if output != "json":
+                    console.print(f"\n[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
+                continue
+
+            if output != "json":
+                console.print(f"\n[bold]{'═' * 60}[/bold]")
+                console.print(f"[bold]Environment: {env_path}[/bold]")
+                console.print(f"[bold]{'═' * 60}[/bold]\n")
+
+            try:
+                effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+                use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl, python_path=env_path)
+
+                if use_cache and output != "json":
+                    cache_age = get_cache_age_seconds(python_path=env_path)
+                    console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+
+                installed_packages, _ = _step1_inspect_packages(
+                    console, output, timeout, debug, total_steps=3, python_path=env_path
+                )
+                if not installed_packages:
+                    if output != "json":
+                        console.print("[yellow]No packages found.[/yellow]")
+                    if output == "json":
+                        group_results.append({
+                            "environment": env_path,
+                            "upgradable": [], "blocked": [], "results": [],
+                            "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                        })
+                    continue
+
+                latest_versions, _, _ = _step2_get_latest_versions(
+                    console, output, debug, installed_packages, use_cache, cache_enabled,
+                    timeout, pre, parallel, total_steps=3, python_path=env_path
+                )
+                if not latest_versions:
+                    if output != "json":
+                        console.print("\n[bold green]All packages are up to date![/bold green]")
+                    if output == "json":
+                        group_results.append({
+                            "environment": env_path,
+                            "upgradable": [], "blocked": [], "results": [],
+                            "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                        })
+                    continue
+
+                can_upgrade, blocked_packages, _, _ = _step3_resolve_packages(
+                    console, output, debug, latest_versions, installed_packages,
+                    show_blocked, exclude_str, (), total_steps=3
+                )
+
+                if output != "json":
+                    if can_upgrade:
+                        console.print("\n[bold]Packages with updates available:\n")
+                        print_upgradable_packages_table(can_upgrade, console=console)
+                    else:
+                        console.print("\n[yellow]No packages can be upgraded.[/yellow]")
+                    if show_blocked and blocked_packages:
+                        console.print()
+                        print_blocked_packages_table(blocked_packages, console=console)
+                else:
+                    group_results.append({
+                        "environment": env_path,
+                        "upgradable": [json_formatter._package_to_dict(p) for p in can_upgrade],
+                        "blocked": [json_formatter._package_to_dict(p) for p in blocked_packages] if show_blocked else [],
+                        "results": [],
+                        "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                    })
+
+            except Exception as e:
+                if output != "json":
+                    console.print(f"\n[red]Error in {env_path}:[/red] {e}")
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        sys.exit(130)
+
+    if output == "json":
+        assert json_formatter is not None
+        print(json_formatter.format_group_results(group_results))
+
     sys.exit(0)
 
 
