@@ -3,10 +3,8 @@
 import json
 import sys
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from unittest.mock import patch, Mock
 
-import pytest
 from packaging.version import Version
 
 from pipu_cli.cache import (
@@ -22,7 +20,6 @@ from pipu_cli.cache import (
     clear_all_caches,
     build_version_cache,
     get_cache_info,
-    CacheData,
 )
 from pipu_cli.package_management import InstalledPackage
 
@@ -426,8 +423,8 @@ class TestPythonPathParameter:
             cache_a = load_cache(python_path="/python/a")
             cache_b = load_cache(python_path="/python/b")
 
-        assert cache_a.latest_versions["pkg"] == "1.0"
-        assert cache_b.latest_versions["pkg"] == "2.0"
+        assert cache_a.latest_versions["pkg"] == "1.0"  # pyright: ignore[reportOptionalMemberAccess]
+        assert cache_b.latest_versions["pkg"] == "2.0"  # pyright: ignore[reportOptionalMemberAccess]
 
     def test_is_cache_fresh_with_python_path(self, tmp_path):
         """is_cache_fresh works with python_path."""

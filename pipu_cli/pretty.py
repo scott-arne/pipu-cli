@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
 
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
+from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult
 
 
 class ConsoleStream:
@@ -175,6 +175,51 @@ def print_upgrade_results(
         console.print(f"[bold]Summary:[/bold] {num_successful}/{num_total} packages upgraded successfully")
     else:
         console.print("[bold green]All packages upgraded successfully![/bold green]")
+
+
+def print_install_results(
+    results: List[InstalledResult],
+    console: Optional[Console] = None
+) -> None:
+    """Print a summary of package install results.
+
+    :param results: List of InstalledResult objects with install status
+    :param console: Optional Rich console instance
+    """
+    if console is None:
+        console = Console()
+
+    if not results:
+        console.print("[yellow]No packages were processed.[/yellow]")
+        return
+
+    successful = [pkg for pkg in results if pkg.installed]
+    failed = [pkg for pkg in results if not pkg.installed]
+
+    if successful:
+        console.print(f"\n[bold green]Successfully installed/updated {len(successful)} package(s):[/bold green]")
+        for pkg in successful:
+            if pkg.previous_version is None:
+                console.print(f"  - {pkg.name}: (new) -> {pkg.version}")
+            elif pkg.version > pkg.previous_version:
+                console.print(f"  - {pkg.name}: {pkg.previous_version} -> {pkg.version}")
+            else:
+                console.print(f"  - {pkg.name}: {pkg.version} (unchanged)")
+
+    if failed:
+        console.print(f"\n[bold yellow]{len(failed)} package(s) could not be installed:[/bold yellow]")
+        table = Table(show_header=True, header_style="bold yellow")
+        table.add_column("Package", style="cyan")
+        table.add_column("Reason", style="dim")
+        for pkg in failed:
+            table.add_row(pkg.name, pkg.failure_reason or "Unknown failure")
+        console.print(table)
+
+    console.print()
+    if failed:
+        console.print(f"[bold]Summary:[/bold] {len(successful)}/{len(results)} packages installed successfully")
+    else:
+        console.print("[bold green]All packages installed successfully![/bold green]")
 
 
 def _parse_selection(selection: str, max_index: int) -> List[int]:

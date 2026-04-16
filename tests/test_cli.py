@@ -8,7 +8,7 @@ from unittest.mock import patch, Mock
 
 from packaging.version import Version
 from pipu_cli.cli import cli
-from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo
+from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo, InstalledResult
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable), \
-         patch('pipu_cli.cli.install_packages') as mock_install:
+         patch('pipu_cli.cli.install_packages'):
 
         mock_latest.return_value = {
             installed[0]: Mock(version=Version("2.31.0")),
@@ -155,7 +155,7 @@ def test_show_blocked_displays_blocked_packages(runner):
     ]
 
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
-         patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
+         patch('pipu_cli.cli.get_latest_versions_parallel') as mock_latest, \
          patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons') as mock_resolve:
 
         mock_latest.return_value = {
@@ -343,11 +343,11 @@ def test_explicit_cli_timeout_overrides_config(runner):
     with patch('pipu_cli.cli.load_config', return_value=config), \
          patch('pipu_cli.cli.inspect_installed_packages', return_value=[]) as mock_inspect:
 
-        result = runner.invoke(cli, ['upgrade', '--timeout', '10', '--no-cache'])
+        runner.invoke(cli, ['upgrade', '--timeout', '10', '--no-cache'])
 
         # inspect_installed_packages should be called with timeout=10 (from CLI),
         # NOT timeout=30 (from config)
-        mock_inspect.assert_called_once_with(timeout=10)
+        mock_inspect.assert_called_once_with(timeout=10, python_path=None)
 
 
 def test_explicit_cli_pre_flag_overrides_config(runner):
@@ -586,3 +586,130 @@ class TestGroupExecution:
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
 
         assert "summary" in result.output.lower() or "processed" in result.output.lower()
+
+
+class TestInstallCommand:
+    """Tests for the pipu install command."""
+
+    def test_install_single_package(self, runner):
+        """install calls run_pip_install with correct args."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
+            result = runner.invoke(cli, ["install", "requests", "--yes"])
+
+        assert result.exit_code == 0
+        mock_install.assert_called_once()
+        call_kwargs = mock_install.call_args
+        assert call_kwargs.kwargs["package_specs"] == ["requests"]
+        assert call_kwargs.kwargs["upgrade"] is True
+
+    def test_install_multiple_packages(self, runner):
+        """install passes multiple package specs."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None),
+            InstalledResult(name="flask", version=Version("3.0.0"),
+                            installed=True, previous_version=Version("2.3.0")),
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
+            result = runner.invoke(cli, ["install", "requests", "flask", "--yes"])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_install.call_args
+        assert call_kwargs.kwargs["package_specs"] == ["requests", "flask"]
+
+    def test_install_no_update_flag(self, runner):
+        """install --no-update passes upgrade=False."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
+            result = runner.invoke(cli, ["install", "requests", "--no-update", "--yes"])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_install.call_args
+        assert call_kwargs.kwargs["upgrade"] is False
+
+    def test_install_with_pre(self, runner):
+        """install --pre passes pre=True."""
+        results = [
+            InstalledResult(name="requests", version=Version("3.0.0a1"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
+            result = runner.invoke(cli, ["install", "requests", "--pre", "--yes"])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_install.call_args
+        assert call_kwargs.kwargs["pre"] is True
+
+    def test_install_requires_packages(self, runner):
+        """install with no packages shows error."""
+        result = runner.invoke(cli, ["install"])
+        assert result.exit_code != 0
+
+    def test_install_json_output(self, runner):
+        """install -o json outputs valid JSON."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results):
+            result = runner.invoke(cli, ["install", "requests", "--yes", "-o", "json"])
+
+        data = json.loads(result.output)
+        assert "results" in data
+        assert "summary" in data
+        assert data["summary"]["total"] == 1
+
+    def test_install_yes_skips_confirm(self, runner):
+        """install -y does not prompt for confirmation."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results):
+            result = runner.invoke(cli, ["install", "requests", "-y"])
+
+        # Should not contain a prompt
+        assert "Do you want to proceed?" not in result.output
+        assert result.exit_code == 0
+
+    def test_install_group_not_found(self, runner):
+        """install -g with non-existent group shows error."""
+        with patch("pipu_cli.cli.get_group", return_value=None):
+            result = runner.invoke(cli, ["install", "requests", "-g", "nogroup", "--yes"])
+        assert "not found" in result.output.lower()
+        assert result.exit_code == 1
+
+    def test_install_group_runs_per_environment(self, runner):
+        """install -g calls run_pip_install for each environment."""
+        results = [
+            InstalledResult(name="requests", version=Version("2.31.0"),
+                            installed=True, previous_version=None)
+        ]
+        with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/b"]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
+            runner.invoke(cli, ["install", "requests", "-g", "mygroup", "--yes"])
+
+        assert mock_install.call_count == 2
+        # Verify python_path was set for each call
+        paths = [call.kwargs["python_path"] for call in mock_install.call_args_list]
+        assert "/python/a" in paths
+        assert "/python/b" in paths
+
+    def test_install_failure_exits_nonzero(self, runner):
+        """install exits 1 when packages fail to install."""
+        results = [
+            InstalledResult(name="badpkg", version=Version("0"),
+                            installed=False, failure_reason="Not found on PyPI")
+        ]
+        with patch("pipu_cli.cli.run_pip_install", return_value=results):
+            result = runner.invoke(cli, ["install", "badpkg", "--yes"])
+
+        assert result.exit_code == 1

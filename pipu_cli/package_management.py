@@ -86,6 +86,14 @@ class BlockedPackageInfo(Package):
     editable_location: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class InstalledResult(Package):
+    """Result of a pip install operation for a single package."""
+    installed: bool
+    previous_version: Optional[Version] = None  # None = freshly installed
+    failure_reason: Optional[str] = None
+
+
 def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = None) -> List[InstalledPackage]:
     """
     Inspect currently installed Python packages and return detailed information.
@@ -164,7 +172,7 @@ def _get_editable_packages(timeout: int, python_path: Optional[str] = None) -> D
     :param python_path: Path to Python interpreter
     :returns: Dictionary mapping canonical package names to their source locations
     """
-    editable_packages = {}
+    editable_packages: Dict[str, str] = {}
 
     try:
         # Use pip list --editable to get editable packages
@@ -293,7 +301,7 @@ def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
     :param dist: Distribution object from pip's metadata API
     :returns: Dictionary mapping dependency names to their constraint specifiers
     """
-    constrained_dependencies = {}
+    constrained_dependencies: Dict[str, str] = {}
 
     try:
         # Get the Requires-Dist metadata
@@ -1052,6 +1060,29 @@ def _get_remote_package_versions(
     return versions
 
 
+def _get_local_package_versions(canonical_names: List[str]) -> Dict[str, Version]:
+    """Get current versions of packages from the local environment.
+
+    :param canonical_names: List of canonical package names to look up
+    :returns: Dictionary mapping canonical names to Version objects
+    """
+    versions: Dict[str, Version] = {}
+    name_set = set(canonical_names)
+    env = get_default_environment()
+    for dist in env.iter_all_distributions():
+        try:
+            package_name = dist.metadata["name"]
+            canonical_name = canonicalize_name(package_name)
+            if canonical_name in name_set:
+                try:
+                    versions[canonical_name] = Version(str(dist.version))
+                except InvalidVersion:
+                    logger.warning(f"Invalid version for {package_name}: {dist.version}")
+        except Exception as e:
+            logger.warning(f"Error processing package {dist.metadata.get('name', 'unknown')}: {e}")
+    return versions
+
+
 def install_packages(
     packages_to_upgrade: List[UpgradePackageInfo],
     output_stream: Optional[OutputStream] = None,
@@ -1163,30 +1194,12 @@ def install_packages(
             ]
 
         # Installation succeeded - now determine which packages were actually upgraded
-        current_versions = {}
-
         if python_path is not None:
-            # Remote environment: use subprocess pip list
             current_versions = _get_remote_package_versions(
                 python_path, list(package_map.keys()), timeout=30
             )
         else:
-            # Local environment: use pip internals
-            env = get_default_environment()
-            for dist in env.iter_all_distributions():
-                try:
-                    package_name = dist.metadata["name"]
-                    canonical_name = canonicalize_name(package_name)
-                    if canonical_name in package_map:
-                        try:
-                            current_version = Version(str(dist.version))
-                            current_versions[canonical_name] = current_version
-                        except InvalidVersion:
-                            logger.warning(f"Invalid version for {package_name}: {dist.version}")
-                            continue
-                except Exception as e:
-                    logger.warning(f"Error processing package {dist.metadata.get('name', 'unknown')}: {e}")
-                    continue
+            current_versions = _get_local_package_versions(list(package_map.keys()))
 
         # Build results by comparing current vs previous versions
         results = []
@@ -1424,3 +1437,173 @@ def reinstall_editable_packages(
             logger.error(f"Error reinstalling editable package {pkg.name}: {e}")
 
     return results
+
+
+def _parse_package_name(spec: str) -> str:
+    """Extract the canonical package name from a pip install spec.
+
+    :param spec: Package specification like 'requests', 'numpy==1.24', 'flask>=2.0'
+    :returns: Canonical package name
+    """
+    for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
+        if op in spec:
+            return canonicalize_name(spec.split(op, 1)[0].strip())
+    return canonicalize_name(spec.strip())
+
+
+def run_pip_install(
+    package_specs: List[str],
+    upgrade: bool = True,
+    output_stream: Optional[OutputStream] = None,
+    timeout: int = 300,
+    python_path: Optional[str] = None,
+    pre: bool = False,
+) -> List[InstalledResult]:
+    """Install packages using pip.
+
+    Wraps ``pip install`` (with ``-U`` by default) and reports what was
+    installed, updated, or left unchanged.
+
+    :param package_specs: Package specifications (e.g. ``["requests", "numpy==1.24"]``)
+    :param upgrade: Add ``-U`` flag to pip install (default: True)
+    :param output_stream: Optional stream for real-time pip output
+    :param timeout: Subprocess timeout in seconds (default: 300)
+    :param python_path: Path to Python interpreter for remote environments
+    :param pre: Include pre-release versions
+    :returns: List of InstalledResult objects describing the outcome
+    """
+    if not package_specs:
+        return []
+
+    # Extract canonical names for version lookups
+    canonical_names = [_parse_package_name(spec) for spec in package_specs]
+    # Map canonical name back to the original spec for result reporting
+    name_to_spec = dict(zip(canonical_names, package_specs))
+
+    # Snapshot pre-install versions
+    if python_path is not None:
+        pre_versions = _get_remote_package_versions(python_path, canonical_names, timeout=30)
+    else:
+        pre_versions = _get_local_package_versions(canonical_names)
+
+    # Build pip command
+    executable = python_path if python_path is not None else sys.executable
+    cmd = [executable, '-m', 'pip', 'install']
+    if upgrade:
+        cmd.append('-U')
+    if pre:
+        cmd.append('--pre')
+    cmd.extend(package_specs)
+
+    process = None
+    try:
+        if output_stream:
+            output_stream.write(f"Installing {len(package_specs)} package(s)...\n")
+            output_stream.flush()
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        lock = threading.Lock()
+        stdout_thread = threading.Thread(
+            target=_stream_reader, args=(process.stdout, output_stream, lock), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_stream_reader, args=(process.stderr, output_stream, lock), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdout_thread.join()
+        stderr_thread.join()
+
+        returncode = process.wait(timeout=timeout)
+
+        if returncode != 0:
+            logger.warning(f"pip install failed with return code {returncode}")
+            return [
+                InstalledResult(
+                    name=name_to_spec[cn],
+                    version=pre_versions.get(cn, Version("0")),
+                    installed=False,
+                    previous_version=pre_versions.get(cn),
+                    failure_reason=f"Installation failed (pip exit code {returncode})",
+                )
+                for cn in canonical_names
+            ]
+
+        # Snapshot post-install versions
+        if python_path is not None:
+            post_versions = _get_remote_package_versions(python_path, canonical_names, timeout=30)
+        else:
+            post_versions = _get_local_package_versions(canonical_names)
+
+        # Build results
+        results: List[InstalledResult] = []
+        for cn in canonical_names:
+            pre_ver = pre_versions.get(cn)
+            post_ver = post_versions.get(cn)
+
+            if post_ver is not None:
+                results.append(InstalledResult(
+                    name=name_to_spec[cn],
+                    version=post_ver,
+                    installed=True,
+                    previous_version=pre_ver,
+                ))
+            else:
+                # Package not found after install — likely a failure pip didn't report
+                results.append(InstalledResult(
+                    name=name_to_spec[cn],
+                    version=pre_ver if pre_ver is not None else Version("0"),
+                    installed=False,
+                    previous_version=pre_ver,
+                    failure_reason="Package not found after installation",
+                ))
+
+        return results
+
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            try:
+                process.kill()
+                process.wait()
+            except Exception as e:
+                logger.warning(f"Error cleaning up timed-out process: {e}")
+
+        if output_stream:
+            output_stream.write("ERROR: Timeout during package installation\n")
+            output_stream.flush()
+
+        return [
+            InstalledResult(
+                name=name_to_spec[cn],
+                version=pre_versions.get(cn, Version("0")),
+                installed=False,
+                previous_version=pre_versions.get(cn),
+                failure_reason="Installation timed out",
+            )
+            for cn in canonical_names
+        ]
+
+    except Exception as e:
+        if output_stream:
+            output_stream.write(f"ERROR: Failed to install packages: {e}\n")
+            output_stream.flush()
+
+        logger.error(f"Error installing packages: {e}")
+
+        return [
+            InstalledResult(
+                name=name_to_spec[cn],
+                version=pre_versions.get(cn, Version("0")),
+                installed=False,
+                previous_version=pre_versions.get(cn),
+                failure_reason=f"Installation failed: {e}",
+            )
+            for cn in canonical_names
+        ]

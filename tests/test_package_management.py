@@ -1,8 +1,9 @@
 """Comprehensive tests for package_management module."""
 
+import json
 import subprocess
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 import pytest
 
 from packaging.version import Version
@@ -16,6 +17,7 @@ from pipu_cli.package_management import (
     get_latest_versions,
     resolve_upgradable_packages,
     install_packages,
+    run_pip_install,
     _get_editable_packages,
     _extract_constrained_dependencies,
 )
@@ -2854,16 +2856,6 @@ def test_upgraded_package_has_failure_reason_field():
 # Tests for python_path parameter
 # ============================================================================
 
-import json
-from unittest.mock import patch, MagicMock
-
-from pipu_cli.package_management import (
-    inspect_installed_packages,
-    _get_editable_packages,
-    InstalledPackage,
-)
-
-
 class TestPythonPathInspection:
     """Tests for inspect_installed_packages with python_path."""
 
@@ -3012,3 +3004,170 @@ class TestPythonPathInstallation:
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "/other/python"
         assert results[0].upgraded is True
+
+
+# ============================================================================
+# Tests for run_pip_install
+# ============================================================================
+
+
+class TestRunPipInstall:
+    """Tests for the run_pip_install function."""
+
+    def test_new_package_install(self):
+        """Installing a new package returns InstalledResult with previous_version=None."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+        mock_process.returncode = 0
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+
+            # Pre-install: package not found; Post-install: package found
+            mock_versions.side_effect = [
+                {},
+                {"requests": Version("2.31.0")},
+            ]
+
+            results = run_pip_install(["requests"])
+
+        assert len(results) == 1
+        assert results[0].installed is True
+        assert results[0].previous_version is None
+        assert results[0].version == Version("2.31.0")
+        assert results[0].name == "requests"
+
+        # Verify -U flag is present
+        cmd = mock_popen.call_args[0][0]
+        assert "-U" in cmd
+
+    def test_no_update_flag(self):
+        """upgrade=False omits -U from pip command."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+
+            mock_versions.side_effect = [
+                {},
+                {"requests": Version("2.31.0")},
+            ]
+
+            run_pip_install(["requests"], upgrade=False)
+
+        cmd = mock_popen.call_args[0][0]
+        assert "-U" not in cmd
+        assert "install" in cmd
+
+    def test_pre_flag(self):
+        """pre=True adds --pre to pip command."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+
+            mock_versions.side_effect = [
+                {},
+                {"requests": Version("3.0.0a1")},
+            ]
+
+            run_pip_install(["requests"], pre=True)
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--pre" in cmd
+
+    def test_existing_package_updated(self):
+        """Updating an existing package reports previous and new versions."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process), \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+
+            mock_versions.side_effect = [
+                {"requests": Version("2.28.0")},
+                {"requests": Version("2.31.0")},
+            ]
+
+            results = run_pip_install(["requests"])
+
+        assert len(results) == 1
+        assert results[0].installed is True
+        assert results[0].previous_version == Version("2.28.0")
+        assert results[0].version == Version("2.31.0")
+
+    def test_install_failure(self):
+        """Non-zero exit code marks all packages as not installed."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 1
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process), \
+             patch("pipu_cli.package_management._get_local_package_versions", return_value={}):
+
+            results = run_pip_install(["badpkg"])
+
+        assert len(results) == 1
+        assert results[0].installed is False
+        assert "exit code 1" in results[0].failure_reason  # pyright: ignore[reportOperatorIssue]
+
+    def test_remote_environment(self):
+        """python_path uses remote version lookup and correct executable."""
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
+             patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
+
+            mock_versions.side_effect = [
+                {},
+                {"requests": Version("2.31.0")},
+            ]
+
+            results = run_pip_install(["requests"], python_path="/other/python")
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "/other/python"
+        assert results[0].installed is True
+
+    def test_empty_specs(self):
+        """Empty package list returns empty results."""
+        results = run_pip_install([])
+        assert results == []

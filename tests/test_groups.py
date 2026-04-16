@@ -1,13 +1,11 @@
 """Tests for groups module."""
 
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from pipu_cli.groups import (
-    GROUPS_FILE,
     load_groups,
     save_groups,
     add_environment,
@@ -200,7 +198,7 @@ class TestValidatePythonPath:
         """Non-existent path fails validation."""
         is_valid, error = validate_python_path("/nonexistent/python")
         assert is_valid is False
-        assert "does not exist" in error
+        assert "does not exist" in error  # pyright: ignore[reportOperatorIssue]
 
     def test_validate_non_python(self, tmp_path):
         """A non-Python executable fails validation."""

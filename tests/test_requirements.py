@@ -1,7 +1,5 @@
 """Tests for requirements file management."""
 
-import pytest
-from pathlib import Path
 from packaging.version import Version
 
 from pipu_cli.requirements import parse_requirements_file, update_requirements_file

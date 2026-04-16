@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pipu_cli.package_management import UpgradedPackage
 
 
 ROLLBACK_DIR = Path.home() / ".pipu" / "rollback"

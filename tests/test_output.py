@@ -1,7 +1,6 @@
 """Tests for output formatting."""
 
 import json
-import pytest
 from packaging.version import Version
 
 from pipu_cli.output import JsonOutputFormatter

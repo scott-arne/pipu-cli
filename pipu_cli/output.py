@@ -2,7 +2,7 @@
 
 import json
 from typing import List, Optional, Any, Dict
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo
+from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult
 
 
 class OutputFormatter:
@@ -94,6 +94,37 @@ class JsonOutputFormatter(OutputFormatter):
             }
 
         return json.dumps(data, indent=2)
+
+    def format_install_results(self, results: List[InstalledResult]) -> str:
+        """Format install results as a single JSON object.
+
+        :param results: List of InstalledResult objects
+        :returns: JSON string
+        """
+        result_dicts = [self._package_to_dict(pkg) for pkg in results]
+        new_installs = [pkg for pkg in results if pkg.installed and pkg.previous_version is None]
+        updated = [pkg for pkg in results if pkg.installed and pkg.previous_version is not None
+                    and pkg.version > pkg.previous_version]
+        failed = [pkg for pkg in results if not pkg.installed]
+
+        data: Dict[str, Any] = {
+            "results": result_dicts,
+            "summary": {
+                "total": len(results),
+                "installed": len(new_installs),
+                "updated": len(updated),
+                "failed": len(failed),
+            }
+        }
+        return json.dumps(data, indent=2)
+
+    def format_group_install_results(self, env_results: List[Dict[str, Any]]) -> str:
+        """Format group install results as a JSON array of per-environment results.
+
+        :param env_results: List of dicts, each with 'environment' key plus install results
+        :returns: JSON string
+        """
+        return json.dumps(env_results, indent=2)
 
     def format_group_results(self, env_results: List[Dict[str, Any]]) -> str:
         """Format group results as a JSON array of per-environment results.

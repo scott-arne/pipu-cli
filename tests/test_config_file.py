@@ -1,9 +1,8 @@
 """Tests for configuration file support."""
 
 import logging
-import pytest
 from pathlib import Path
-from unittest.mock import patch, mock_open
+from unittest.mock import patch
 
 from pipu_cli.config_file import find_config_file, load_config, get_config_value
 

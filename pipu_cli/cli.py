@@ -5,7 +5,7 @@ import logging
 import multiprocessing as mp
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import rich_click as click
 from click.core import ParameterSource
@@ -23,11 +23,13 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages_with_reasons,
     install_packages,
     reinstall_editable_packages,
+    run_pip_install,
 )
 from packaging.version import Version
 from pipu_cli.pretty import (
     print_upgradable_packages_table,
     print_upgrade_results,
+    print_install_results,
     print_blocked_packages_table,
     ConsoleStream,
     select_packages_interactively,
@@ -401,7 +403,7 @@ def _parse_excludes(exclude_tuple: tuple) -> str:
     :param exclude_tuple: Tuple of exclude values from Click multiple option
     :returns: Comma-separated string of package names
     """
-    result = []
+    result: list[str] = []
     for item in exclude_tuple:
         result.extend(name.strip() for name in item.split(",") if name.strip())
     return ",".join(result)
@@ -1437,7 +1439,7 @@ def _run_group_upgrade(
         if total_failed:
             console.print(f"  [red]{total_failed} package(s) failed[/red]")
         else:
-            console.print(f"  0 failures")
+            console.print("  0 failures")
 
     if total_failed:
         sys.exit(1)
@@ -1544,7 +1546,7 @@ def _run_group_outdated(
             console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
         sys.exit(1)
 
-    group_results = []
+    group_results: list[dict[str, Any]] = []
 
     try:
         for env_path in environments:
@@ -1610,6 +1612,7 @@ def _run_group_outdated(
                         console.print()
                         print_blocked_packages_table(blocked_packages, console=console)
                 else:
+                    assert json_formatter is not None
                     group_results.append({
                         "environment": env_path,
                         "upgradable": [json_formatter._package_to_dict(p) for p in can_upgrade],
@@ -1630,6 +1633,268 @@ def _run_group_outdated(
         assert json_formatter is not None
         print(json_formatter.format_group_results(group_results))
 
+    sys.exit(0)
+
+
+@cli.command()
+@click.pass_context
+@click.argument('packages', nargs=-1, required=True)
+@click.option(
+    "--no-update",
+    is_flag=True,
+    help="Use plain pip install without -U flag (don't upgrade existing packages)"
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=300,
+    help="Installation timeout in seconds"
+)
+@click.option(
+    "--pre",
+    is_flag=True,
+    help="Include pre-release versions"
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    help="Skip confirmation prompt"
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    help="Enable debug logging"
+)
+@click.option(
+    "--output", "-o",
+    type=click.Choice(["human", "json"]),
+    default="human",
+    help="Output format (human-readable or json)"
+)
+@click.option(
+    "--group", "-g",
+    "group_name",
+    default=None,
+    help="Install across all environments in a named group"
+)
+def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, timeout: int,
+            pre: bool, yes: bool, debug: bool, output: str,
+            group_name: Optional[str] = None) -> None:
+    """
+    Install packages using pip.
+
+    By default uses pip install -U (install or update). Use --no-update
+    for plain pip install without upgrading existing packages.
+
+    \b
+    Examples:
+      pipu install requests flask       Install/update packages
+      pipu install requests --no-update  Install without updating
+      pipu install "numpy>=1.24"         Install with version constraint
+      pipu install requests -g mygroup   Install across a group
+    """
+    console = Console()
+
+    # Load configuration file
+    config = load_config()
+    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
+        timeout = get_config_value(config, 'timeout', 300)
+    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
+        pre = get_config_value(config, 'pre', False)
+    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
+        yes = get_config_value(config, 'yes', False)
+    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
+        debug = get_config_value(config, 'debug', False)
+    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
+        output = get_config_value(config, 'output', 'human')
+
+    json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    # Group mode
+    if group_name is not None:
+        _run_group_install(
+            group_name=group_name, console=console, output=output,
+            packages=packages, no_update=no_update, timeout=timeout,
+            pre=pre, yes=yes, debug=debug, json_formatter=json_formatter,
+        )
+        return
+
+    # Configure logging
+    if debug and output != "json":
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(message)s',
+            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
+        )
+        logging.getLogger('pip._internal').setLevel(logging.WARNING)
+        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
+        console.print("[dim]Debug mode enabled[/dim]\n")
+
+    try:
+        # Step 1: Show what will be installed and confirm
+        if output != "json":
+            console.print("[bold]Step 1/2:[/bold] Packages to install:\n")
+            for pkg_spec in packages:
+                console.print(f"  - {pkg_spec}")
+            if no_update:
+                console.print("\n  [dim](install only, no upgrade)[/dim]")
+            else:
+                console.print("\n  [dim](install or upgrade to latest)[/dim]")
+
+        if not yes and output != "json":
+            console.print()
+            confirm = click.confirm("Do you want to proceed?", default=True)
+            if not confirm:
+                console.print("[yellow]Installation cancelled.[/yellow]")
+                sys.exit(0)
+
+        # Step 2: Install packages
+        if output != "json":
+            console.print(f"\n[bold]Step 2/2:[/bold] Installing {len(packages)} package(s)...\n")
+
+        stream = ConsoleStream(console) if output != "json" else None
+        results = run_pip_install(
+            package_specs=list(packages),
+            upgrade=not no_update,
+            output_stream=stream,
+            timeout=timeout,
+            pre=pre,
+        )
+
+        # Display results
+        if output == "json":
+            assert json_formatter is not None
+            print(json_formatter.format_install_results(results))
+        else:
+            print_install_results(results, console=console)
+
+        # Exit with appropriate code
+        failed = [r for r in results if not r.installed]
+        sys.exit(1 if failed else 0)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        sys.exit(130)
+    except click.Abort:
+        console.print("\n[yellow]Installation cancelled by user[/yellow]")
+        sys.exit(130)
+    except Exception as e:
+        if output == "json":
+            print(json.dumps({"error": str(e)}))
+        else:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+
+def _run_group_install(
+    group_name: str, console: Console, output: str,
+    packages: tuple, no_update: bool, timeout: int,
+    pre: bool, yes: bool, debug: bool,
+    json_formatter: Optional[JsonOutputFormatter],
+) -> None:
+    """Execute install across all environments in a group."""
+    import os
+
+    environments = get_group(group_name)
+    if environments is None:
+        if output == "json":
+            print(json.dumps({"error": f"Group '{group_name}' not found"}))
+        else:
+            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    group_results = []
+    total_installed = 0
+    total_failed = 0
+    envs_processed = 0
+    envs_skipped = 0
+
+    try:
+        for env_path in environments:
+            if not os.path.exists(env_path):
+                if output != "json":
+                    console.print(f"\n[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
+                envs_skipped += 1
+                continue
+
+            if output != "json":
+                console.print(f"\n[bold]{'═' * 60}[/bold]")
+                console.print(f"[bold]Environment: {env_path}[/bold]")
+                console.print(f"[bold]{'═' * 60}[/bold]\n")
+
+            try:
+                if not yes and output != "json":
+                    confirm = click.confirm("Proceed with install?", default=True)
+                    if not confirm:
+                        console.print("[yellow]Skipped.[/yellow]")
+                        continue
+
+                stream = ConsoleStream(console) if output != "json" else None
+                results = run_pip_install(
+                    package_specs=list(packages),
+                    upgrade=not no_update,
+                    output_stream=stream,
+                    timeout=timeout,
+                    python_path=env_path,
+                    pre=pre,
+                )
+
+                envs_processed += 1
+                installed = len([r for r in results if r.installed])
+                failed = len([r for r in results if not r.installed])
+                total_installed += installed
+                total_failed += failed
+
+                if output != "json":
+                    print_install_results(results, console=console)
+                else:
+                    assert json_formatter is not None
+                    group_results.append({
+                        "environment": env_path,
+                        "results": [json_formatter._package_to_dict(r) for r in results],
+                        "summary": {
+                            "total": len(results),
+                            "installed": installed,
+                            "failed": failed,
+                        },
+                    })
+
+            except Exception as e:
+                envs_processed += 1
+                total_failed += 1
+                if output != "json":
+                    console.print(f"\n[red]Error in {env_path}:[/red] {e}")
+                else:
+                    group_results.append({
+                        "environment": env_path,
+                        "error": str(e),
+                        "results": [],
+                        "summary": {"total": 0, "installed": 0, "failed": 0},
+                    })
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        sys.exit(130)
+
+    # Print group summary
+    if output == "json":
+        assert json_formatter is not None
+        print(json_formatter.format_group_install_results(group_results))
+    else:
+        console.print(f"\n[bold]{'═' * 60}[/bold]")
+        console.print("[bold]Group Summary[/bold]")
+        console.print(f"[bold]{'═' * 60}[/bold]")
+        console.print(f"  {envs_processed} environment(s) processed")
+        if envs_skipped:
+            console.print(f"  [yellow]{envs_skipped} environment(s) skipped (path not found)[/yellow]")
+        console.print(f"  {total_installed} package(s) installed")
+        if total_failed:
+            console.print(f"  [red]{total_failed} package(s) failed[/red]")
+        else:
+            console.print("  0 failures")
+
+    if total_failed:
+        sys.exit(1)
     sys.exit(0)
 
 

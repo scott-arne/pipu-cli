@@ -90,6 +90,25 @@ Successfully upgraded 3 package(s)
 
 ## Usage Examples
 
+### Install packages
+
+```bash
+# Install packages (installs or updates to latest by default)
+pipu install requests flask numpy
+
+# Install without updating existing packages
+pipu install requests --no-update
+
+# Install with version constraints
+pipu install "requests>=2.30" "flask==2.3.0"
+
+# Install across a group of environments
+pipu install requests -g data-science
+
+# Include pre-release versions
+pipu install requests --pre
+```
+
 ### Upgrade specific packages only
 
 ```bash
@@ -232,17 +251,62 @@ By default, the cache is considered fresh for 1 hour. You can adjust this:
 pipu upgrade --cache-ttl 300
 ```
 
+## Environment Groups
+
+If you manage multiple Python environments (e.g., separate conda envs for data science, web development, tooling), groups let you operate on all of them with a single command.
+
+### Managing groups
+
+```bash
+# Add the current Python environment to a group
+pipu group add data-science
+
+# Add a specific environment
+pipu group add data-science --python /path/to/envs/ml/bin/python
+
+# List all groups
+pipu group list
+
+# Remove an environment from a group
+pipu group remove data-science --python /path/to/envs/ml/bin/python
+
+# Delete an entire group
+pipu group delete data-science
+```
+
+### Running commands across groups
+
+```bash
+# Check for outdated packages in all environments
+pipu outdated -g data-science
+
+# Upgrade all environments in a group
+pipu upgrade -g data-science
+
+# Upgrade with auto-confirm
+pipu upgrade -g data-science --yes
+```
+
+When using `-g`, pipu runs the command for each environment sequentially. All standard flags (`--exclude`, `--pre`, `--timeout`, etc.) apply uniformly to every environment.
+
+Groups are stored at `~/.config/pipu/groups.toml` and work across projects.
+
 ## Command Reference
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
+| `pipu install` | Install packages (wraps pip install -U) |
 | `pipu upgrade` | Upgrade packages (default command) |
 | `pipu outdated` | Show packages with updates available |
 | `pipu update` | Refresh the package version cache |
 | `pipu clean` | Clear caches |
 | `pipu rollback` | Restore packages to a previous state |
+| `pipu group list` | List all environment groups |
+| `pipu group add` | Add an environment to a group |
+| `pipu group remove` | Remove an environment from a group |
+| `pipu group delete` | Delete an entire group |
 
 ### Upgrade Options
 
@@ -251,12 +315,26 @@ pipu upgrade --cache-ttl 300
 | `PACKAGES` | | Optional package names to upgrade (default: all) |
 | `--exclude TEXT` | `-e` | Package to exclude (repeatable) |
 | `--show-blocked` | `-b` | Show packages blocked by constraints |
+| `--group TEXT` | `-g` | Run across all environments in a named group |
 | `--output [human\|json]` | `-o` | Output format (default: human) |
-| `--parallel INTEGER` | | Number of parallel version check requests (default: min(4, CPU count)) |
+| `--parallel INTEGER` | `-p` | Number of parallel version check requests (default: min(4, CPU count)) |
 | `--update-requirements PATH` | | Update a requirements.txt file after upgrade |
 | `--no-cache` | | Skip cache and fetch fresh version data |
 | `--cache-ttl INTEGER` | | Cache freshness threshold in seconds (default: 3600) |
 | `--timeout INTEGER` | | Network timeout in seconds (default: 10) |
+| `--pre` | | Include pre-release versions |
+| `--yes` | `-y` | Skip confirmation prompt |
+| `--debug` | | Show detailed logging and timing info |
+
+### Install Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `PACKAGES` | | Package names to install (required) |
+| `--no-update` | | Use plain pip install without -U flag |
+| `--group TEXT` | `-g` | Install across all environments in a named group |
+| `--output [human\|json]` | `-o` | Output format (default: human) |
+| `--timeout INTEGER` | | Installation timeout in seconds (default: 300) |
 | `--pre` | | Include pre-release versions |
 | `--yes` | `-y` | Skip confirmation prompt |
 | `--debug` | | Show detailed logging and timing info |
@@ -275,6 +353,14 @@ pipu upgrade --cache-ttl 300
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--all` | `-a` | Clear cache for all environments |
+
+### Group Add Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `GROUP_NAME` | | Name of the group (required) |
+| `--python PATH` | | Path to Python interpreter (default: current Python) |
+| `--force` | `-f` | Skip Python path validation |
 
 ## Configuration File
 
@@ -351,6 +437,7 @@ A: Use `--parallel 10` (or higher) to check multiple packages concurrently.
 - **Use `--update-requirements`** to keep your requirements.txt in sync
 - **Use `pipu update`** to refresh the cache before checking for updates
 - **Use virtual environments** to isolate different projects
+- **Use `pipu group`** to manage multiple environments and upgrade them all at once
 
 ## Troubleshooting
 

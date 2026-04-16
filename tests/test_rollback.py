@@ -1,11 +1,9 @@
 """Tests for rollback functionality."""
 
-import pytest
 import json
-from pathlib import Path
 from unittest.mock import patch
 
-from pipu_cli.rollback import save_state, get_latest_state, list_states
+from pipu_cli.rollback import save_state, get_latest_state
 
 
 def test_save_state(tmp_path):

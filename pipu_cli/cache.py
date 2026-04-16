@@ -15,9 +15,8 @@ import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 
-from packaging.version import Version
 
 from pipu_cli.config import DEFAULT_CACHE_TTL, CACHE_BASE_DIR
 

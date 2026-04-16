@@ -67,6 +67,7 @@ dev = ["invoke", "build"]
 # Command line executables provided by the package
 [project.scripts]
 pipu = "pipu_cli.cli:cli"
+pipuu = "pipu_cli.cli:pipuu"
 
 # ----------------------------------------------------------------------------------------
 # These configurations are specific to the `setuptools` build backend

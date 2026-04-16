@@ -13,7 +13,7 @@ def parse_requirements_file(path: Path) -> Dict[str, str]:
     :param path: Path to requirements file
     :returns: Dict mapping package names to their lines
     """
-    packages = {}
+    packages: Dict[str, str] = {}
 
     if not path.exists():
         return packages
