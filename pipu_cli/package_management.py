@@ -86,7 +86,7 @@ class BlockedPackageInfo(Package):
     editable_location: Optional[str] = None
 
 
-def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
+def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = None) -> List[InstalledPackage]:
     """
     Inspect currently installed Python packages and return detailed information.
 
@@ -95,9 +95,13 @@ def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
     and constrained dependencies.
 
     :param timeout: Timeout in seconds for subprocess calls (default: 10)
+    :param python_path: Path to Python interpreter (default: None for current environment)
     :returns: List of PackageInfo objects containing package details
     :raises RuntimeError: If unable to inspect installed packages
     """
+    if python_path is not None:
+        return _inspect_remote_packages(timeout, python_path)
+
     try:
         # Get editable packages first
         editable_packages = _get_editable_packages(timeout)
@@ -152,19 +156,21 @@ def inspect_installed_packages(timeout: int = 10) -> List[InstalledPackage]:
         raise RuntimeError(f"Failed to inspect installed packages: {e}") from e
 
 
-def _get_editable_packages(timeout: int) -> Dict[str, str]:
+def _get_editable_packages(timeout: int, python_path: Optional[str] = None) -> Dict[str, str]:
     """
     Get packages installed in editable mode using pip list --editable.
 
     :param timeout: Timeout in seconds for subprocess call
+    :param python_path: Path to Python interpreter
     :returns: Dictionary mapping canonical package names to their source locations
     """
     editable_packages = {}
 
     try:
         # Use pip list --editable to get editable packages
+        executable = python_path if python_path is not None else sys.executable
         result = subprocess.run(
-            [sys.executable, '-m', 'pip', 'list', '--editable'],
+            [executable, '-m', 'pip', 'list', '--editable'],
             capture_output=True,
             text=True,
             check=True,
@@ -207,6 +213,66 @@ def _get_editable_packages(timeout: int) -> Dict[str, str]:
         return {}
 
     return editable_packages
+
+
+def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPackage]:
+    """Inspect packages in a remote Python environment via subprocess.
+
+    :param timeout: Timeout in seconds for subprocess calls
+    :param python_path: Path to Python interpreter
+    :returns: List of InstalledPackage objects
+    :raises RuntimeError: If unable to inspect remote packages
+    """
+    import json as json_module
+
+    try:
+        # Get editable packages first
+        editable_packages = _get_editable_packages(timeout, python_path=python_path)
+
+        # Get all installed packages via pip list --format=json
+        result = subprocess.run(
+            [python_path, '-m', 'pip', 'list', '--format=json'],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout
+        )
+
+        pip_packages = json_module.loads(result.stdout)
+        packages = []
+
+        for pkg_data in pip_packages:
+            try:
+                package_name = pkg_data["name"]
+                canonical_name = canonicalize_name(package_name)
+
+                try:
+                    package_version = Version(pkg_data["version"])
+                except InvalidVersion:
+                    logger.warning(f"Invalid version for {package_name}: {pkg_data['version']}. Skipping.")
+                    continue
+
+                is_editable = canonical_name in editable_packages
+                editable_location = editable_packages.get(canonical_name) if is_editable else None
+
+                package_info = InstalledPackage(
+                    name=package_name,
+                    version=package_version,
+                    is_editable=is_editable,
+                    editable_location=editable_location,
+                    # Skip constraint extraction for remote environments
+                    constrained_dependencies={},
+                )
+                packages.append(package_info)
+            except Exception as e:
+                logger.warning(f"Error processing remote package {pkg_data.get('name', 'unknown')}: {e}")
+                continue
+
+        packages.sort(key=lambda p: p.name.lower())
+        return packages
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to inspect remote packages at {python_path}: {e}") from e
 
 
 def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:

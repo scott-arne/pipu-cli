@@ -2848,3 +2848,96 @@ def test_upgraded_package_has_failure_reason_field():
         previous_version=Version("2.28.0"),
     )
     assert pkg_ok.failure_reason is None
+
+
+# ============================================================================
+# Tests for python_path parameter
+# ============================================================================
+
+import json
+from unittest.mock import patch, MagicMock
+
+from pipu_cli.package_management import (
+    inspect_installed_packages,
+    _get_editable_packages,
+    InstalledPackage,
+)
+
+
+class TestPythonPathInspection:
+    """Tests for inspect_installed_packages with python_path."""
+
+    def test_inspect_with_python_path_uses_subprocess(self):
+        """When python_path is provided, use subprocess instead of pip internals."""
+        pip_list_output = json.dumps([
+            {"name": "requests", "version": "2.31.0"},
+            {"name": "numpy", "version": "1.24.0"},
+        ])
+
+        editable_output = "Package    Version    Editable project location\n---------- ---------- -------------------------\n"
+
+        with patch("pipu_cli.package_management.subprocess.run") as mock_run:
+            # First call: pip list --editable
+            # Second call: pip list --format=json
+            mock_run.side_effect = [
+                MagicMock(stdout=editable_output, returncode=0),
+                MagicMock(stdout=pip_list_output, returncode=0),
+            ]
+            packages = inspect_installed_packages(
+                timeout=10, python_path="/other/python"
+            )
+
+        assert len(packages) == 2
+        assert packages[0].name == "numpy"  # Sorted alphabetically
+        assert packages[1].name == "requests"
+        # Should call subprocess with the provided python_path
+        calls = mock_run.call_args_list
+        assert calls[0][0][0][0] == "/other/python"
+
+    def test_inspect_without_python_path_uses_pip_internals(self):
+        """When python_path is None, use get_default_environment (existing behavior)."""
+        with patch("pipu_cli.package_management.get_default_environment") as mock_env, \
+             patch("pipu_cli.package_management._get_editable_packages", return_value={}):
+            mock_dist = MagicMock()
+            mock_dist.metadata = {"name": "requests"}
+            mock_dist.version = "2.31.0"
+            mock_env.return_value.iter_all_distributions.return_value = [mock_dist]
+
+            packages = inspect_installed_packages(timeout=10)
+        assert len(packages) == 1
+        mock_env.assert_called_once()
+
+    def test_get_editable_packages_with_python_path(self):
+        """_get_editable_packages uses python_path in subprocess."""
+        editable_output = (
+            "Package    Version    Editable project location\n"
+            "---------- ---------- -------------------------\n"
+            "my-pkg     0.1.0      /home/user/my-pkg\n"
+        )
+        with patch("pipu_cli.package_management.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=editable_output, returncode=0
+            )
+            result = _get_editable_packages(10, python_path="/other/python")
+
+        assert "my-pkg" in result
+        assert mock_run.call_args[0][0][0] == "/other/python"
+
+    def test_inspect_remote_skips_constraint_extraction(self):
+        """Remote inspection skips dependency constraint extraction."""
+        pip_list_output = json.dumps([
+            {"name": "requests", "version": "2.31.0"},
+        ])
+        editable_output = ""
+
+        with patch("pipu_cli.package_management.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(stdout=editable_output, returncode=0),
+                MagicMock(stdout=pip_list_output, returncode=0),
+            ]
+            packages = inspect_installed_packages(
+                timeout=10, python_path="/other/python"
+            )
+
+        # Constraints should be empty for remote inspection
+        assert packages[0].constrained_dependencies == {}
