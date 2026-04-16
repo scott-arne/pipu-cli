@@ -2941,3 +2941,74 @@ class TestPythonPathInspection:
 
         # Constraints should be empty for remote inspection
         assert packages[0].constrained_dependencies == {}
+
+
+class TestPythonPathInstallation:
+    """Tests for install/reinstall with python_path."""
+
+    def test_install_packages_uses_python_path_in_command(self):
+        """install_packages uses python_path in the pip command."""
+        packages = [
+            UpgradePackageInfo(
+                name="requests",
+                version=Version("2.28.0"),
+                upgradable=True,
+                latest_version=Version("2.31.0"),
+            )
+        ]
+
+        with patch("pipu_cli.package_management.subprocess.Popen") as mock_popen, \
+             patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
+            mock_process = MagicMock()
+            mock_process.stdout = MagicMock()
+            mock_process.stdout.readline = MagicMock(return_value="")
+            mock_process.stderr = MagicMock()
+            mock_process.stderr.readline = MagicMock(return_value="")
+            mock_process.wait.return_value = 0
+            mock_popen.return_value = mock_process
+
+            mock_versions.return_value = {
+                "requests": Version("2.31.0")
+            }
+
+            results = install_packages(
+                packages, python_path="/other/python"
+            )
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "/other/python"
+        assert results[0].upgraded is True
+
+    def test_reinstall_editable_uses_python_path(self):
+        """reinstall_editable_packages uses python_path."""
+        from pipu_cli.package_management import reinstall_editable_packages
+
+        packages = [
+            UpgradePackageInfo(
+                name="my-pkg",
+                version=Version("0.1.0"),
+                upgradable=True,
+                latest_version=Version("0.2.0"),
+                is_editable=True,
+                editable_location="/home/user/my-pkg",
+            )
+        ]
+
+        with patch("pipu_cli.package_management.subprocess.Popen") as mock_popen, \
+             patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
+            mock_process = MagicMock()
+            mock_process.communicate.return_value = ("Success", "")
+            mock_process.returncode = 0
+            mock_popen.return_value = mock_process
+
+            mock_versions.return_value = {
+                "my-pkg": Version("0.2.0")
+            }
+
+            results = reinstall_editable_packages(
+                packages, python_path="/other/python"
+            )
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "/other/python"
+        assert results[0].upgraded is True

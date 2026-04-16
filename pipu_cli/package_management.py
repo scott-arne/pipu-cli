@@ -1014,11 +1014,50 @@ def _stream_reader(
         pipe.close()
 
 
+def _get_remote_package_versions(
+    python_path: str,
+    canonical_names: List[str],
+    timeout: int = 30
+) -> Dict[str, Version]:
+    """Get current versions of packages from a remote environment.
+
+    :param python_path: Path to Python interpreter
+    :param canonical_names: List of canonical package names to check
+    :param timeout: Timeout for subprocess call
+    :returns: Dictionary mapping canonical names to Version objects
+    """
+    import json as json_module
+
+    versions: Dict[str, Version] = {}
+    try:
+        result = subprocess.run(
+            [python_path, '-m', 'pip', 'list', '--format=json'],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout
+        )
+        pip_packages = json_module.loads(result.stdout)
+        name_set = set(canonical_names)
+        for pkg_data in pip_packages:
+            canonical = canonicalize_name(pkg_data["name"])
+            if canonical in name_set:
+                try:
+                    versions[canonical] = Version(pkg_data["version"])
+                except InvalidVersion:
+                    pass
+    except Exception as e:
+        logger.warning(f"Failed to get remote package versions: {e}")
+
+    return versions
+
+
 def install_packages(
     packages_to_upgrade: List[UpgradePackageInfo],
     output_stream: Optional[OutputStream] = None,
     timeout: int = 300,
-    version_constraints: Optional[Dict[str, str]] = None
+    version_constraints: Optional[Dict[str, str]] = None,
+    python_path: Optional[str] = None
 ) -> List[UpgradedPackage]:
     """
     Install/upgrade packages using pip.
@@ -1032,6 +1071,7 @@ def install_packages(
     :param output_stream: Optional stream implementing write() and flush() for live progress updates
     :param timeout: Timeout in seconds for the installation (default: 300)
     :param version_constraints: Optional dict mapping package names (lowercase) to version specifiers (e.g., "==2.31.0")
+    :param python_path: Path to Python interpreter (default: None for current environment)
     :returns: List of UpgradedPackage objects with upgrade status
     :raises RuntimeError: If pip command cannot be executed
     """
@@ -1058,8 +1098,9 @@ def install_packages(
             # Just upgrade to latest
             package_specs.append(pkg.name)
 
+    executable = python_path if python_path is not None else sys.executable
     cmd = [
-        sys.executable, '-m', 'pip', 'install',
+        executable, '-m', 'pip', 'install',
         '--upgrade'
     ] + package_specs
 
@@ -1122,26 +1163,30 @@ def install_packages(
             ]
 
         # Installation succeeded - now determine which packages were actually upgraded
-        # Query current installed versions
-        env = get_default_environment()
         current_versions = {}
 
-        for dist in env.iter_all_distributions():
-            try:
-                package_name = dist.metadata["name"]
-                canonical_name = canonicalize_name(package_name)
-
-                # Only track packages we attempted to upgrade
-                if canonical_name in package_map:
-                    try:
-                        current_version = Version(str(dist.version))
-                        current_versions[canonical_name] = current_version
-                    except InvalidVersion:
-                        logger.warning(f"Invalid version for {package_name}: {dist.version}")
-                        continue
-            except Exception as e:
-                logger.warning(f"Error processing package {dist.metadata.get('name', 'unknown')}: {e}")
-                continue
+        if python_path is not None:
+            # Remote environment: use subprocess pip list
+            current_versions = _get_remote_package_versions(
+                python_path, list(package_map.keys()), timeout=30
+            )
+        else:
+            # Local environment: use pip internals
+            env = get_default_environment()
+            for dist in env.iter_all_distributions():
+                try:
+                    package_name = dist.metadata["name"]
+                    canonical_name = canonicalize_name(package_name)
+                    if canonical_name in package_map:
+                        try:
+                            current_version = Version(str(dist.version))
+                            current_versions[canonical_name] = current_version
+                        except InvalidVersion:
+                            logger.warning(f"Invalid version for {package_name}: {dist.version}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error processing package {dist.metadata.get('name', 'unknown')}: {e}")
+                    continue
 
         # Build results by comparing current vs previous versions
         results = []
@@ -1237,6 +1282,7 @@ def reinstall_editable_packages(
     editable_packages: List[UpgradePackageInfo],
     output_stream: Optional[OutputStream] = None,
     timeout: int = 300,
+    python_path: Optional[str] = None
 ) -> List[UpgradedPackage]:
     """
     Reinstall editable packages to update their version metadata.
@@ -1248,6 +1294,7 @@ def reinstall_editable_packages(
     :param editable_packages: List of UpgradePackageInfo objects for editable packages
     :param output_stream: Optional stream implementing write() and flush() for live progress updates
     :param timeout: Timeout in seconds for each installation (default: 300)
+    :param python_path: Path to Python interpreter (default: None for current environment)
     :returns: List of UpgradedPackage objects with upgrade status
     """
     if not editable_packages:
@@ -1273,8 +1320,9 @@ def reinstall_editable_packages(
             output_stream.write(f"Reinstalling editable package: {pkg.name} from {pkg.editable_location}\n")
             output_stream.flush()
 
+        executable = python_path if python_path is not None else sys.executable
         cmd = [
-            sys.executable, '-m', 'pip', 'install',
+            executable, '-m', 'pip', 'install',
             '--config-settings', 'editable_mode=compat',
             '-e', pkg.editable_location
         ]
@@ -1301,18 +1349,25 @@ def reinstall_editable_packages(
 
             if returncode == 0:
                 # Get the new version after reinstall
-                env = get_default_environment()
                 canonical_name = canonicalize_name(pkg.name)
                 new_version = pkg.version  # Default to old version
 
-                for dist in env.iter_all_distributions():
-                    dist_name = dist.metadata.get("name", "")
-                    if canonicalize_name(dist_name) == canonical_name:
-                        try:
-                            new_version = Version(str(dist.version))
-                        except InvalidVersion:
-                            pass
-                        break
+                if python_path is not None:
+                    remote_versions = _get_remote_package_versions(
+                        python_path, [canonical_name], timeout=30
+                    )
+                    if canonical_name in remote_versions:
+                        new_version = remote_versions[canonical_name]
+                else:
+                    env = get_default_environment()
+                    for dist in env.iter_all_distributions():
+                        dist_name = dist.metadata.get("name", "")
+                        if canonicalize_name(dist_name) == canonical_name:
+                            try:
+                                new_version = Version(str(dist.version))
+                            except InvalidVersion:
+                                pass
+                            break
 
                 # For editable packages, a successful pip install is sufficient
                 # to consider the reinstall successful. The version is determined
