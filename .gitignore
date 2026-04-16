@@ -3,6 +3,8 @@
 .idea
 CLAUDE.md
 docs/plans
+docs/specs
+.vscode
 
 ### Python template
 # Byte-compiled / optimized / DLL files
