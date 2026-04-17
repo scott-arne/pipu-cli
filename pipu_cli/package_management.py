@@ -788,10 +788,9 @@ def resolve_upgradable_packages(
     upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
 
     max_iterations = len(upgrading_packages) + 1  # Safety limit
-    iteration = 0
+    converged = False
 
-    while iteration < max_iterations:
-        iteration += 1
+    for iteration in range(1, max_iterations + 1):
         packages_to_remove = set()
 
         # Check each potential upgrade against current upgrading set
@@ -845,14 +844,14 @@ def resolve_upgradable_packages(
 
         # Remove packages that violate constraints
         if not packages_to_remove:
-            # Fixed point reached - no more packages to remove
             logger.debug(f"Fixed point reached after {iteration} iteration(s)")
+            converged = True
             break
 
         logger.debug(f"Iteration {iteration}: Removing {len(packages_to_remove)} package(s): {packages_to_remove}")
         upgrading_packages -= packages_to_remove
 
-    if iteration >= max_iterations:
+    if not converged:
         logger.warning(f"Fixed-point iteration did not converge after {max_iterations} iterations")
 
     # Build result list with upgradability determined by final upgrading set
@@ -914,10 +913,8 @@ def resolve_upgradable_packages_with_reasons(
     # Fixed-point iteration
     upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
     max_iterations = len(upgrading_packages) + 1
-    iteration = 0
 
-    while iteration < max_iterations:
-        iteration += 1
+    for _iteration in range(1, max_iterations + 1):
         packages_to_remove = set()
 
         for installed_pkg, latest_pkg in actual_upgrades.items():
@@ -938,7 +935,6 @@ def resolve_upgradable_packages_with_reasons(
                             constraining_canonical = canonicalize_name(constraining_pkg.name)
                             if constraining_canonical not in upgrading_packages:
                                 packages_to_remove.add(canonical_name)
-                                # Track blocking reason
                                 reason = f"{constraining_pkg.name} requires {specifier_str}"
                                 if canonical_name not in blocking_reasons:
                                     blocking_reasons[canonical_name] = []
