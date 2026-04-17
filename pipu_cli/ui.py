@@ -1,7 +1,6 @@
 """Upgrade UI display layer using Rich progress components."""
 
 import threading
-import time
 from typing import Dict, List, Optional, Set
 
 from rich.console import Console, Group
@@ -10,28 +9,27 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.text import Text
 
 
-CHECKMARK = "[bold green]\u2713[/bold green]"
-CROSS = "[bold red]\u2717[/bold red]"
+CHECKMARK = "\u2713"
+CROSS = "\u2717"
+BULLET = "\u25cc"
+DOT = "\u00b7"
 
-PKG_NAME_WIDTH = 30
+ENV_NAME_MAX = 16
+PKG_NAME_MAX = 20
 
 
-def _fit_name(name: str, width: int = PKG_NAME_WIDTH) -> str:
-    """Truncate or pad a package name to exactly *width* characters."""
+def _fit(name: str, width: int) -> str:
+    """Truncate or pad a string to exactly *width* visible characters."""
     if len(name) <= width:
         return name.ljust(width)
     return name[: width - 1] + "\u2026"
 
 
 class DownloadTracker:
-    """Single progress bar with currently-active package names below it.
+    """Single progress bar with a compact bulleted list of active downloads below.
 
-    Thread-safe for use with parallel downloads.  Long package names scroll
-    horizontally (marquee style) in the active-downloads line.
+    Thread-safe for use with parallel downloads.
     """
-
-    MARQUEE_WIDTH = 28
-    MARQUEE_SPEED = 6
 
     def __init__(self, live: Live, progress: Progress, task_id: TaskID, total: int) -> None:
         self._live = live
@@ -41,7 +39,6 @@ class DownloadTracker:
         self._completed = 0
         self._failed = 0
         self._active: Set[str] = set()
-        self._start_times: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def start(self, spec: str) -> None:
@@ -51,7 +48,6 @@ class DownloadTracker:
         """
         with self._lock:
             self._active.add(spec)
-            self._start_times[spec] = time.monotonic()
             self._refresh()
 
     def complete(self, spec: str) -> None:
@@ -61,7 +57,6 @@ class DownloadTracker:
         """
         with self._lock:
             self._active.discard(spec)
-            self._start_times.pop(spec, None)
             self._completed += 1
             self._progress.update(self._task_id, completed=self._completed + self._failed)
             self._refresh()
@@ -74,30 +69,20 @@ class DownloadTracker:
         """
         with self._lock:
             self._active.discard(spec)
-            self._start_times.pop(spec, None)
             self._failed += 1
             self._progress.update(self._task_id, completed=self._completed + self._failed)
             self._refresh()
 
-    def _marquee(self, name: str) -> str:
-        w = self.MARQUEE_WIDTH
-        if len(name) <= w:
-            return name.ljust(w)
-        padded = name + "   "
-        elapsed = time.monotonic() - self._start_times.get(name, time.monotonic())
-        offset = int(elapsed * self.MARQUEE_SPEED) % len(padded)
-        rotated = padded[offset:] + padded[:offset]
-        return rotated[:w]
-
     def _refresh(self) -> None:
         if self._active:
-            parts: list = []
-            for i, spec in enumerate(sorted(self._active)):
-                if i > 0:
-                    parts.append((", ", "dim"))
-                parts.append((self._marquee(spec), "dim"))
-            active_text = Text.assemble(*parts)
-            self._live.update(Group(self._progress, active_text))
+            lines = Text()
+            for spec in sorted(self._active):
+                lines.append(f"    {BULLET} ", style="dim")
+                lines.append(spec, style="dim")
+                lines.append("\n")
+            if lines.plain.endswith("\n"):
+                lines.right_crop(1)
+            self._live.update(Group(self._progress, lines))
         else:
             self._live.update(Group(self._progress))
 
@@ -108,22 +93,28 @@ class DownloadTracker:
 
 
 class GroupInstallTracker:
-    """Tracks per-environment install progress with parallel bars."""
+    """Tracks per-environment install progress with fixed-width aligned bars."""
 
-    def __init__(self, progress: Progress, tasks: Dict[str, TaskID], totals: Dict[str, int]) -> None:
+    def __init__(
+        self,
+        progress: Progress,
+        tasks: Dict[str, TaskID],
+        totals: Dict[str, int],
+        env_width: int,
+        count_width: int,
+    ) -> None:
         self._progress = progress
         self._tasks = tasks
         self._totals = totals
         self._completed: Dict[str, int] = {name: 0 for name in tasks}
-        self._max_env_len = max((len(n) for n in tasks), default=4)
+        self._env_width = env_width
+        self._count_width = count_width
 
-    def _fmt_desc(self, prefix: str, env_name: str, count: int, total: int, suffix: str = "") -> str:
-        env_pad = env_name.ljust(self._max_env_len)
-        count_str = f"{count}/{total}"
-        base = f"  {prefix}[cyan]{env_pad}[/cyan]  {count_str}"
-        if suffix:
-            return f"{base}  [dim]{_fit_name(suffix)}[/dim]"
-        return base
+    def _make_desc(self, icon: str, env_name: str) -> str:
+        return f"  {icon} [cyan]{_fit(env_name, self._env_width)}[/cyan]"
+
+    def _make_count(self, count: int, total: int) -> str:
+        return f"{count}/{total}".rjust(self._count_width)
 
     def advance(self, env_name: str, package_name: str) -> None:
         """Record a package install completion for an environment.
@@ -138,7 +129,9 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=count,
-                description=self._fmt_desc("", env_name, count, total, package_name),
+                description=self._make_desc(DOT, env_name),
+                count=self._make_count(count, total),
+                pkg=_fit(package_name, PKG_NAME_MAX),
             )
 
     def complete_env(self, env_name: str) -> None:
@@ -151,7 +144,9 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=total,
-                description=self._fmt_desc(f"{CHECKMARK} ", env_name, total, total),
+                description=self._make_desc(f"[bold green]{CHECKMARK}[/bold green]", env_name),
+                count=self._make_count(total, total),
+                pkg="",
             )
 
     def fail_env(self, env_name: str, reason: str) -> None:
@@ -166,7 +161,9 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=total,
-                description=f"  {CROSS} [cyan]{env_name.ljust(self._max_env_len)}[/cyan]  {count}/{total}  [red]{reason}[/red]",
+                description=self._make_desc(f"[bold red]{CROSS}[/bold red]", env_name),
+                count=self._make_count(count, total),
+                pkg=f"[red]{reason}[/red]",
             )
 
     def finish(self) -> None:
@@ -233,10 +230,10 @@ class UpgradeUI:
         self._active_task_id = None
         self._active_description = None
 
-        self.console.print(f"{CHECKMARK} {description} [dim]{summary}[/dim]")
+        self.console.print(f"[bold green]{CHECKMARK}[/bold green] {description} [dim]{summary}[/dim]")
 
     def show_download_progress(self, specs: List[str], label: str = "Downloading") -> DownloadTracker:
-        """Show a single progress bar for downloading with active-package display.
+        """Show a single progress bar for downloading with active-package list.
 
         :param specs: List of package specs to download
         :param label: Label for the progress bar
@@ -254,7 +251,7 @@ class UpgradeUI:
         return DownloadTracker(live, progress, task_id, len(specs))
 
     def show_install_progress(self, specs: List[str], label: str = "Installing") -> DownloadTracker:
-        """Show a single progress bar for installing with active-package display.
+        """Show a single progress bar for installing with active-package list.
 
         :param specs: List of package specs to install
         :param label: Label for the progress bar
@@ -274,25 +271,30 @@ class UpgradeUI:
     def show_group_install_progress(
         self, env_names: List[str], env_totals: Dict[str, int]
     ) -> GroupInstallTracker:
-        """Show per-environment install progress bars.
+        """Show per-environment install progress bars with stable alignment.
 
         :param env_names: Ordered list of short environment names
         :param env_totals: Dict mapping env name to total package count
         :returns: GroupInstallTracker for updating progress
         """
+        env_width = min(max((len(n) for n in env_names), default=4), ENV_NAME_MAX)
+        max_total = max(env_totals.values(), default=0)
+        count_width = len(f"{max_total}/{max_total}")
+
         progress = Progress(
-            TextColumn("[progress.description]{task.description}"),
+            TextColumn("{task.description}"),
             BarColumn(),
-            TaskProgressColumn(),
+            TextColumn("{task.fields[count]}"),
+            TextColumn("{task.fields[pkg]}", style="dim"),
             console=self.console,
             transient=False,
         )
         progress.start()
         tasks = {}
-        max_env_len = max((len(n) for n in env_names), default=4)
         for name in env_names:
             total = env_totals.get(name, 0)
-            padded = name.ljust(max_env_len)
-            task_id = progress.add_task(f"  [cyan]{padded}[/cyan]  0/{total}", total=total)
+            desc = f"  {DOT} [cyan]{_fit(name, env_width)}[/cyan]"
+            count_str = f"0/{total}".rjust(count_width)
+            task_id = progress.add_task(desc, total=total, count=count_str, pkg="")
             tasks[name] = task_id
-        return GroupInstallTracker(progress, tasks, env_totals)
+        return GroupInstallTracker(progress, tasks, env_totals, env_width, count_width)
