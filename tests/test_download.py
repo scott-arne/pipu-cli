@@ -6,7 +6,7 @@ import pytest
 
 from packaging.version import Version
 
-from pipu_cli.download import download_packages, install_from_local
+from pipu_cli.download import download_packages, install_from_local, download_packages_for_group
 
 
 class TestDownloadPackages:
@@ -177,3 +177,54 @@ class TestInstallFromLocal:
     def test_install_empty_specs_returns_empty(self, tmp_path):
         results = install_from_local(dest_dir=tmp_path, specs=[])
         assert results == []
+
+
+class TestDownloadPackagesForGroup:
+    """Tests for group download deduplication."""
+
+    def test_deduplicates_same_version(self, tmp_path):
+        """requests==2.31.0 needed by both main and ml should download once."""
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("", "")
+
+        env_plans = {
+            "main": ["requests==2.31.0", "numpy==1.26.0"],
+            "ml": ["requests==2.31.0", "rich==13.7.0"],
+        }
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process) as mock_run:
+            download_packages_for_group(env_plans, tmp_path)
+            # requests==2.31.0 appears in both, so 3 unique specs total
+            assert mock_run.call_count == 3
+
+    def test_different_versions_both_downloaded(self, tmp_path):
+        """numpy==1.25 and numpy==1.26 are different specs -- both download."""
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("", "")
+
+        env_plans = {
+            "main": ["numpy==1.26.0"],
+            "ml": ["numpy==1.25.0"],
+        }
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process) as mock_run:
+            download_packages_for_group(env_plans, tmp_path)
+            assert mock_run.call_count == 2
+
+    def test_calls_progress_callback(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("", "")
+
+        callback = MagicMock()
+        env_plans = {"main": ["requests==2.31.0"]}
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process):
+            download_packages_for_group(env_plans, tmp_path, progress_callback=callback)
+            callback.assert_called_once_with("requests==2.31.0")
+
+    def test_empty_plans_returns_empty(self, tmp_path):
+        result = download_packages_for_group({}, tmp_path)
+        assert result == []

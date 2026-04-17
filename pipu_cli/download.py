@@ -71,6 +71,39 @@ def download_packages(
     return downloaded
 
 
+def download_packages_for_group(
+    env_upgrade_plans: Dict[str, List[str]],
+    dest_dir: Path,
+    pre: bool = False,
+    timeout: int = 300,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> List[Path]:
+    """Download deduplicated packages for a group of environments.
+
+    :param env_upgrade_plans: Dict mapping env short names to lists of pinned specs
+    :param dest_dir: Shared directory to download into
+    :param pre: Include pre-release versions
+    :param timeout: Subprocess timeout in seconds
+    :param progress_callback: Called with spec after each download completes
+    :returns: List of paths to downloaded files
+    """
+    if not env_upgrade_plans:
+        return []
+
+    # Deduplicate specs across all environments
+    unique_specs: List[str] = list(dict.fromkeys(
+        spec for specs in env_upgrade_plans.values() for spec in specs
+    ))
+
+    return download_packages(
+        specs=unique_specs,
+        dest_dir=dest_dir,
+        pre=pre,
+        timeout=timeout,
+        progress_callback=progress_callback,
+    )
+
+
 def install_from_local(
     dest_dir: Path,
     specs: List[str],
