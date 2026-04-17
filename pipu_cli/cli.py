@@ -3,6 +3,7 @@
 import json
 import logging
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import tempfile
 import time
@@ -1697,47 +1698,54 @@ def _run_group_upgrade(
             env_results: dict[str, list] = {}
             env_order = list(env_name_map.keys())
 
+            active_envs = [name for name in env_order if env_specs.get(name)]
+
+            def _install_env(env_name: str, tracker=None):
+                env_path = env_name_map[env_name]
+                specs = env_specs[env_name]
+                try:
+                    callback = None
+                    if tracker:
+                        def on_install(spec: str, en=env_name) -> None:
+                            pkg_name = spec.split("==")[0] if "==" in spec else spec
+                            tracker.advance(en, pkg_name)
+                        callback = on_install
+                    results = install_from_local(
+                        dest_dir=dest_dir, specs=specs,
+                        python_path=env_path,
+                        progress_callback=callback,
+                    )
+                    if tracker:
+                        tracker.complete_env(env_name)
+                    return env_name, results
+                except Exception as e:
+                    if tracker:
+                        tracker.fail_env(env_name, str(e))
+                    return env_name, []
+
             if ui:
-                env_totals = {name: len(env_specs.get(name, [])) for name in env_order if env_specs.get(name)}
-                active_envs = [name for name in env_order if env_specs.get(name)]
+                env_totals = {name: len(env_specs.get(name, [])) for name in active_envs}
                 group_tracker = ui.show_group_install_progress(active_envs, env_totals)
 
-                for env_name in active_envs:
-                    env_path = env_name_map[env_name]
-                    specs = env_specs[env_name]
-
-                    try:
-                        def make_callback(en: str):
-                            def on_install(spec: str) -> None:
-                                pkg_name = spec.split("==")[0] if "==" in spec else spec
-                                group_tracker.advance(en, pkg_name)
-                            return on_install
-
-                        results = install_from_local(
-                            dest_dir=dest_dir, specs=specs,
-                            python_path=env_path,
-                            progress_callback=make_callback(env_name),
-                        )
-                        group_tracker.complete_env(env_name)
-                        env_results[env_name] = results
-                    except Exception as e:
-                        group_tracker.fail_env(env_name, str(e))
-                        env_results[env_name] = []
+                with ThreadPoolExecutor(max_workers=len(active_envs)) as executor:
+                    futures = {
+                        executor.submit(_install_env, name, group_tracker): name
+                        for name in active_envs
+                    }
+                    for future in as_completed(futures):
+                        name, results = future.result()
+                        env_results[name] = results
 
                 group_tracker.finish()
             else:
-                for env_name in env_order:
-                    if not env_specs.get(env_name):
-                        continue
-                    env_path = env_name_map[env_name]
-                    try:
-                        results = install_from_local(
-                            dest_dir=dest_dir, specs=env_specs[env_name],
-                            python_path=env_path,
-                        )
-                        env_results[env_name] = results
-                    except Exception:
-                        env_results[env_name] = []
+                with ThreadPoolExecutor(max_workers=len(active_envs)) as executor:
+                    futures = {
+                        executor.submit(_install_env, name): name
+                        for name in active_envs
+                    }
+                    for future in as_completed(futures):
+                        name, results = future.result()
+                        env_results[name] = results
 
             # Handle editable packages per environment
             for env_name, upgrades in env_upgrades.items():

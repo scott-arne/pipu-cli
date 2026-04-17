@@ -93,7 +93,10 @@ class DownloadTracker:
 
 
 class GroupInstallTracker:
-    """Tracks per-environment install progress with fixed-width aligned bars."""
+    """Tracks per-environment install progress with fixed-width aligned bars.
+
+    Thread-safe for use with parallel per-environment installs.
+    """
 
     def __init__(
         self,
@@ -109,6 +112,7 @@ class GroupInstallTracker:
         self._completed: Dict[str, int] = {name: 0 for name in tasks}
         self._env_width = env_width
         self._count_width = count_width
+        self._lock = threading.Lock()
 
     def _make_desc(self, icon: str, env_name: str) -> str:
         return f"  {icon} [cyan]{_fit(env_name, self._env_width)}[/cyan]"
@@ -122,32 +126,34 @@ class GroupInstallTracker:
         :param env_name: Short environment name
         :param package_name: Package that was just installed
         """
-        if env_name in self._tasks:
-            self._completed[env_name] += 1
-            count = self._completed[env_name]
-            total = self._totals[env_name]
-            self._progress.update(
-                self._tasks[env_name],
-                completed=count,
-                description=self._make_desc(DOT, env_name),
-                count=self._make_count(count, total),
-                pkg=_fit(package_name, PKG_NAME_MAX),
-            )
+        with self._lock:
+            if env_name in self._tasks:
+                self._completed[env_name] += 1
+                count = self._completed[env_name]
+                total = self._totals[env_name]
+                self._progress.update(
+                    self._tasks[env_name],
+                    completed=count,
+                    description=self._make_desc(DOT, env_name),
+                    count=self._make_count(count, total),
+                    pkg=_fit(package_name, PKG_NAME_MAX),
+                )
 
     def complete_env(self, env_name: str) -> None:
         """Mark an environment as fully complete.
 
         :param env_name: Short environment name
         """
-        if env_name in self._tasks:
-            total = self._totals[env_name]
-            self._progress.update(
-                self._tasks[env_name],
-                completed=total,
-                description=self._make_desc(f"[bold green]{CHECKMARK}[/bold green]", env_name),
-                count=self._make_count(total, total),
-                pkg="",
-            )
+        with self._lock:
+            if env_name in self._tasks:
+                total = self._totals[env_name]
+                self._progress.update(
+                    self._tasks[env_name],
+                    completed=total,
+                    description=self._make_desc(f"[bold green]{CHECKMARK}[/bold green]", env_name),
+                    count=self._make_count(total, total),
+                    pkg="",
+                )
 
     def fail_env(self, env_name: str, reason: str) -> None:
         """Mark an environment as failed.
@@ -155,16 +161,17 @@ class GroupInstallTracker:
         :param env_name: Short environment name
         :param reason: Failure reason
         """
-        if env_name in self._tasks:
-            total = self._totals[env_name]
-            count = self._completed.get(env_name, 0)
-            self._progress.update(
-                self._tasks[env_name],
-                completed=total,
-                description=self._make_desc(f"[bold red]{CROSS}[/bold red]", env_name),
-                count=self._make_count(count, total),
-                pkg=f"[red]{reason}[/red]",
-            )
+        with self._lock:
+            if env_name in self._tasks:
+                total = self._totals[env_name]
+                count = self._completed.get(env_name, 0)
+                self._progress.update(
+                    self._tasks[env_name],
+                    completed=total,
+                    description=self._make_desc(f"[bold red]{CROSS}[/bold red]", env_name),
+                    count=self._make_count(count, total),
+                    pkg=f"[red]{reason}[/red]",
+                )
 
     def finish(self) -> None:
         """Stop the progress display."""
