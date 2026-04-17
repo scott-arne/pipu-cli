@@ -94,3 +94,42 @@ class TestInstallTracker:
         tracker.finish()
         output = console.file.getvalue()
         assert "requests" in output
+
+
+class TestGroupInstallTracker:
+    """Tests for per-environment progress bars during group install."""
+
+    def test_show_group_install_progress_returns_tracker(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["main", "ml", "web"],
+            env_totals={"main": 3, "ml": 2, "web": 2},
+        )
+        assert tracker is not None
+
+    def test_group_tracker_advance_updates_bar(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["main", "ml"],
+            env_totals={"main": 2, "ml": 1},
+        )
+        tracker.advance("main", "requests")
+        tracker.advance("main", "numpy")
+        tracker.complete_env("main")
+        tracker.finish()
+        output = console.file.getvalue()
+        assert "main" in output
+
+    def test_group_tracker_fail_env(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["main"],
+            env_totals={"main": 2},
+        )
+        tracker.fail_env("main", "pip error")
+        tracker.finish()
+        output = console.file.getvalue()
+        assert "main" in output
