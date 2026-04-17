@@ -1,54 +1,129 @@
 """Upgrade UI display layer using Rich progress components."""
 
-from typing import Dict, List, Optional
+import threading
+import time
+from typing import Dict, List, Optional, Set
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TaskID
+from rich.text import Text
 
 
-class PackageTracker:
-    """Tracks per-package progress for download or install phases."""
+CHECKMARK = "[bold green]\u2713[/bold green]"
+CROSS = "[bold red]\u2717[/bold red]"
 
-    CHECKMARK = "[bold green]\u2713[/bold green]"
-    CROSS = "[bold red]\u2717[/bold red]"
+PKG_NAME_WIDTH = 30
 
-    def __init__(self, progress: Progress, tasks: Dict[str, TaskID]) -> None:
+
+def _fit_name(name: str, width: int = PKG_NAME_WIDTH) -> str:
+    """Truncate or pad a package name to exactly *width* characters."""
+    if len(name) <= width:
+        return name.ljust(width)
+    return name[: width - 1] + "\u2026"
+
+
+class DownloadTracker:
+    """Single progress bar with currently-active package names below it.
+
+    Thread-safe for use with parallel downloads.  Long package names scroll
+    horizontally (marquee style) in the active-downloads line.
+    """
+
+    MARQUEE_WIDTH = 28
+    MARQUEE_SPEED = 6
+
+    def __init__(self, live: Live, progress: Progress, task_id: TaskID, total: int) -> None:
+        self._live = live
         self._progress = progress
-        self._tasks = tasks
+        self._task_id = task_id
+        self._total = total
+        self._completed = 0
+        self._failed = 0
+        self._active: Set[str] = set()
+        self._start_times: Dict[str, float] = {}
+        self._lock = threading.Lock()
 
-    def complete(self, spec: str) -> None:
-        """Mark a package as complete.
+    def start(self, spec: str) -> None:
+        """Mark a package as actively downloading.
 
         :param spec: Package spec (e.g., "requests==2.31.0")
         """
-        if spec in self._tasks:
-            self._progress.update(self._tasks[spec], completed=1, description=f"{self.CHECKMARK} {spec}")
+        with self._lock:
+            self._active.add(spec)
+            self._start_times[spec] = time.monotonic()
+            self._refresh()
 
-    def fail(self, spec: str, reason: str) -> None:
-        """Mark a package as failed.
+    def complete(self, spec: str) -> None:
+        """Mark a package download as complete.
 
         :param spec: Package spec
-        :param reason: Failure reason
         """
-        if spec in self._tasks:
-            self._progress.update(self._tasks[spec], completed=1, description=f"{self.CROSS} {spec} [red]({reason})[/red]")
+        with self._lock:
+            self._active.discard(spec)
+            self._start_times.pop(spec, None)
+            self._completed += 1
+            self._progress.update(self._task_id, completed=self._completed + self._failed)
+            self._refresh()
+
+    def fail(self, spec: str, _reason: str = "") -> None:
+        """Mark a package download as failed.
+
+        :param spec: Package spec
+        :param _reason: Failure reason (unused, logged at download layer)
+        """
+        with self._lock:
+            self._active.discard(spec)
+            self._start_times.pop(spec, None)
+            self._failed += 1
+            self._progress.update(self._task_id, completed=self._completed + self._failed)
+            self._refresh()
+
+    def _marquee(self, name: str) -> str:
+        w = self.MARQUEE_WIDTH
+        if len(name) <= w:
+            return name.ljust(w)
+        padded = name + "   "
+        elapsed = time.monotonic() - self._start_times.get(name, time.monotonic())
+        offset = int(elapsed * self.MARQUEE_SPEED) % len(padded)
+        rotated = padded[offset:] + padded[:offset]
+        return rotated[:w]
+
+    def _refresh(self) -> None:
+        if self._active:
+            parts: list = []
+            for i, spec in enumerate(sorted(self._active)):
+                if i > 0:
+                    parts.append((", ", "dim"))
+                parts.append((self._marquee(spec), "dim"))
+            active_text = Text.assemble(*parts)
+            self._live.update(Group(self._progress, active_text))
+        else:
+            self._live.update(Group(self._progress))
 
     def finish(self) -> None:
         """Stop the progress display."""
-        self._progress.stop()
+        self._live.update(self._progress)
+        self._live.stop()
 
 
 class GroupInstallTracker:
     """Tracks per-environment install progress with parallel bars."""
-
-    CHECKMARK = "[bold green]\u2713[/bold green]"
-    CROSS = "[bold red]\u2717[/bold red]"
 
     def __init__(self, progress: Progress, tasks: Dict[str, TaskID], totals: Dict[str, int]) -> None:
         self._progress = progress
         self._tasks = tasks
         self._totals = totals
         self._completed: Dict[str, int] = {name: 0 for name in tasks}
+        self._max_env_len = max((len(n) for n in tasks), default=4)
+
+    def _fmt_desc(self, prefix: str, env_name: str, count: int, total: int, suffix: str = "") -> str:
+        env_pad = env_name.ljust(self._max_env_len)
+        count_str = f"{count}/{total}"
+        base = f"  {prefix}[cyan]{env_pad}[/cyan]  {count_str}"
+        if suffix:
+            return f"{base}  [dim]{_fit_name(suffix)}[/dim]"
+        return base
 
     def advance(self, env_name: str, package_name: str) -> None:
         """Record a package install completion for an environment.
@@ -63,7 +138,7 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=count,
-                description=f"  [cyan]{env_name}[/cyan]  {count}/{total}  [dim]{package_name}[/dim]",
+                description=self._fmt_desc("", env_name, count, total, package_name),
             )
 
     def complete_env(self, env_name: str) -> None:
@@ -76,7 +151,7 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=total,
-                description=f"  {self.CHECKMARK} [cyan]{env_name}[/cyan]  {total}/{total}",
+                description=self._fmt_desc(f"{CHECKMARK} ", env_name, total, total),
             )
 
     def fail_env(self, env_name: str, reason: str) -> None:
@@ -91,7 +166,7 @@ class GroupInstallTracker:
             self._progress.update(
                 self._tasks[env_name],
                 completed=total,
-                description=f"  {self.CROSS} [cyan]{env_name}[/cyan]  {count}/{total}  [red]{reason}[/red]",
+                description=f"  {CROSS} [cyan]{env_name.ljust(self._max_env_len)}[/cyan]  {count}/{total}  [red]{reason}[/red]",
             )
 
     def finish(self) -> None:
@@ -102,8 +177,6 @@ class GroupInstallTracker:
 class UpgradeUI:
     """Manages upgrade command display: spinner/checkmark phases and progress trackers."""
 
-    CHECKMARK = "[bold green]\u2713[/bold green]"
-
     def __init__(self, console: Console) -> None:
         """Initialize with a Rich console.
 
@@ -113,6 +186,18 @@ class UpgradeUI:
         self._active_phase: Optional[Progress] = None
         self._active_task_id: Optional[int] = None
         self._active_description: Optional[str] = None
+
+    def cleanup(self) -> None:
+        """Stop any active progress and restore terminal state."""
+        if self._active_phase is not None:
+            try:
+                self._active_phase.stop()
+            except Exception:
+                pass
+            self._active_phase = None
+            self._active_task_id = None
+            self._active_description = None
+        self.console.show_cursor(True)
 
     def start_phase(self, description: str) -> None:
         """Start a new phase with a spinner.
@@ -148,45 +233,43 @@ class UpgradeUI:
         self._active_task_id = None
         self._active_description = None
 
-        self.console.print(f"{self.CHECKMARK} {description} [dim]{summary}[/dim]")
+        self.console.print(f"{CHECKMARK} {description} [dim]{summary}[/dim]")
 
-    def show_download_progress(self, specs: List[str]) -> PackageTracker:
-        """Show multi-task download progress.
+    def show_download_progress(self, specs: List[str], label: str = "Downloading") -> DownloadTracker:
+        """Show a single progress bar for downloading with active-package display.
 
         :param specs: List of package specs to download
-        :returns: PackageTracker for updating progress
+        :param label: Label for the progress bar
+        :returns: DownloadTracker for updating progress
         """
         progress = Progress(
-            SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
             console=self.console,
-            transient=False,
         )
-        progress.start()
-        tasks = {}
-        for spec in specs:
-            task_id = progress.add_task(f"  {spec}", total=1)
-            tasks[spec] = task_id
-        return PackageTracker(progress, tasks)
+        task_id = progress.add_task(f"  {label}", total=len(specs))
+        live = Live(progress, console=self.console, refresh_per_second=8)
+        live.start()
+        return DownloadTracker(live, progress, task_id, len(specs))
 
-    def show_install_progress(self, specs: List[str]) -> PackageTracker:
-        """Show multi-task install progress.
+    def show_install_progress(self, specs: List[str], label: str = "Installing") -> DownloadTracker:
+        """Show a single progress bar for installing with active-package display.
 
         :param specs: List of package specs to install
-        :returns: PackageTracker for updating progress
+        :param label: Label for the progress bar
+        :returns: DownloadTracker for updating progress
         """
         progress = Progress(
-            SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=None),
+            TaskProgressColumn(),
             console=self.console,
-            transient=False,
         )
-        progress.start()
-        tasks = {}
-        for spec in specs:
-            task_id = progress.add_task(f"  {spec}", total=1)
-            tasks[spec] = task_id
-        return PackageTracker(progress, tasks)
+        task_id = progress.add_task(f"  {label}", total=len(specs))
+        live = Live(progress, console=self.console, refresh_per_second=8)
+        live.start()
+        return DownloadTracker(live, progress, task_id, len(specs))
 
     def show_group_install_progress(
         self, env_names: List[str], env_totals: Dict[str, int]
@@ -206,8 +289,10 @@ class UpgradeUI:
         )
         progress.start()
         tasks = {}
+        max_env_len = max((len(n) for n in env_names), default=4)
         for name in env_names:
             total = env_totals.get(name, 0)
-            task_id = progress.add_task(f"  [cyan]{name}[/cyan]  0/{total}", total=total)
+            padded = name.ljust(max_env_len)
+            task_id = progress.add_task(f"  [cyan]{padded}[/cyan]  0/{total}", total=total)
             tasks[name] = task_id
         return GroupInstallTracker(progress, tasks, env_totals)

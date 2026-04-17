@@ -118,15 +118,72 @@ def print_blocked_packages_table(
     console.print(table)
 
 
+def _extract_error_summary(reason: str, max_len: int = 80) -> str:
+    """Extract the most informative error line from pip output for table display.
+
+    Scans for known error patterns (CMake Error, ERROR:, etc.) and picks the
+    first one that contains a useful diagnostic message.
+
+    :param reason: Full failure reason text
+    :param max_len: Maximum length for table cell
+    :returns: Single-line error summary
+    """
+    lines = reason.strip().splitlines()
+    if not lines:
+        return "failed"
+
+    # Look for the first line matching a known error pattern
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # CMake errors: the message is on the next non-empty line(s)
+        if stripped.startswith("CMake Error"):
+            for next_line in lines[i + 1:]:
+                candidate = next_line.strip()
+                if candidate and not candidate.startswith(("Call Stack", "--", "/")):
+                    if len(candidate) > max_len:
+                        return candidate[:max_len - 3] + "..."
+                    return candidate
+            continue
+
+        # pip ERROR: lines
+        if stripped.startswith("ERROR:"):
+            msg = stripped[6:].strip()
+            if msg:
+                if len(msg) > max_len:
+                    return msg[:max_len - 3] + "..."
+                return msg
+            continue
+
+        # ModuleNotFoundError, ImportError, etc.
+        if "Error:" in stripped and not stripped.startswith(("×", "╰")):
+            if len(stripped) > max_len:
+                return stripped[:max_len - 3] + "..."
+            return stripped
+
+    # Fallback: find last non-decorative line
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("×", "╰", "─", "note:")):
+            if len(stripped) > max_len:
+                return stripped[:max_len - 3] + "..."
+            return stripped
+
+    return "failed"
+
+
 def print_upgrade_results(
     results: List[UpgradedPackage],
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    verbose: bool = False,
 ) -> None:
-    """
-    Print a summary of package upgrade results.
+    """Print a summary of package upgrade results using a Rich Table.
 
     :param results: List of UpgradedPackage objects with upgrade status
     :param console: Optional Rich console instance (creates new one if not provided)
+    :param verbose: If True, print full error output for failed packages
     """
     if console is None:
         console = Console()
@@ -135,47 +192,37 @@ def print_upgrade_results(
         console.print("[yellow]No packages were processed.[/yellow]")
         return
 
-    # Separate successful and failed upgrades
     successful = [pkg for pkg in results if pkg.upgraded]
     failed = [pkg for pkg in results if not pkg.upgraded]
 
-    # Print success summary
-    if successful:
-        num_successful = len(successful)
-        console.print(f"\n[bold green]Successfully upgraded {num_successful} package(s):[/bold green]")
-        for pkg in successful:
-            prev_ver = str(pkg.previous_version)
-            curr_ver = str(pkg.version)
-            console.print(f"  - {pkg.name}: {prev_ver} -> {curr_ver}")
+    checkmark = "[green]\u2713[/green]"
+    cross = "[red]\u2717[/red]"
 
-    # Print failure summary
-    if failed:
-        num_failed = len(failed)
-        console.print(f"\n[bold yellow]{num_failed} package(s) could not be upgraded:[/bold yellow]")
+    console.print(f"\n[bold green]Upgraded {len(successful)} package(s)[/bold green]")
 
-        table = Table(show_header=True, header_style="bold yellow")
-        table.add_column("Package", style="cyan")
-        table.add_column("Current Version", style="magenta")
-        table.add_column("Reason", style="dim")
+    table = Table()
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Result", no_wrap=True)
 
+    for pkg in results:
+        if pkg.upgraded:
+            table.add_row(pkg.name, f"{checkmark} {pkg.previous_version} -> [green]{pkg.version}[/green]")
+        else:
+            reason = _extract_error_summary(pkg.failure_reason or "failed")
+            table.add_row(pkg.name, f"{cross} [red]{reason}[/red]")
+
+    console.print(table)
+
+    if failed and verbose:
         for pkg in failed:
-            reason = pkg.failure_reason or "Unknown failure"
-            table.add_row(
-                pkg.name,
-                str(pkg.version),
-                reason
-            )
+            if pkg.failure_reason:
+                console.print(f"\n[bold red]{pkg.name}[/bold red] error details:")
+                console.print(f"[dim]{pkg.failure_reason}[/dim]")
 
-        console.print(table)
-
-    # Overall summary
-    console.print()
     if failed:
-        num_successful = len(successful)
-        num_total = len(results)
-        console.print(f"[bold]Summary:[/bold] {num_successful}/{num_total} packages upgraded successfully")
+        console.print(f"\n[bold]Summary:[/bold] {len(successful)}/{len(results)} packages upgraded successfully")
     else:
-        console.print("[bold green]All packages upgraded successfully![/bold green]")
+        console.print(f"\n[bold green]All packages upgraded successfully![/bold green]")
 
 
 def print_install_results(
@@ -472,6 +519,8 @@ def print_group_results_matrix(
     checkmark = "[green]\u2713[/green]"
     cross = "[red]\u2717[/red]"
 
+    failed_details: list[tuple[str, str, str]] = []
+
     for pkg_name in sorted(all_packages.keys()):
         row = [pkg_name]
         for env_name in env_order:
@@ -481,10 +530,18 @@ def print_group_results_matrix(
             elif pkg.upgraded:
                 row.append(f"{checkmark} {pkg.previous_version}->[green]{pkg.version}[/green]")
             else:
-                row.append(f"{cross} [red]{pkg.failure_reason or 'failed'}[/red]")
+                summary = _extract_error_summary(pkg.failure_reason or "failed")
+                row.append(f"{cross} [red]{summary}[/red]")
+                if pkg.failure_reason:
+                    failed_details.append((pkg_name, env_name, pkg.failure_reason))
         table.add_row(*row)
 
     console.print(table)
+
+    if failed_details:
+        for pkg_name, env_name, reason in failed_details:
+            console.print(f"\n[bold red]{pkg_name}[/bold red] ({env_name}) error details:")
+            console.print(f"[dim]{reason}[/dim]")
 
 
 def print_group_blocked_table(

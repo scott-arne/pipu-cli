@@ -136,7 +136,7 @@ def test_print_upgrade_results_fallback_when_no_reason():
     ]
     print_upgrade_results(results, console=console)
     output = console.file.getvalue()  # pyright: ignore[reportAttributeAccessIssue]
-    assert "Unknown failure" in output
+    assert "failed" in output
 
 
 def test_print_blocked_packages_shows_all_reasons():

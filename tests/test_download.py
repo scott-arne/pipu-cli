@@ -223,7 +223,7 @@ class TestDownloadPackagesForGroup:
 
         with patch("pipu_cli.download.subprocess.run", return_value=mock_process):
             download_packages_for_group(env_plans, tmp_path, progress_callback=callback)
-            callback.assert_called_once_with("requests==2.31.0")
+            callback.assert_called_once_with("requests==2.31.0", True, "")
 
     def test_empty_plans_returns_empty(self, tmp_path):
         result = download_packages_for_group({}, tmp_path)

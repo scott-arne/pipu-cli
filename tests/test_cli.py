@@ -52,7 +52,7 @@ def test_dry_run_shows_packages_without_installing(runner, mock_packages):
          patch('pipu_cli.cli.download_packages') as mock_download, \
          patch('pipu_cli.cli.install_from_local') as mock_install:
 
-        result = runner.invoke(cli, ['upgrade', '--dry-run', '--yes', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '--yes', '--no-cache', '-p', '1'])
 
         # download/install should NOT be called in dry-run mode
         mock_download.assert_not_called()
@@ -73,7 +73,7 @@ def test_dry_run_exit_code_zero_when_upgrades_available(runner, mock_packages):
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
 
-        result = runner.invoke(cli, ['upgrade', '--dry-run', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '--no-cache', '-p', '1'])
 
         assert result.exit_code == 0
 
@@ -99,7 +99,7 @@ def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
             installed[1]: Mock(version=Version("1.26.0")),
         }
 
-        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy', '--dry-run', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy', '--dry-run', '--no-cache', '-p', '1'])
 
         # Should show requests but NOT numpy
         assert 'requests' in result.output
@@ -131,7 +131,7 @@ def test_exclude_multiple_packages(runner):
             installed[2]: Mock(version=Version("2.1.0")),
         }
 
-        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy,pandas', '--dry-run', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', '--exclude', 'numpy,pandas', '--dry-run', '--no-cache', '-p', '1'])
 
         # Should show only requests
         assert 'requests' in result.output
@@ -203,7 +203,7 @@ def test_single_package_upgrade_filters_to_specified_package(runner):
             UpgradePackageInfo(name="numpy", version=Version("1.24.0"), upgradable=True, latest_version=Version("1.26.0"), is_editable=False),
         ]
 
-        result = runner.invoke(cli, ['upgrade', 'requests', '--dry-run', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', 'requests', '--dry-run', '--no-cache', '-p', '1'])
 
         # Should only show requests
         assert 'requests' in result.output
@@ -237,7 +237,7 @@ def test_version_constraint_upgrade(runner):
             UpgradedPackage(name="requests", version=Version("2.30.0"), upgraded=True, previous_version=Version("2.28.0"), is_editable=False)
         ]
 
-        result = runner.invoke(cli, ['upgrade', 'requests==2.30.0', '--yes', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', 'requests==2.30.0', '--yes', '--no-cache', '-p', '1'])
 
         # Should attempt to download with version constraint spec
         mock_download.assert_called_once()
@@ -390,7 +390,7 @@ def test_exclude_accepts_repeated_flag(runner):
          }), \
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
 
-        result = runner.invoke(cli, ['upgrade', '--dry-run', '-e', 'numpy', '-e', 'pandas', '--no-cache'])
+        result = runner.invoke(cli, ['upgrade', '--dry-run', '-e', 'numpy', '-e', 'pandas', '--no-cache', '-p', '1'])
 
         assert result.exit_code == 0
         assert 'requests' in result.output
@@ -405,7 +405,7 @@ def test_outdated_shows_upgradable_packages(runner, mock_packages):
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
          patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, [])):
 
-        result = runner.invoke(cli, ['outdated', '--no-cache'])
+        result = runner.invoke(cli, ['outdated', '--no-cache', '-p', '1'])
 
         assert 'requests' in result.output
         assert result.exit_code == 0
@@ -431,7 +431,7 @@ def test_outdated_shows_blocked_by_default(runner):
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.0.0"))}), \
          patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, blocked)):
 
-        result = runner.invoke(cli, ['outdated', '--no-cache'])
+        result = runner.invoke(cli, ['outdated', '--no-cache', '-p', '1'])
 
         assert 'numpy' in result.output
         assert 'scipy' in result.output

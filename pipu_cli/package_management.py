@@ -997,25 +997,25 @@ def resolve_upgradable_packages_with_reasons(
 def _stream_reader(
     pipe: IO[str],
     stream: Optional[OutputStream],
-    lock: threading.Lock
+    lock: threading.Lock,
+    capture: Optional[List[str]] = None,
 ) -> None:
-    """
-    Read lines from a pipe and write to a stream with thread-safe locking.
-
-    This helper function is used to read output from subprocess pipes (stdout/stderr)
-    and write it to an output stream in real-time. The lock ensures thread-safe
-    access when multiple threads write to the same stream.
+    """Read lines from a pipe and write to a stream with thread-safe locking.
 
     :param pipe: Input pipe to read from (stdout or stderr from subprocess)
     :param stream: Output stream to write to (or None to discard)
     :param lock: Threading lock for synchronized writes
+    :param capture: Optional list to append lines to for later inspection
     """
     try:
         for line in iter(pipe.readline, ''):
-            if line and stream:
-                with lock:
-                    stream.write(line)
-                    stream.flush()
+            if line:
+                if capture is not None:
+                    capture.append(line)
+                if stream:
+                    with lock:
+                        stream.write(line)
+                        stream.flush()
     except Exception as e:
         logger.warning(f"Error reading from pipe: {e}")
     finally:
@@ -1153,14 +1153,16 @@ def install_packages(
 
         # Create threads for concurrent reading of stdout and stderr
         lock = threading.Lock()
+        stderr_lines: List[str] = []
+        stdout_lines: List[str] = []
         stdout_thread = threading.Thread(
             target=_stream_reader,
-            args=(process.stdout, output_stream, lock),
+            args=(process.stdout, output_stream, lock, stdout_lines),
             daemon=True
         )
         stderr_thread = threading.Thread(
             target=_stream_reader,
-            args=(process.stderr, output_stream, lock),
+            args=(process.stderr, output_stream, lock, stderr_lines),
             daemon=True
         )
 
@@ -1179,7 +1181,8 @@ def install_packages(
         if returncode != 0:
             # Entire installation failed
             logger.warning(f"Package upgrade failed with return code {returncode}")
-            # Mark all packages as not upgraded
+            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
+            failure_msg = error_output or f"pip exit code {returncode}"
             return [
                 UpgradedPackage(
                     name=pkg.name,
@@ -1188,7 +1191,7 @@ def install_packages(
                     previous_version=pkg.version,
                     is_editable=pkg.is_editable,
                     editable_location=pkg.editable_location,
-                    failure_reason=f"Installation failed (pip exit code {returncode})"
+                    failure_reason=failure_msg,
                 )
                 for pkg in packages_to_upgrade
             ]
@@ -1336,6 +1339,7 @@ def reinstall_editable_packages(
         executable = python_path if python_path is not None else sys.executable
         cmd = [
             executable, '-m', 'pip', 'install',
+            '--no-build-isolation',
             '--config-settings', 'editable_mode=compat',
             '-e', pkg.editable_location
         ]
@@ -1395,6 +1399,8 @@ def reinstall_editable_packages(
                 ))
                 logger.info(f"Reinstalled editable package {pkg.name}: {pkg.version} -> {new_version}")
             else:
+                error_output = (stderr or stdout or "").strip()
+                failure_msg = error_output or f"pip exit code {returncode}"
                 results.append(UpgradedPackage(
                     name=pkg.name,
                     version=pkg.version,
@@ -1402,7 +1408,7 @@ def reinstall_editable_packages(
                     previous_version=pkg.version,
                     is_editable=True,
                     editable_location=pkg.editable_location,
-                    failure_reason=f"Installation failed (pip exit code {returncode})"
+                    failure_reason=failure_msg,
                 ))
                 logger.warning(f"Failed to reinstall editable package {pkg.name}")
 
@@ -1510,11 +1516,13 @@ def run_pip_install(
         )
 
         lock = threading.Lock()
+        stderr_lines: List[str] = []
+        stdout_lines: List[str] = []
         stdout_thread = threading.Thread(
-            target=_stream_reader, args=(process.stdout, output_stream, lock), daemon=True
+            target=_stream_reader, args=(process.stdout, output_stream, lock, stdout_lines), daemon=True
         )
         stderr_thread = threading.Thread(
-            target=_stream_reader, args=(process.stderr, output_stream, lock), daemon=True
+            target=_stream_reader, args=(process.stderr, output_stream, lock, stderr_lines), daemon=True
         )
         stdout_thread.start()
         stderr_thread.start()
@@ -1525,13 +1533,15 @@ def run_pip_install(
 
         if returncode != 0:
             logger.warning(f"pip install failed with return code {returncode}")
+            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
+            failure_msg = error_output or f"pip exit code {returncode}"
             return [
                 InstalledResult(
                     name=name_to_spec[cn],
                     version=pre_versions.get(cn, Version("0")),
                     installed=False,
                     previous_version=pre_versions.get(cn),
-                    failure_reason=f"Installation failed (pip exit code {returncode})",
+                    failure_reason=failure_msg,
                 )
                 for cn in canonical_names
             ]

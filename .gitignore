@@ -68,3 +68,4 @@ target/
 
 # Mac Stuff
 .DS_Store
+.superpowers/

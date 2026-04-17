@@ -48,6 +48,22 @@ class TestUpgradeUIPhases:
         except RuntimeError:
             pass
 
+    def test_cleanup_stops_active_phase(self):
+        console = Console(file=StringIO(), force_terminal=True, highlight=False)
+        ui = UpgradeUI(console)
+        ui.start_phase("Working...")
+        assert ui._active_phase is not None
+        ui.cleanup()
+        assert ui._active_phase is None
+        assert ui._active_task_id is None
+        assert ui._active_description is None
+
+    def test_cleanup_safe_when_no_active_phase(self):
+        console = Console(file=StringIO(), force_terminal=True, highlight=False)
+        ui = UpgradeUI(console)
+        ui.cleanup()
+        assert ui._active_phase is None
+
 
 class TestDownloadTracker:
     """Tests for download progress tracking."""
@@ -63,18 +79,22 @@ class TestDownloadTracker:
         ui = UpgradeUI(console)
         tracker = ui.show_download_progress(["requests==2.31.0"])
         tracker.complete("requests==2.31.0")
+        assert tracker._completed == 1
+        assert tracker._failed == 0
         tracker.finish()
         output = console.file.getvalue()
-        assert "requests" in output
+        assert "100%" in output
 
     def test_download_tracker_fail_marks_error(self):
         console = Console(file=StringIO(), force_terminal=True)
         ui = UpgradeUI(console)
         tracker = ui.show_download_progress(["requests==2.31.0"])
         tracker.fail("requests==2.31.0", "network error")
+        assert tracker._failed == 1
+        assert tracker._completed == 0
         tracker.finish()
         output = console.file.getvalue()
-        assert "requests" in output
+        assert "100%" in output
 
 
 class TestInstallTracker:
@@ -91,9 +111,10 @@ class TestInstallTracker:
         ui = UpgradeUI(console)
         tracker = ui.show_install_progress(["requests==2.31.0"])
         tracker.complete("requests==2.31.0")
+        assert tracker._completed == 1
         tracker.finish()
         output = console.file.getvalue()
-        assert "requests" in output
+        assert "100%" in output
 
 
 class TestGroupInstallTracker:

@@ -275,7 +275,7 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
         sys.exit(0)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
     except Exception as e:
         if output == "json":
@@ -495,6 +495,7 @@ def _step5_install_packages(
     python_path: Optional[str] = None,
     ui: Optional[UpgradeUI] = None,
     debug: bool = False,
+    parallel: int = 1,
 ) -> tuple[list, float]:
     """Download and install packages."""
     editable_packages = [pkg for pkg in can_upgrade if pkg.is_editable]
@@ -532,24 +533,32 @@ def _step5_install_packages(
             if ui and output != "json":
                 tracker = ui.show_download_progress(specs)
 
-                def on_download(spec: str) -> None:
-                    tracker.complete(spec)
+                def on_download_start(spec: str) -> None:
+                    tracker.start(spec)
+
+                def on_download(spec: str, success: bool, error_msg: str) -> None:
+                    if success:
+                        tracker.complete(spec)
+                    else:
+                        tracker.fail(spec, error_msg)
 
                 try:
                     download_packages(
                         specs=specs, dest_dir=dest_dir,
                         python_path=python_path,
+                        max_workers=parallel,
                         progress_callback=on_download,
+                        start_callback=on_download_start,
                     )
-                except RuntimeError as e:
-                    for failed_spec in str(e).replace("Failed to download: ", "").split(", "):
-                        tracker.fail(failed_spec.strip(), "download failed")
+                except RuntimeError:
+                    pass
                 finally:
                     tracker.finish()
             else:
                 download_packages(
                     specs=specs, dest_dir=dest_dir,
                     python_path=python_path,
+                    max_workers=parallel,
                 )
 
             # Install phase
@@ -862,7 +871,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         # Skip confirmation if interactive mode (already confirmed) or --yes flag
         if not yes and not interactive and output != "json":
             console.print()
-            confirm = click.confirm("Do you want to proceed with the upgrade?", default=True)
+            confirm = click.confirm(f"Upgrade {len(can_upgrade)} package(s)?", default=True)
             if not confirm:
                 console.print("[yellow]Upgrade cancelled.[/yellow]")
                 sys.exit(0)
@@ -870,6 +879,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         # Step 5: Install packages
         results, step5_time = _step5_install_packages(
             console, output, can_upgrade, package_constraints, ui=ui, debug=debug,
+            parallel=parallel,
         )
 
         # Update requirements file if requested
@@ -891,7 +901,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             )
             print(json_data)
         else:
-            print_upgrade_results(results, console=console)
+            print_upgrade_results(results, console=console, verbose=debug)
 
             if debug:
                 console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
@@ -906,12 +916,18 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             sys.exit(0)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        if ui:
+            ui.cleanup()
+        console.show_cursor(True)
         sys.exit(130)
     except click.Abort:
-        console.print("\n[yellow]Update cancelled by user[/yellow]")
+        if ui:
+            ui.cleanup()
+        console.show_cursor(True)
         sys.exit(130)
     except Exception as e:
+        if ui:
+            ui.cleanup()
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)
 
@@ -1072,7 +1088,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         sys.exit(0)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
     except Exception as e:
         if output == "json":
@@ -1505,7 +1521,7 @@ def _run_group_upgrade(
         for env_name, installed in env_installed.items():
             for pkg in installed:
                 key = pkg.name.lower()
-                if key not in all_installed_by_name:
+                if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
                     all_installed_by_name[key] = pkg
         all_installed = list(all_installed_by_name.values())
 
@@ -1657,19 +1673,24 @@ def _run_group_upgrade(
                     s for specs in env_specs.values() for s in specs
                 ))
                 tracker = ui.show_download_progress(unique_specs)
-                def on_download(spec: str) -> None:
-                    tracker.complete(spec)
+                def on_download_start(spec: str) -> None:
+                    tracker.start(spec)
+                def on_download(spec: str, success: bool, error_msg: str) -> None:
+                    if success:
+                        tracker.complete(spec)
+                    else:
+                        tracker.fail(spec, error_msg)
                 try:
                     download_packages_for_group(
-                        env_specs, dest_dir, pre=pre, timeout=timeout, progress_callback=on_download,
+                        env_specs, dest_dir, pre=pre, max_workers=parallel,
+                        progress_callback=on_download, start_callback=on_download_start,
                     )
-                except RuntimeError as e:
-                    for failed_spec in str(e).replace("Failed to download: ", "").split(", "):
-                        tracker.fail(failed_spec.strip(), "download failed")
+                except RuntimeError:
+                    pass
                 finally:
                     tracker.finish()
             else:
-                download_packages_for_group(env_specs, dest_dir, pre=pre, timeout=timeout)
+                download_packages_for_group(env_specs, dest_dir, pre=pre, max_workers=parallel)
 
             # Phase 7: Install per environment
             env_results: dict[str, list] = {}
@@ -1693,7 +1714,7 @@ def _run_group_upgrade(
 
                         results = install_from_local(
                             dest_dir=dest_dir, specs=specs,
-                            python_path=env_path, timeout=timeout,
+                            python_path=env_path,
                             progress_callback=make_callback(env_name),
                         )
                         group_tracker.complete_env(env_name)
@@ -1711,7 +1732,7 @@ def _run_group_upgrade(
                     try:
                         results = install_from_local(
                             dest_dir=dest_dir, specs=env_specs[env_name],
-                            python_path=env_path, timeout=timeout,
+                            python_path=env_path,
                         )
                         env_results[env_name] = results
                     except Exception:
@@ -1767,7 +1788,9 @@ def _run_group_upgrade(
         sys.exit(0)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        if ui:
+            ui.cleanup()
+        console.show_cursor(True)
         sys.exit(130)
 
 
@@ -1870,7 +1893,7 @@ def _run_group_outdated(
                     console.print(f"\n[red]Error in {env_path}:[/red] {e}")
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
 
     if output == "json":
@@ -2017,10 +2040,10 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
         sys.exit(1 if failed else 0)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
     except click.Abort:
-        console.print("\n[yellow]Installation cancelled by user[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
     except Exception as e:
         if output == "json":
@@ -2117,7 +2140,7 @@ def _run_group_install(
                     })
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user.[/yellow]")
+        console.show_cursor(True)
         sys.exit(130)
 
     # Print group summary
