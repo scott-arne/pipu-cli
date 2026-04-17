@@ -85,6 +85,7 @@ def parse_package_spec(spec: str) -> tuple[str, Optional[str]]:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(package_name="pipu-cli", message="%(version)s")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """
