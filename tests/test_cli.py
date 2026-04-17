@@ -49,11 +49,13 @@ def test_dry_run_shows_packages_without_installing(runner, mock_packages):
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
          patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable), \
-         patch('pipu_cli.cli.install_packages') as mock_install:
+         patch('pipu_cli.cli.download_packages') as mock_download, \
+         patch('pipu_cli.cli.install_from_local') as mock_install:
 
         result = runner.invoke(cli, ['upgrade', '--dry-run', '--yes', '--no-cache'])
 
-        # install_packages should NOT be called in dry-run mode
+        # download/install should NOT be called in dry-run mode
+        mock_download.assert_not_called()
         mock_install.assert_not_called()
 
         # Should show the packages that would be upgraded
@@ -90,8 +92,7 @@ def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
 
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
-         patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable), \
-         patch('pipu_cli.cli.install_packages'):
+         patch('pipu_cli.cli.resolve_upgradable_packages', return_value=upgradable):
 
         mock_latest.return_value = {
             installed[0]: Mock(version=Version("2.31.0")),
@@ -219,7 +220,8 @@ def test_version_constraint_upgrade(runner):
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions') as mock_latest, \
          patch('pipu_cli.cli.resolve_upgradable_packages') as mock_resolve, \
-         patch('pipu_cli.cli.install_packages') as mock_install, \
+         patch('pipu_cli.cli.download_packages') as mock_download, \
+         patch('pipu_cli.cli.install_from_local') as mock_install_local, \
          patch('pipu_cli.rollback.save_state'):
 
         mock_latest.return_value = {
@@ -231,19 +233,21 @@ def test_version_constraint_upgrade(runner):
         ]
 
         from pipu_cli.package_management import UpgradedPackage
-        mock_install.return_value = [
+        mock_install_local.return_value = [
             UpgradedPackage(name="requests", version=Version("2.30.0"), upgraded=True, previous_version=Version("2.28.0"), is_editable=False)
         ]
 
         result = runner.invoke(cli, ['upgrade', 'requests==2.30.0', '--yes', '--no-cache'])
 
-        # Should attempt to install with version constraint
-        mock_install.assert_called_once()
-        call_args = mock_install.call_args
+        # Should attempt to download with version constraint spec
+        mock_download.assert_called_once()
+        download_specs = mock_download.call_args.kwargs['specs']
+        assert download_specs == ['requests==2.30.0']
 
-        # Check that version_constraints parameter was passed
-        assert 'version_constraints' in call_args.kwargs
-        assert call_args.kwargs['version_constraints'] == {'requests': '==2.30.0'}
+        # Should attempt to install from local with same specs
+        mock_install_local.assert_called_once()
+        install_specs = mock_install_local.call_args.kwargs['specs']
+        assert install_specs == ['requests==2.30.0']
 
         assert result.exit_code == 0
 
@@ -399,12 +403,10 @@ def test_outdated_shows_upgradable_packages(runner, mock_packages):
 
     with patch('pipu_cli.cli.inspect_installed_packages', return_value=installed), \
          patch('pipu_cli.cli.get_latest_versions', return_value={installed[0]: Mock(version=Version("2.31.0"))}), \
-         patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, [])), \
-         patch('pipu_cli.cli.install_packages') as mock_install:
+         patch('pipu_cli.cli.resolve_upgradable_packages_with_reasons', return_value=(upgradable, [])):
 
         result = runner.invoke(cli, ['outdated', '--no-cache'])
 
-        mock_install.assert_not_called()
         assert 'requests' in result.output
         assert result.exit_code == 0
 
