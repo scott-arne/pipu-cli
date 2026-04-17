@@ -4,7 +4,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from pipu_cli.download import download_packages
+from packaging.version import Version
+
+from pipu_cli.download import download_packages, install_from_local
 
 
 class TestDownloadPackages:
@@ -90,3 +92,88 @@ class TestDownloadPackages:
     def test_download_empty_specs_returns_empty(self, tmp_path):
         result = download_packages(specs=[], dest_dir=tmp_path)
         assert result == []
+
+
+class TestInstallFromLocal:
+    """Tests for install_from_local function."""
+
+    def test_install_single_package(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("Successfully installed requests-2.31.0", "")
+
+        pre_versions = {"requests": Version("2.28.0")}
+        post_versions = {"requests": Version("2.31.0")}
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["requests==2.31.0"],
+            )
+
+            cmd = mock_run.call_args[0][0]
+            assert "--no-index" in cmd
+            assert "--find-links" in cmd
+            assert "--no-deps" in cmd
+            assert "requests==2.31.0" in cmd
+            assert len(results) == 1
+            assert results[0].upgraded is True
+            assert results[0].version == Version("2.31.0")
+            assert results[0].previous_version == Version("2.28.0")
+
+    def test_install_with_python_path(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("", "")
+
+        pre_versions = {"requests": Version("2.28.0")}
+        post_versions = {"requests": Version("2.31.0")}
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process) as mock_run, \
+             patch("pipu_cli.download._get_remote_package_versions", side_effect=[pre_versions, post_versions]) as mock_remote:
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["requests==2.31.0"],
+                python_path="/usr/bin/python3",
+            )
+            cmd = mock_run.call_args[0][0]
+            assert cmd[0] == "/usr/bin/python3"
+            assert mock_remote.call_count == 2
+            assert results[0].upgraded is True
+
+    def test_install_calls_progress_callback(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("", "")
+
+        callback = MagicMock()
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process), \
+             patch("pipu_cli.download._get_local_package_versions", return_value={}):
+            install_from_local(
+                dest_dir=tmp_path,
+                specs=["requests==2.31.0"],
+                progress_callback=callback,
+            )
+            callback.assert_called_once_with("requests==2.31.0")
+
+    def test_install_failure_marks_not_upgraded(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 1
+        mock_process.communicate.return_value = ("", "ERROR: install failed")
+
+        pre_versions = {"requests": Version("2.28.0")}
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process), \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, pre_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["requests==2.31.0"],
+            )
+            assert len(results) == 1
+            assert results[0].upgraded is False
+            assert results[0].failure_reason is not None
+
+    def test_install_empty_specs_returns_empty(self, tmp_path):
+        results = install_from_local(dest_dir=tmp_path, specs=[])
+        assert results == []
