@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from rich.console import Console
 from packaging.version import Version
 
-from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table
+from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table, extract_env_short_name, print_env_legend
 from pipu_cli.package_management import UpgradedPackage, BlockedPackageInfo
 
 
@@ -160,3 +160,49 @@ def test_print_blocked_packages_shows_all_reasons():
     assert "pandas" in output
     assert "matplotlib" in output
     assert "+1 more" not in output
+
+
+class TestExtractEnvShortName:
+    """Tests for extracting short names from Python paths."""
+
+    def test_conda_env_path(self):
+        path = "/home/user/miniforge3/envs/main/bin/python"
+        assert extract_env_short_name(path) == "main"
+
+    def test_venv_path(self):
+        path = "/home/user/project/.venv/bin/python"
+        assert extract_env_short_name(path) == ".venv"
+
+    def test_system_python(self):
+        path = "/usr/bin/python3"
+        assert extract_env_short_name(path) == "python3"
+
+    def test_collision_handling(self):
+        paths = [
+            "/home/user/envs/main/bin/python",
+            "/opt/envs/main/bin/python",
+        ]
+        names = {}
+        for p in paths:
+            name = extract_env_short_name(p, existing_names=set(names.values()))
+            names[p] = name
+        assert names[paths[0]] == "main"
+        assert names[paths[1]] == "main-2"
+
+
+class TestPrintEnvLegend:
+    """Tests for environment legend display."""
+
+    def test_prints_mapping(self):
+        import re
+        from io import StringIO
+        from rich.console import Console
+
+        console = Console(file=StringIO(), force_terminal=True)
+        env_names = {"main": "/path/to/envs/main/bin/python", "ml": "/path/to/envs/ml/bin/python"}
+        print_env_legend(env_names, console=console)
+        output = console.file.getvalue()
+        # Strip ANSI color codes for assertion
+        clean_output = re.sub(r'\x1b\[[0-9;]+m', '', output)
+        assert "main" in clean_output
+        assert "/path/to/envs/main/bin/python" in clean_output

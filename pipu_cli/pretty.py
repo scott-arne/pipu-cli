@@ -1,6 +1,7 @@
 """Pretty printing functions for pipu CLI."""
 
-from typing import List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.table import Table
@@ -328,3 +329,58 @@ def select_packages_interactively(
         return []
 
     return selected
+
+
+def extract_env_short_name(python_path: str, existing_names: Optional[set] = None) -> str:
+    """Extract a short environment name from a Python interpreter path.
+
+    :param python_path: Full path to Python interpreter
+    :param existing_names: Set of already-used names for collision handling
+    :returns: Short name (e.g., "main" from ".../envs/main/bin/python")
+    """
+    parts = Path(python_path).parts
+
+    # Look for bin/ or Scripts/ and take the parent directory name
+    # Skip system directories like /usr, /opt, etc.
+    name = None
+    for i, part in enumerate(parts):
+        if part in ("bin", "Scripts") and i > 0:
+            parent = parts[i - 1]
+            # Skip system directories - use the executable name instead
+            if parent not in ("usr", "opt", "local"):
+                name = parent
+                break
+
+    # If no suitable parent found, use the executable name
+    if name is None:
+        name = Path(python_path).name
+
+    if existing_names is None:
+        return name
+
+    if name not in existing_names:
+        return name
+
+    # Handle collisions
+    counter = 2
+    while f"{name}-{counter}" in existing_names:
+        counter += 1
+    return f"{name}-{counter}"
+
+
+def print_env_legend(
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a legend mapping short environment names to full paths.
+
+    :param env_names: Dict mapping short name to full path
+    :param console: Optional Rich console
+    """
+    if console is None:
+        console = Console()
+
+    max_name_len = max(len(name) for name in env_names)
+    console.print("[dim]Environments:[/dim]")
+    for name, path in env_names.items():
+        console.print(f"  [dim][cyan]{name:<{max_name_len}}[/cyan] = {path}[/dim]")
