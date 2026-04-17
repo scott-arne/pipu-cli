@@ -1,8 +1,6 @@
 """Tests for upgrade UI display."""
 
 from io import StringIO
-from unittest.mock import patch, MagicMock
-
 from rich.console import Console
 
 from pipu_cli.ui import UpgradeUI
@@ -49,3 +47,50 @@ class TestUpgradeUIPhases:
             assert False, "Should have raised"
         except RuntimeError:
             pass
+
+
+class TestDownloadTracker:
+    """Tests for download progress tracking."""
+
+    def test_show_download_progress_returns_tracker(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(["requests==2.31.0", "rich==13.7.0"])
+        assert tracker is not None
+
+    def test_download_tracker_complete_marks_done(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(["requests==2.31.0"])
+        tracker.complete("requests==2.31.0")
+        tracker.finish()
+        output = console.file.getvalue()
+        assert "requests" in output
+
+    def test_download_tracker_fail_marks_error(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(["requests==2.31.0"])
+        tracker.fail("requests==2.31.0", "network error")
+        tracker.finish()
+        output = console.file.getvalue()
+        assert "requests" in output
+
+
+class TestInstallTracker:
+    """Tests for install progress tracking."""
+
+    def test_show_install_progress_returns_tracker(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_install_progress(["requests==2.31.0", "rich==13.7.0"])
+        assert tracker is not None
+
+    def test_install_tracker_complete_marks_done(self):
+        console = Console(file=StringIO(), force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_install_progress(["requests==2.31.0"])
+        tracker.complete("requests==2.31.0")
+        tracker.finish()
+        output = console.file.getvalue()
+        assert "requests" in output

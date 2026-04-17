@@ -1,9 +1,41 @@
 """Upgrade UI display layer using Rich progress components."""
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, TaskID
+
+
+class PackageTracker:
+    """Tracks per-package progress for download or install phases."""
+
+    CHECKMARK = "[bold green]\u2713[/bold green]"
+    CROSS = "[bold red]\u2717[/bold red]"
+
+    def __init__(self, progress: Progress, tasks: Dict[str, TaskID]) -> None:
+        self._progress = progress
+        self._tasks = tasks
+
+    def complete(self, spec: str) -> None:
+        """Mark a package as complete.
+
+        :param spec: Package spec (e.g., "requests==2.31.0")
+        """
+        if spec in self._tasks:
+            self._progress.update(self._tasks[spec], completed=1, description=f"{self.CHECKMARK} {spec}")
+
+    def fail(self, spec: str, reason: str) -> None:
+        """Mark a package as failed.
+
+        :param spec: Package spec
+        :param reason: Failure reason
+        """
+        if spec in self._tasks:
+            self._progress.update(self._tasks[spec], completed=1, description=f"{self.CROSS} {spec} [red]({reason})[/red]")
+
+    def finish(self) -> None:
+        """Stop the progress display."""
+        self._progress.stop()
 
 
 class UpgradeUI:
@@ -56,3 +88,41 @@ class UpgradeUI:
         self._active_description = None
 
         self.console.print(f"{self.CHECKMARK} {description} [dim]{summary}[/dim]")
+
+    def show_download_progress(self, specs: List[str]) -> PackageTracker:
+        """Show multi-task download progress.
+
+        :param specs: List of package specs to download
+        :returns: PackageTracker for updating progress
+        """
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=self.console,
+            transient=False,
+        )
+        progress.start()
+        tasks = {}
+        for spec in specs:
+            task_id = progress.add_task(f"  {spec}", total=1)
+            tasks[spec] = task_id
+        return PackageTracker(progress, tasks)
+
+    def show_install_progress(self, specs: List[str]) -> PackageTracker:
+        """Show multi-task install progress.
+
+        :param specs: List of package specs to install
+        :returns: PackageTracker for updating progress
+        """
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=self.console,
+            transient=False,
+        )
+        progress.start()
+        tasks = {}
+        for spec in specs:
+            task_id = progress.add_task(f"  {spec}", total=1)
+            tasks[spec] = task_id
+        return PackageTracker(progress, tasks)
