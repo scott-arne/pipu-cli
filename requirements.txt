@@ -1,5 +1,5 @@
 rich_click>=1.7,<2.0
-rich>=13.0,<15.0
-packaging>=23.0,<26.0
+rich>=13.0
+packaging>=23.0
 pip>=26.0,<27.0
 tomli>=2.0.0; python_version < "3.11"
