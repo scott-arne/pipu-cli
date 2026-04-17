@@ -1,7 +1,7 @@
 """Pretty printing functions for pipu CLI."""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rich.console import Console
 from rich.table import Table
@@ -384,3 +384,138 @@ def print_env_legend(
     console.print("[dim]Environments:[/dim]")
     for name, path in env_names.items():
         console.print(f"  [dim][cyan]{name:<{max_name_len}}[/cyan] = {path}[/dim]")
+
+
+def print_group_upgrade_matrix(
+    env_upgrades: Dict[str, List[UpgradePackageInfo]],
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a matrix table showing upgrades across environments.
+
+    :param env_upgrades: Dict mapping short env name to upgrade list
+    :param env_names: Dict mapping short env name to full path
+    :param console: Optional Rich console
+    """
+    if console is None:
+        console = Console()
+
+    # Collect all package names across environments
+    all_packages: Dict[str, Dict[str, UpgradePackageInfo]] = {}
+    for env_name, upgrades in env_upgrades.items():
+        for pkg in upgrades:
+            if pkg.name not in all_packages:
+                all_packages[pkg.name] = {}
+            all_packages[pkg.name][env_name] = pkg
+
+    if not all_packages:
+        console.print("[yellow]No packages to upgrade.[/yellow]")
+        return
+
+    env_order = list(env_names.keys())
+
+    table = Table(title=f"[bold]{len(all_packages)} Package(s) to Upgrade[/bold]")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    for pkg_name in sorted(all_packages.keys()):
+        row = [pkg_name]
+        for env_name in env_order:
+            pkg = all_packages[pkg_name].get(env_name)
+            if pkg:
+                row.append(f"{pkg.version} -> [green]{pkg.latest_version}[/green]")
+            else:
+                row.append("[dim]-[/dim]")
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def print_group_results_matrix(
+    env_results: Dict[str, List[UpgradedPackage]],
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a matrix table showing upgrade results across environments.
+
+    :param env_results: Dict mapping short env name to results list
+    :param env_names: Dict mapping short env name to full path
+    :param console: Optional Rich console
+    """
+    if console is None:
+        console = Console()
+
+    all_packages: Dict[str, Dict[str, UpgradedPackage]] = {}
+    total_upgraded = 0
+    for env_name, results in env_results.items():
+        for pkg in results:
+            if pkg.name not in all_packages:
+                all_packages[pkg.name] = {}
+            all_packages[pkg.name][env_name] = pkg
+            if pkg.upgraded:
+                total_upgraded += 1
+
+    if not all_packages:
+        return
+
+    env_order = list(env_names.keys())
+    num_envs = len(env_order)
+
+    console.print(f"[bold green]Upgraded {total_upgraded} package(s) across {num_envs} environment(s)[/bold green]")
+
+    table = Table()
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    checkmark = "[green]\u2713[/green]"
+    cross = "[red]\u2717[/red]"
+
+    for pkg_name in sorted(all_packages.keys()):
+        row = [pkg_name]
+        for env_name in env_order:
+            pkg = all_packages[pkg_name].get(env_name)
+            if pkg is None:
+                row.append("[dim]-[/dim]")
+            elif pkg.upgraded:
+                row.append(f"{checkmark} {pkg.previous_version}->[green]{pkg.version}[/green]")
+            else:
+                row.append(f"{cross} [red]{pkg.failure_reason or 'failed'}[/red]")
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def print_group_blocked_table(
+    blocked_packages: List[Tuple[str, BlockedPackageInfo]],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a table of blocked packages across group environments.
+
+    :param blocked_packages: List of (env_short_name, BlockedPackageInfo) tuples
+    :param console: Optional Rich console
+    """
+    if console is None:
+        console = Console()
+
+    if not blocked_packages:
+        return
+
+    console.print(f"\n[bold yellow]{len(blocked_packages)} package(s) blocked by constraints[/bold yellow]")
+
+    table = Table()
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Available", style="green")
+    table.add_column("Env", style="magenta")
+    table.add_column("Blocked By", style="red")
+
+    for env_name, pkg in blocked_packages:
+        table.add_row(
+            pkg.name,
+            str(pkg.latest_version),
+            env_name,
+            ", ".join(pkg.blocked_by),
+        )
+
+    console.print(table)

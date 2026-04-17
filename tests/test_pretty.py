@@ -7,8 +7,8 @@ from unittest.mock import Mock
 from rich.console import Console
 from packaging.version import Version
 
-from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table, extract_env_short_name, print_env_legend
-from pipu_cli.package_management import UpgradedPackage, BlockedPackageInfo
+from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table, extract_env_short_name, print_env_legend, print_group_upgrade_matrix, print_group_blocked_table
+from pipu_cli.package_management import UpgradedPackage, BlockedPackageInfo, UpgradePackageInfo
 
 
 def test_console_stream_write_text():
@@ -206,3 +206,66 @@ class TestPrintEnvLegend:
         clean_output = re.sub(r'\x1b\[[0-9;]+m', '', output)
         assert "main" in clean_output
         assert "/path/to/envs/main/bin/python" in clean_output
+
+
+class TestGroupUpgradeMatrix:
+    """Tests for the consolidated upgrade matrix table."""
+
+    def test_renders_matrix_with_version_transitions(self):
+        from io import StringIO
+        from rich.console import Console
+
+        console = Console(file=StringIO(), force_terminal=True, width=120)
+
+        env_upgrades = {
+            "main": [
+                UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0")),
+            ],
+            "ml": [
+                UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0")),
+            ],
+        }
+        env_names = {"main": "/path/main/bin/python", "ml": "/path/ml/bin/python"}
+
+        print_group_upgrade_matrix(env_upgrades, env_names, console=console)
+        output = console.file.getvalue()
+        assert "requests" in output
+        assert "main" in output
+        assert "ml" in output
+
+    def test_dash_for_missing_package(self):
+        from io import StringIO
+        from rich.console import Console
+
+        console = Console(file=StringIO(), force_terminal=True, width=120)
+
+        env_upgrades = {
+            "main": [
+                UpgradePackageInfo(name="requests", version=Version("2.28.0"), upgradable=True, latest_version=Version("2.31.0")),
+            ],
+            "web": [],
+        }
+        env_names = {"main": "/path/main/bin/python", "web": "/path/web/bin/python"}
+
+        print_group_upgrade_matrix(env_upgrades, env_names, console=console)
+        output = console.file.getvalue()
+        assert "-" in output
+
+
+class TestGroupBlockedTable:
+    """Tests for the consolidated blocked packages table."""
+
+    def test_renders_blocked_with_environment(self):
+        from io import StringIO
+        from rich.console import Console
+
+        console = Console(file=StringIO(), force_terminal=True, width=120)
+
+        blocked = [
+            ("ml", BlockedPackageInfo(name="scipy", version=Version("1.10.0"), latest_version=Version("1.12.0"), blocked_by=["numpy<1.25 (scikit-learn 1.3.0)"])),
+        ]
+        print_group_blocked_table(blocked, console=console)
+        output = console.file.getvalue()
+        assert "scipy" in output
+        assert "ml" in output
+        assert "numpy" in output
