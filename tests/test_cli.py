@@ -556,15 +556,14 @@ class TestGroupExecution:
         assert result.exit_code == 1
 
     def test_upgrade_group_runs_per_environment(self, runner):
-        """upgrade -g runs workflow for each environment."""
+        """upgrade -g inspects each environment in consolidated pipeline."""
         with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/b"]), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]) as mock_inspect, \
              patch("os.path.exists", return_value=True):
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
 
-        # Should show environment headers
-        assert "/python/a" in result.output
-        assert "/python/b" in result.output
+        # Should show consolidated phase output
+        assert "Inspecting 2 environments" in result.output
         # inspect should be called for each environment
         assert mock_inspect.call_count == 2
 
@@ -581,13 +580,13 @@ class TestGroupExecution:
         assert "Warning" in result.output or "warning" in result.output or "skip" in result.output.lower()
 
     def test_upgrade_group_shows_summary(self, runner):
-        """upgrade -g shows group summary at the end."""
+        """upgrade -g shows phase progress and result summary."""
         with patch("pipu_cli.cli.get_group", return_value=["/python/a"]), \
              patch("os.path.exists", return_value=True), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]):
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
 
-        assert "summary" in result.output.lower() or "processed" in result.output.lower()
+        assert "upgrades across" in result.output.lower() or "no packages can be upgraded" in result.output.lower()
 
 
 class TestInstallCommand:
