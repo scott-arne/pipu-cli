@@ -259,7 +259,7 @@ class UpgradeUI:
         """
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=None),
+            BarColumn(),
             TaskProgressColumn(),
             console=self.console,
         )
