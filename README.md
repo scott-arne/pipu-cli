@@ -79,12 +79,27 @@ pipu install requests --no-update
 # Install with version constraints
 pipu install "requests>=2.30" "flask==2.3.0"
 
-# Install across a group of environments
-pipu install requests -g data-science
+# Install from a local file
+pipu install ./mypackage-1.0.tar.gz
 
 # Include pre-release versions
 pipu install requests --pre
 ```
+
+### Uninstall packages
+
+```bash
+# Uninstall packages
+pipu uninstall requests flask
+
+# Skip confirmation prompt
+pipu uninstall requests -y
+
+# JSON output
+pipu uninstall requests -o json
+```
+
+If a package is already not installed, pipu treats it as a success (the desired state is already achieved).
 
 ### Rollback
 
@@ -127,7 +142,7 @@ pipu clean --all
 
 ### Environment Groups
 
-Groups let you run pipu commands across multiple Python environments at once.
+Groups let you run pipu commands across multiple Python environments at once. When using groups, pipu shows an aggregate matrix view of all environments and runs operations in parallel.
 
 ```bash
 # Add current environment to a group
@@ -148,12 +163,17 @@ pipu outdated -g data-science
 # Install across a group
 pipu install requests -g data-science
 
+# Uninstall across a group
+pipu uninstall requests -g data-science
+
 # Remove an environment from a group
 pipu group remove data-science --python /path/to/envs/ml/bin/python
 
 # Delete an entire group
 pipu group delete data-science
 ```
+
+Group operations show a matrix table with packages as rows and environments as columns, making it easy to see what will change where before confirming.
 
 Groups are stored at `~/.config/pipu/groups.toml`.
 
@@ -198,6 +218,7 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 |---------|-------------|
 | `pipu upgrade` | Upgrade packages (default command) |
 | `pipu install` | Install packages (wraps pip install -U) |
+| `pipu uninstall` | Uninstall packages |
 | `pipu outdated` | Show packages with updates available |
 | `pipu update` | Refresh the package version cache |
 | `pipu clean` | Clear caches |
@@ -229,12 +250,23 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `PACKAGES` | | Package names to install (required) |
+| `PACKAGES` | | Package specs or file paths to install (required) |
 | `--no-update` | | Plain pip install without -U |
 | `--group TEXT` | `-g` | Install across a named group |
 | `--output [human\|json]` | `-o` | Output format |
 | `--timeout INTEGER` | | Timeout in seconds (default: 300) |
 | `--pre` | | Include pre-release versions |
+| `--yes` | `-y` | Skip confirmation |
+| `--debug` | | Show detailed logging |
+
+### Uninstall Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `PACKAGES` | | Package names to uninstall (required) |
+| `--group TEXT` | `-g` | Uninstall across a named group |
+| `--output [human\|json]` | `-o` | Output format |
+| `--timeout INTEGER` | | Timeout in seconds (default: 300) |
 | `--yes` | `-y` | Skip confirmation |
 | `--debug` | | Show detailed logging |
 

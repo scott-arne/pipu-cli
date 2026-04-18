@@ -175,7 +175,7 @@ def install_from_local(
     for spec in specs:
         cmd = [
             executable, "-m", "pip", "install",
-            "--no-index", "--find-links", str(dest_dir),
+            "--find-links", str(dest_dir),
             "--no-deps", spec,
         ]
 

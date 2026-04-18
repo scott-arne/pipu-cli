@@ -113,7 +113,6 @@ class TestInstallFromLocal:
             )
 
             cmd = mock_run.call_args[0][0]
-            assert "--no-index" in cmd
             assert "--find-links" in cmd
             assert "--no-deps" in cmd
             assert "requests==2.31.0" in cmd
