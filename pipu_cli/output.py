@@ -2,7 +2,7 @@
 
 import json
 from typing import List, Optional, Any, Dict
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult
+from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult, UninstalledResult
 
 
 class OutputFormatter:
@@ -131,5 +131,44 @@ class JsonOutputFormatter(OutputFormatter):
 
         :param env_results: List of dicts, each with 'environment' key plus standard schema
         :returns: JSON string
+        """
+        return json.dumps(env_results, indent=2)
+
+    def format_uninstall_results(self, results: List[UninstalledResult]) -> str:
+        """Format uninstall results as a single JSON object.
+
+        :param results: List of UninstalledResult objects.
+        :returns: JSON string.
+        """
+        result_dicts = []
+        for pkg in results:
+            result_dicts.append({
+                "name": pkg.name,
+                "previous_version": str(pkg.previous_version) if pkg.previous_version else None,
+                "uninstalled": pkg.uninstalled,
+                "already_absent": pkg.already_absent,
+                "failure_reason": pkg.failure_reason,
+            })
+
+        successful = [pkg for pkg in results if pkg.uninstalled]
+        already_absent = [pkg for pkg in results if pkg.already_absent]
+        failed = [pkg for pkg in results if not pkg.uninstalled]
+
+        data: Dict[str, Any] = {
+            "results": result_dicts,
+            "summary": {
+                "total": len(results),
+                "uninstalled": len(successful),
+                "already_absent": len(already_absent),
+                "failed": len(failed),
+            },
+        }
+        return json.dumps(data, indent=2)
+
+    def format_group_uninstall_results(self, env_results: List[Dict[str, Any]]) -> str:
+        """Format group uninstall results as a JSON array of per-environment results.
+
+        :param env_results: List of dicts, each with 'environment' key plus uninstall results.
+        :returns: JSON string.
         """
         return json.dumps(env_results, indent=2)

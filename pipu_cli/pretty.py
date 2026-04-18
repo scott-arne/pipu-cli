@@ -7,7 +7,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
 
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult
+from packaging.version import Version
+
+from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult, UninstalledResult
 
 
 class ConsoleStream:
@@ -222,7 +224,7 @@ def print_upgrade_results(
     if failed:
         console.print(f"\n[bold]Summary:[/bold] {len(successful)}/{len(results)} packages upgraded successfully")
     else:
-        console.print(f"\n[bold green]All packages upgraded successfully![/bold green]")
+        console.print("\n[bold green]All packages upgraded successfully![/bold green]")
 
 
 def print_install_results(
@@ -268,6 +270,55 @@ def print_install_results(
         console.print(f"[bold]Summary:[/bold] {len(successful)}/{len(results)} packages installed successfully")
     else:
         console.print("[bold green]All packages installed successfully![/bold green]")
+
+
+def print_uninstall_results(
+    results: List[UninstalledResult],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a summary of package uninstall results.
+
+    :param results: List of UninstalledResult objects with uninstall status.
+    :param console: Optional Rich console instance.
+    """
+    if console is None:
+        console = Console()
+
+    if not results:
+        console.print("[yellow]No packages were processed.[/yellow]")
+        return
+
+    successful = [pkg for pkg in results if pkg.uninstalled]
+    failed = [pkg for pkg in results if not pkg.uninstalled]
+
+    already_absent = [pkg for pkg in successful if pkg.already_absent]
+    actually_removed = [pkg for pkg in successful if not pkg.already_absent]
+
+    if actually_removed:
+        console.print(f"\n[bold green]Successfully uninstalled {len(actually_removed)} package(s):[/bold green]")
+        for pkg in actually_removed:
+            ver = f" ({pkg.previous_version})" if pkg.previous_version else ""
+            console.print(f"  - {pkg.name}{ver}")
+
+    if already_absent:
+        console.print(f"\n[yellow]{len(already_absent)} package(s) already not installed:[/yellow]")
+        for pkg in already_absent:
+            console.print(f"  - {pkg.name}")
+
+    if failed:
+        console.print(f"\n[bold yellow]{len(failed)} package(s) could not be uninstalled:[/bold yellow]")
+        table = Table(show_header=True, header_style="bold yellow")
+        table.add_column("Package", style="cyan")
+        table.add_column("Reason", style="dim")
+        for pkg in failed:
+            table.add_row(pkg.name, pkg.failure_reason or "Unknown failure")
+        console.print(table)
+
+    console.print()
+    if failed:
+        console.print(f"[bold]Summary:[/bold] {len(successful)}/{len(results)} packages uninstalled successfully")
+    else:
+        console.print("[bold green]All packages uninstalled successfully![/bold green]")
 
 
 def _parse_selection(selection: str, max_index: int) -> List[int]:
@@ -469,9 +520,9 @@ def print_group_upgrade_matrix(
     for pkg_name in sorted(all_packages.keys()):
         row = [pkg_name]
         for env_name in env_order:
-            pkg = all_packages[pkg_name].get(env_name)
-            if pkg:
-                row.append(f"{pkg.version} -> [green]{pkg.latest_version}[/green]")
+            entry = all_packages[pkg_name].get(env_name)
+            if entry:
+                row.append(f"{entry.version} -> [green]{entry.latest_version}[/green]")
             else:
                 row.append("[dim]-[/dim]")
         table.add_row(*row)
@@ -524,16 +575,16 @@ def print_group_results_matrix(
     for pkg_name in sorted(all_packages.keys()):
         row = [pkg_name]
         for env_name in env_order:
-            pkg = all_packages[pkg_name].get(env_name)
-            if pkg is None:
+            entry = all_packages[pkg_name].get(env_name)
+            if entry is None:
                 row.append("[dim]-[/dim]")
-            elif pkg.upgraded:
-                row.append(f"{checkmark} {pkg.previous_version}->[green]{pkg.version}[/green]")
+            elif entry.upgraded:
+                row.append(f"{checkmark} {entry.previous_version}->[green]{entry.version}[/green]")
             else:
-                summary = _extract_error_summary(pkg.failure_reason or "failed")
+                summary = _extract_error_summary(entry.failure_reason or "failed")
                 row.append(f"{cross} [red]{summary}[/red]")
-                if pkg.failure_reason:
-                    failed_details.append((pkg_name, env_name, pkg.failure_reason))
+                if entry.failure_reason:
+                    failed_details.append((pkg_name, env_name, entry.failure_reason))
         table.add_row(*row)
 
     console.print(table)
@@ -576,3 +627,223 @@ def print_group_blocked_table(
         )
 
     console.print(table)
+
+
+def print_group_install_matrix(
+    env_versions: Dict[str, Dict[str, Optional[Version]]],
+    package_names: List[str],
+    env_names: Dict[str, str],
+    upgrade: bool = True,
+    console: Optional[Console] = None,
+) -> None:
+    """Print a matrix showing install plan across environments.
+
+    :param env_versions: Dict of env short name -> dict of canonical pkg name -> current version (or None).
+    :param package_names: Original package spec strings.
+    :param env_names: Dict of short name -> full path.
+    :param upgrade: Whether -U flag will be used.
+    :param console: Optional Rich console.
+    """
+    if console is None:
+        console = Console()
+
+    env_order = list(env_names.keys())
+    action = "Install/Upgrade" if upgrade else "Install"
+
+    table = Table(title=f"[bold]{len(package_names)} Package(s) to {action}[/bold]")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    for pkg_spec in package_names:
+        row = [pkg_spec]
+        for env_name in env_order:
+            cur_ver = env_versions.get(env_name, {}).get(pkg_spec)
+            if cur_ver is not None:
+                if upgrade:
+                    row.append(f"{cur_ver} -> [green]latest[/green]")
+                else:
+                    row.append(f"[dim]{cur_ver} (installed)[/dim]")
+            else:
+                row.append("[green]new[/green]")
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def print_group_install_results_matrix(
+    env_results: Dict[str, List[InstalledResult]],
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a results matrix for installs across environments.
+
+    :param env_results: Dict of env short name -> list of InstalledResult.
+    :param env_names: Dict of short name -> full path.
+    :param console: Optional Rich console.
+    """
+    if console is None:
+        console = Console()
+
+    all_packages: Dict[str, Dict[str, InstalledResult]] = {}
+    total_installed = 0
+    for env_name, results in env_results.items():
+        for pkg in results:
+            if pkg.name not in all_packages:
+                all_packages[pkg.name] = {}
+            all_packages[pkg.name][env_name] = pkg
+            if pkg.installed:
+                total_installed += 1
+
+    if not all_packages:
+        return
+
+    env_order = list(env_names.keys())
+    num_envs = len(env_order)
+
+    console.print(f"[bold green]Installed {total_installed} package(s) across {num_envs} environment(s)[/bold green]")
+
+    table = Table()
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    checkmark = "[green]\u2713[/green]"
+    cross = "[red]\u2717[/red]"
+
+    failed_details: list[tuple[str, str, str]] = []
+
+    for pkg_name in sorted(all_packages.keys()):
+        row = [pkg_name]
+        for env_name in env_order:
+            entry = all_packages[pkg_name].get(env_name)
+            if entry is None:
+                row.append("[dim]-[/dim]")
+            elif entry.installed:
+                if entry.previous_version is None:
+                    row.append(f"{checkmark} [green]{entry.version}[/green] (new)")
+                elif entry.version > entry.previous_version:
+                    row.append(f"{checkmark} {entry.previous_version}->[green]{entry.version}[/green]")
+                else:
+                    row.append(f"{checkmark} {entry.version}")
+            else:
+                summary = entry.failure_reason or "failed"
+                if len(summary) > 30:
+                    summary = summary[:27] + "..."
+                row.append(f"{cross} [red]{summary}[/red]")
+                if entry.failure_reason:
+                    failed_details.append((pkg_name, env_name, entry.failure_reason))
+        table.add_row(*row)
+
+    console.print(table)
+
+    if failed_details:
+        for pkg_name, env_name, reason in failed_details:
+            console.print(f"\n[bold red]{pkg_name}[/bold red] ({env_name}) error details:")
+            console.print(f"[dim]{reason}[/dim]")
+
+
+def print_group_uninstall_matrix(
+    env_versions: Dict[str, Dict[str, Optional[Version]]],
+    package_names: List[str],
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a matrix showing uninstall plan across environments.
+
+    :param env_versions: Dict of env short name -> dict of canonical pkg name -> current version (or None).
+    :param package_names: Original package name strings.
+    :param env_names: Dict of short name -> full path.
+    :param console: Optional Rich console.
+    """
+    if console is None:
+        console = Console()
+
+    env_order = list(env_names.keys())
+
+    table = Table(title=f"[bold]{len(package_names)} Package(s) to Uninstall[/bold]")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    for pkg_name in package_names:
+        row = [pkg_name]
+        for env_name in env_order:
+            cur_ver = env_versions.get(env_name, {}).get(pkg_name)
+            if cur_ver is not None:
+                row.append(f"[red]{cur_ver}[/red]")
+            else:
+                row.append("[dim]-[/dim]")
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def print_group_uninstall_results_matrix(
+    env_results: Dict[str, List[UninstalledResult]],
+    env_names: Dict[str, str],
+    console: Optional[Console] = None,
+) -> None:
+    """Print a results matrix for uninstalls across environments.
+
+    :param env_results: Dict of env short name -> list of UninstalledResult.
+    :param env_names: Dict of short name -> full path.
+    :param console: Optional Rich console.
+    """
+    if console is None:
+        console = Console()
+
+    all_packages: Dict[str, Dict[str, UninstalledResult]] = {}
+    total_uninstalled = 0
+    for env_name, results in env_results.items():
+        for pkg in results:
+            if pkg.name not in all_packages:
+                all_packages[pkg.name] = {}
+            all_packages[pkg.name][env_name] = pkg
+            if pkg.uninstalled:
+                total_uninstalled += 1
+
+    if not all_packages:
+        return
+
+    env_order = list(env_names.keys())
+    num_envs = len(env_order)
+
+    console.print(f"[bold green]Uninstalled {total_uninstalled} package(s) across {num_envs} environment(s)[/bold green]")
+
+    table = Table()
+    table.add_column("Package", style="cyan", no_wrap=True)
+    for env_name in env_order:
+        table.add_column(env_name, style="magenta", justify="center")
+
+    checkmark = "[green]\u2713[/green]"
+    cross = "[red]\u2717[/red]"
+
+    failed_details: list[tuple[str, str, str]] = []
+
+    for pkg_name in sorted(all_packages.keys()):
+        row = [pkg_name]
+        for env_name in env_order:
+            entry = all_packages[pkg_name].get(env_name)
+            if entry is None:
+                row.append("[dim]-[/dim]")
+            elif entry.uninstalled and entry.already_absent:
+                row.append("[dim]-[/dim]")
+            elif entry.uninstalled:
+                ver = f" ({entry.previous_version})" if entry.previous_version else ""
+                row.append(f"{checkmark} removed{ver}")
+            else:
+                summary = entry.failure_reason or "failed"
+                if len(summary) > 30:
+                    summary = summary[:27] + "..."
+                row.append(f"{cross} [red]{summary}[/red]")
+                if entry.failure_reason:
+                    failed_details.append((pkg_name, env_name, entry.failure_reason))
+        table.add_row(*row)
+
+    console.print(table)
+
+    if failed_details:
+        for pkg_name, env_name, reason in failed_details:
+            console.print(f"\n[bold red]{pkg_name}[/bold red] ({env_name}) error details:")
+            console.print(f"[dim]{reason}[/dim]")

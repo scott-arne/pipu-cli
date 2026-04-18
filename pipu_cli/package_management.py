@@ -94,6 +94,16 @@ class InstalledResult(Package):
     failure_reason: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class UninstalledResult:
+    """Result of a pip uninstall operation for a single package."""
+    name: str
+    previous_version: Optional[Version]
+    uninstalled: bool
+    already_absent: bool = False
+    failure_reason: Optional[str] = None
+
+
 def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = None) -> List[InstalledPackage]:
     """
     Inspect currently installed Python packages and return detailed information.
@@ -1444,13 +1454,33 @@ def reinstall_editable_packages(
 def _parse_package_name(spec: str) -> str:
     """Extract the canonical package name from a pip install spec.
 
-    :param spec: Package specification like 'requests', 'numpy==1.24', 'flask>=2.0'
-    :returns: Canonical package name
+    Handles regular specs (``requests``, ``numpy==1.24``), local file paths
+    (``/path/to/pkg-1.0.tar.gz``, ``./pkg-1.0-py3-none-any.whl``), and URLs.
+
+    :param spec: Package specification, file path, or URL.
+    :returns: Canonical package name.
     """
+    import os.path
+    import re
+
+    stripped = spec.strip()
+
+    if os.path.isfile(os.path.expanduser(stripped)):
+        filename = os.path.basename(stripped)
+        # Wheel: name-version(-tags).whl
+        whl = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._]*[A-Za-z0-9])?)-', filename)
+        if filename.endswith('.whl') and whl:
+            return canonicalize_name(whl.group(1))
+        # Sdist: name-version.tar.gz / .zip / .tar.bz2
+        sdist = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)[-][\d]', filename)
+        if sdist:
+            return canonicalize_name(sdist.group(1))
+        return canonicalize_name(filename.split('-')[0].split('.')[0])
+
     for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
-        if op in spec:
-            return canonicalize_name(spec.split(op, 1)[0].strip())
-    return canonicalize_name(spec.strip())
+        if op in stripped:
+            return canonicalize_name(stripped.split(op, 1)[0].strip())
+    return canonicalize_name(stripped)
 
 
 def run_pip_install(
@@ -1610,6 +1640,168 @@ def run_pip_install(
                 installed=False,
                 previous_version=pre_versions.get(cn),
                 failure_reason=f"Installation failed: {e}",
+            )
+            for cn in canonical_names
+        ]
+
+
+def run_pip_uninstall(
+    package_names: List[str],
+    output_stream: Optional[OutputStream] = None,
+    timeout: int = 300,
+    python_path: Optional[str] = None,
+) -> List[UninstalledResult]:
+    """Uninstall packages using pip.
+
+    :param package_names: Package names to uninstall.
+    :param output_stream: Optional stream for real-time pip output.
+    :param timeout: Subprocess timeout in seconds (default: 300).
+    :param python_path: Path to Python interpreter for remote environments.
+    :returns: List of UninstalledResult objects describing the outcome.
+    """
+    if not package_names:
+        return []
+
+    canonical_names: List[str] = [canonicalize_name(name) for name in package_names]
+    name_to_orig = dict(zip(canonical_names, package_names))
+
+    if python_path is not None:
+        pre_versions = _get_remote_package_versions(python_path, canonical_names, timeout=30)
+    else:
+        pre_versions = _get_local_package_versions(canonical_names)
+
+    not_installed = [cn for cn in canonical_names if cn not in pre_versions]
+    if not_installed:
+        results: List[UninstalledResult] = []
+        for cn in canonical_names:
+            if cn in not_installed:
+                results.append(UninstalledResult(
+                    name=name_to_orig[cn],
+                    previous_version=None,
+                    uninstalled=True,
+                    already_absent=True,
+                ))
+            else:
+                results.append(UninstalledResult(
+                    name=name_to_orig[cn],
+                    previous_version=pre_versions.get(cn),
+                    uninstalled=False,
+                    failure_reason=None,
+                ))
+        to_uninstall = [cn for cn in canonical_names if cn not in not_installed]
+        if not to_uninstall:
+            return results
+        canonical_names = to_uninstall
+        partial_results = results
+    else:
+        partial_results = []
+
+    executable = python_path if python_path is not None else sys.executable
+    cmd = [executable, '-m', 'pip', 'uninstall', '-y']
+    cmd.extend([name_to_orig[cn] for cn in canonical_names])
+
+    process = None
+    try:
+        if output_stream:
+            output_stream.write(f"Uninstalling {len(canonical_names)} package(s)...\n")
+            output_stream.flush()
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        lock = threading.Lock()
+        stderr_lines: List[str] = []
+        stdout_lines: List[str] = []
+        stdout_thread = threading.Thread(
+            target=_stream_reader, args=(process.stdout, output_stream, lock, stdout_lines), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_stream_reader, args=(process.stderr, output_stream, lock, stderr_lines), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdout_thread.join()
+        stderr_thread.join()
+
+        returncode = process.wait(timeout=timeout)
+
+        if returncode != 0:
+            logger.warning(f"pip uninstall failed with return code {returncode}")
+            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
+            failure_msg = error_output or f"pip exit code {returncode}"
+            return partial_results + [
+                UninstalledResult(
+                    name=name_to_orig[cn],
+                    previous_version=pre_versions.get(cn),
+                    uninstalled=False,
+                    failure_reason=failure_msg,
+                )
+                for cn in canonical_names
+            ]
+
+        if python_path is not None:
+            post_versions = _get_remote_package_versions(python_path, canonical_names, timeout=30)
+        else:
+            post_versions = _get_local_package_versions(canonical_names)
+
+        results = list(partial_results)
+        for cn in canonical_names:
+            if cn not in post_versions:
+                results.append(UninstalledResult(
+                    name=name_to_orig[cn],
+                    previous_version=pre_versions.get(cn),
+                    uninstalled=True,
+                ))
+            else:
+                results.append(UninstalledResult(
+                    name=name_to_orig[cn],
+                    previous_version=pre_versions.get(cn),
+                    uninstalled=False,
+                    failure_reason="Package still present after uninstall",
+                ))
+
+        return results
+
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            try:
+                process.kill()
+                process.wait()
+            except Exception as e:
+                logger.warning(f"Error cleaning up timed-out process: {e}")
+
+        if output_stream:
+            output_stream.write("ERROR: Timeout during package uninstallation\n")
+            output_stream.flush()
+
+        return partial_results + [
+            UninstalledResult(
+                name=name_to_orig[cn],
+                previous_version=pre_versions.get(cn),
+                uninstalled=False,
+                failure_reason="Uninstallation timed out",
+            )
+            for cn in canonical_names
+        ]
+
+    except Exception as e:
+        if output_stream:
+            output_stream.write(f"ERROR: Failed to uninstall packages: {e}\n")
+            output_stream.flush()
+
+        logger.error(f"Error uninstalling packages: {e}")
+
+        return partial_results + [
+            UninstalledResult(
+                name=name_to_orig[cn],
+                previous_version=pre_versions.get(cn),
+                uninstalled=False,
+                failure_reason=f"Uninstallation failed: {e}",
             )
             for cn in canonical_names
         ]

@@ -21,6 +21,7 @@ from rich.table import Table
 from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
+    _parse_package_name,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
@@ -28,12 +29,15 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages_with_reasons,
     reinstall_editable_packages,
     run_pip_install,
+    run_pip_uninstall,
 )
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 from pipu_cli.pretty import (
     print_upgradable_packages_table,
     print_upgrade_results,
     print_install_results,
+    print_uninstall_results,
     print_blocked_packages_table,
     ConsoleStream,
     select_packages_interactively,
@@ -2070,6 +2074,10 @@ def _run_group_install(
 ) -> None:
     """Execute install across all environments in a group."""
     import os
+    from pipu_cli.pretty import (
+        extract_env_short_name, print_env_legend,
+        print_group_install_matrix, print_group_install_results_matrix,
+    )
 
     environments = get_group(group_name)
     if environments is None:
@@ -2079,99 +2087,445 @@ def _run_group_install(
             console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
         sys.exit(1)
 
-    group_results = []
-    total_installed = 0
-    total_failed = 0
-    envs_processed = 0
-    envs_skipped = 0
+    ui = UpgradeUI(console) if output != "json" else None
+
+    env_name_map: dict[str, str] = {}
+    used_names: set[str] = set()
+    valid_envs: list[str] = []
+    for env_path in environments:
+        if not os.path.exists(env_path):
+            if output != "json":
+                console.print(f"[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
+            continue
+        valid_envs.append(env_path)
+        short = extract_env_short_name(env_path, existing_names=used_names)
+        env_name_map[short] = env_path
+        used_names.add(short)
+
+    if not valid_envs:
+        if output != "json":
+            console.print("[yellow]No valid environments in group.[/yellow]")
+        else:
+            print(json.dumps({"error": "No valid environments in group"}))
+        sys.exit(1)
+
+    reverse_map = {v: k for k, v in env_name_map.items()}
 
     try:
-        for env_path in environments:
-            if not os.path.exists(env_path):
-                if output != "json":
-                    console.print(f"\n[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
-                envs_skipped += 1
-                continue
+        # Phase 1: Inspect current state across all environments
+        canonical_pkgs = [_parse_package_name(p) for p in packages]
+        env_versions: dict[str, dict[str, Optional[Version]]] = {}
 
-            if output != "json":
-                console.print()
-                console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
-                console.print()
+        if ui:
+            ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
 
+        for env_path in valid_envs:
+            installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
+            installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
+            short = reverse_map[env_path]
+            pkg_versions: dict[str, Optional[Version]] = {}
+            for i, spec in enumerate(packages):
+                pkg_versions[spec] = installed_map.get(canonical_pkgs[i])
+            env_versions[short] = pkg_versions
+
+        if ui:
+            ui.complete_phase(f"{len(valid_envs)} environments inspected")
+
+        # Phase 2: Show matrix and confirm
+        if output != "json":
+            console.print()
+            print_env_legend(env_name_map, console=console)
+            console.print()
+            print_group_install_matrix(
+                env_versions, list(packages), env_name_map,
+                upgrade=not no_update, console=console,
+            )
+
+            if not yes:
+                action = "install/upgrade" if not no_update else "install"
+                console.print()
+                confirm = click.confirm(
+                    f"{action.capitalize()} {len(packages)} package(s) across {len(valid_envs)} environments?",
+                    default=True,
+                )
+                if not confirm:
+                    console.print("[yellow]Installation cancelled.[/yellow]")
+                    sys.exit(0)
+
+        # Phase 3: Parallel install across environments
+        env_results: dict[str, list] = {}
+        env_order = list(env_name_map.keys())
+
+        def _install_env(env_name: str, tracker=None):
+            env_path = env_name_map[env_name]
             try:
-                if not yes and output != "json":
-                    confirm = click.confirm("Proceed with install?", default=True)
-                    if not confirm:
-                        console.print("[yellow]Skipped.[/yellow]")
-                        continue
-
-                stream = ConsoleStream(console) if output != "json" else None
                 results = run_pip_install(
                     package_specs=list(packages),
                     upgrade=not no_update,
-                    output_stream=stream,
                     timeout=timeout,
                     python_path=env_path,
                     pre=pre,
                 )
-
-                envs_processed += 1
-                installed = len([r for r in results if r.installed])
-                failed = len([r for r in results if not r.installed])
-                total_installed += installed
-                total_failed += failed
-
-                if output != "json":
-                    print_install_results(results, console=console)
-                else:
-                    assert json_formatter is not None
-                    group_results.append({
-                        "environment": env_path,
-                        "results": [json_formatter._package_to_dict(r) for r in results],
-                        "summary": {
-                            "total": len(results),
-                            "installed": installed,
-                            "failed": failed,
-                        },
-                    })
-
+                if tracker:
+                    tracker.complete_env(env_name)
+                return env_name, results
             except Exception as e:
-                envs_processed += 1
-                total_failed += 1
-                if output != "json":
-                    console.print(f"\n[red]Error in {env_path}:[/red] {e}")
-                else:
-                    group_results.append({
-                        "environment": env_path,
-                        "error": str(e),
-                        "results": [],
-                        "summary": {"total": 0, "installed": 0, "failed": 0},
-                    })
+                if tracker:
+                    tracker.fail_env(env_name, str(e))
+                return env_name, []
+
+        if ui:
+            env_totals = {name: len(packages) for name in env_order}
+            group_tracker = ui.show_group_install_progress(env_order, env_totals)
+
+            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
+                futures = {
+                    executor.submit(_install_env, name, group_tracker): name
+                    for name in env_order
+                }
+                for future in as_completed(futures):
+                    name, results = future.result()
+                    env_results[name] = results
+
+            group_tracker.finish()
+        else:
+            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
+                futures = {
+                    executor.submit(_install_env, name): name
+                    for name in env_order
+                }
+                for future in as_completed(futures):
+                    name, results = future.result()
+                    env_results[name] = results
+
+        # Phase 4: Show results
+        if output == "json":
+            assert json_formatter is not None
+            group_results = []
+            for env_name in env_order:
+                env_path = env_name_map[env_name]
+                env_res = env_results.get(env_name, [])
+                n_installed = len([r for r in env_res if r.installed])
+                n_failed = len([r for r in env_res if not r.installed])
+                group_results.append({
+                    "environment": env_path,
+                    "results": [json_formatter._package_to_dict(r) for r in env_res],
+                    "summary": {
+                        "total": len(env_res),
+                        "installed": n_installed,
+                        "failed": n_failed,
+                    },
+                })
+            print(json_formatter.format_group_install_results(group_results))
+        else:
+            console.print()
+            print_group_install_results_matrix(env_results, env_name_map, console=console)
+
+        total_failed = sum(
+            len([r for r in env_results.get(n, []) if not r.installed])
+            for n in env_order
+        )
+        if total_failed:
+            sys.exit(1)
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        if ui:
+            ui.cleanup()
+        console.show_cursor(True)
+        sys.exit(130)
+
+
+@cli.command()
+@click.pass_context
+@click.argument('packages', nargs=-1, required=True)
+@click.option(
+    "--timeout",
+    type=int,
+    default=300,
+    help="Uninstallation timeout in seconds"
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    help="Skip confirmation prompt"
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    help="Enable debug logging"
+)
+@click.option(
+    "--output", "-o",
+    type=click.Choice(["human", "json"]),
+    default="human",
+    help="Output format (human-readable or json)"
+)
+@click.option(
+    "--group", "-g",
+    "group_name",
+    default=None,
+    help="Uninstall across all environments in a named group"
+)
+def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
+              yes: bool, debug: bool, output: str,
+              group_name: Optional[str] = None) -> None:
+    """Uninstall packages using pip.
+
+    \b
+    Examples:
+      pipu uninstall requests flask       Uninstall packages
+      pipu uninstall requests -y          Skip confirmation
+      pipu uninstall requests -g mygroup  Uninstall across a group
+    """
+    console = Console()
+
+    config = load_config()
+    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
+        timeout = get_config_value(config, 'timeout', 300)
+    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
+        yes = get_config_value(config, 'yes', False)
+    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
+        debug = get_config_value(config, 'debug', False)
+    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
+        output = get_config_value(config, 'output', 'human')
+
+    json_formatter = JsonOutputFormatter() if output == "json" else None
+
+    if group_name is not None:
+        _run_group_uninstall(
+            group_name=group_name, console=console, output=output,
+            packages=packages, timeout=timeout,
+            yes=yes, json_formatter=json_formatter,
+        )
+        return
+
+    if debug and output != "json":
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(message)s',
+            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
+        )
+        logging.getLogger('pip._internal').setLevel(logging.WARNING)
+        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
+        console.print("[dim]Debug mode enabled[/dim]\n")
+
+    try:
+        if output != "json":
+            console.print("[bold]Step 1/2:[/bold] Packages to uninstall:\n")
+            for pkg in packages:
+                console.print(f"  - {pkg}")
+
+        if not yes and output != "json":
+            console.print()
+            confirm = click.confirm("Do you want to proceed?", default=True)
+            if not confirm:
+                console.print("[yellow]Uninstallation cancelled.[/yellow]")
+                sys.exit(0)
+
+        if output != "json":
+            console.print(f"\n[bold]Step 2/2:[/bold] Uninstalling {len(packages)} package(s)...\n")
+
+        stream = ConsoleStream(console) if output != "json" else None
+        results = run_pip_uninstall(
+            package_names=list(packages),
+            output_stream=stream,
+            timeout=timeout,
+        )
+
+        if output == "json":
+            assert json_formatter is not None
+            print(json_formatter.format_uninstall_results(results))
+        else:
+            print_uninstall_results(results, console=console)
+
+        failed = [r for r in results if not r.uninstalled]
+        sys.exit(1 if failed else 0)
 
     except KeyboardInterrupt:
         console.show_cursor(True)
         sys.exit(130)
-
-    # Print group summary
-    if output == "json":
-        assert json_formatter is not None
-        print(json_formatter.format_group_install_results(group_results))
-    else:
-        console.print(f"\n[bold]{'═' * 60}[/bold]")
-        console.print("[bold]Group Summary[/bold]")
-        console.print(f"[bold]{'═' * 60}[/bold]")
-        console.print(f"  {envs_processed} environment(s) processed")
-        if envs_skipped:
-            console.print(f"  [yellow]{envs_skipped} environment(s) skipped (path not found)[/yellow]")
-        console.print(f"  {total_installed} package(s) installed")
-        if total_failed:
-            console.print(f"  [red]{total_failed} package(s) failed[/red]")
+    except click.Abort:
+        console.show_cursor(True)
+        sys.exit(130)
+    except Exception as e:
+        if output == "json":
+            print(json.dumps({"error": str(e)}))
         else:
-            console.print("  0 failures")
-
-    if total_failed:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)
-    sys.exit(0)
+
+
+def _run_group_uninstall(
+    group_name: str, console: Console, output: str,
+    packages: tuple, timeout: int,
+    yes: bool,
+    json_formatter: Optional[JsonOutputFormatter],
+) -> None:
+    """Execute uninstall across all environments in a group."""
+    import os
+    from pipu_cli.pretty import (
+        extract_env_short_name, print_env_legend,
+        print_group_uninstall_matrix, print_group_uninstall_results_matrix,
+    )
+
+    environments = get_group(group_name)
+    if environments is None:
+        if output == "json":
+            print(json.dumps({"error": f"Group '{group_name}' not found"}))
+        else:
+            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
+        sys.exit(1)
+
+    ui = UpgradeUI(console) if output != "json" else None
+
+    env_name_map: dict[str, str] = {}
+    used_names: set[str] = set()
+    valid_envs: list[str] = []
+    for env_path in environments:
+        if not os.path.exists(env_path):
+            if output != "json":
+                console.print(f"[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
+            continue
+        valid_envs.append(env_path)
+        short = extract_env_short_name(env_path, existing_names=used_names)
+        env_name_map[short] = env_path
+        used_names.add(short)
+
+    if not valid_envs:
+        if output != "json":
+            console.print("[yellow]No valid environments in group.[/yellow]")
+        else:
+            print(json.dumps({"error": "No valid environments in group"}))
+        sys.exit(1)
+
+    reverse_map = {v: k for k, v in env_name_map.items()}
+
+    try:
+        # Phase 1: Inspect current state across all environments
+        canonical_pkgs = [_parse_package_name(p) for p in packages]
+        env_versions: dict[str, dict[str, Optional[Version]]] = {}
+
+        if ui:
+            ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
+
+        for env_path in valid_envs:
+            installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
+            installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
+            short = reverse_map[env_path]
+            pkg_versions: dict[str, Optional[Version]] = {}
+            for i, pkg_name in enumerate(packages):
+                pkg_versions[pkg_name] = installed_map.get(canonical_pkgs[i])
+            env_versions[short] = pkg_versions
+
+        if ui:
+            ui.complete_phase(f"{len(valid_envs)} environments inspected")
+
+        # Phase 2: Show matrix and confirm
+        if output != "json":
+            console.print()
+            print_env_legend(env_name_map, console=console)
+            console.print()
+            print_group_uninstall_matrix(
+                env_versions, list(packages), env_name_map, console=console,
+            )
+
+            if not yes:
+                console.print()
+                confirm = click.confirm(
+                    f"Uninstall {len(packages)} package(s) across {len(valid_envs)} environments?",
+                    default=True,
+                )
+                if not confirm:
+                    console.print("[yellow]Uninstallation cancelled.[/yellow]")
+                    sys.exit(0)
+
+        # Phase 3: Parallel uninstall across environments
+        env_results: dict[str, list] = {}
+        env_order = list(env_name_map.keys())
+
+        def _uninstall_env(env_name: str, tracker=None):
+            env_path = env_name_map[env_name]
+            try:
+                results = run_pip_uninstall(
+                    package_names=list(packages),
+                    timeout=timeout,
+                    python_path=env_path,
+                )
+                if tracker:
+                    tracker.complete_env(env_name)
+                return env_name, results
+            except Exception as e:
+                if tracker:
+                    tracker.fail_env(env_name, str(e))
+                return env_name, []
+
+        if ui:
+            env_totals = {name: len(packages) for name in env_order}
+            group_tracker = ui.show_group_install_progress(env_order, env_totals)
+
+            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
+                futures = {
+                    executor.submit(_uninstall_env, name, group_tracker): name
+                    for name in env_order
+                }
+                for future in as_completed(futures):
+                    name, results = future.result()
+                    env_results[name] = results
+
+            group_tracker.finish()
+        else:
+            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
+                futures = {
+                    executor.submit(_uninstall_env, name): name
+                    for name in env_order
+                }
+                for future in as_completed(futures):
+                    name, results = future.result()
+                    env_results[name] = results
+
+        # Phase 4: Show results
+        if output == "json":
+            assert json_formatter is not None
+            group_results = []
+            for env_name in env_order:
+                env_path = env_name_map[env_name]
+                results = env_results.get(env_name, [])
+                uninstalled = len([r for r in results if r.uninstalled])
+                failed = len([r for r in results if not r.uninstalled])
+                group_results.append({
+                    "environment": env_path,
+                    "results": [{
+                        "name": r.name,
+                        "previous_version": str(r.previous_version) if r.previous_version else None,
+                        "uninstalled": r.uninstalled,
+                        "already_absent": r.already_absent,
+                        "failure_reason": r.failure_reason,
+                    } for r in results],
+                    "summary": {
+                        "total": len(results),
+                        "uninstalled": uninstalled,
+                        "failed": failed,
+                    },
+                })
+            print(json_formatter.format_group_uninstall_results(group_results))
+        else:
+            console.print()
+            print_group_uninstall_results_matrix(env_results, env_name_map, console=console)
+
+        total_failed = sum(
+            len([r for r in env_results.get(n, []) if not r.uninstalled])
+            for n in env_order
+        )
+        if total_failed:
+            sys.exit(1)
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        if ui:
+            ui.cleanup()
+        console.show_cursor(True)
+        sys.exit(130)
 
 
 def pipuu() -> None:

@@ -695,11 +695,11 @@ class TestInstallCommand:
         ]
         with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/b"]), \
              patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=[]), \
              patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
             runner.invoke(cli, ["install", "requests", "-g", "mygroup", "--yes"])
 
         assert mock_install.call_count == 2
-        # Verify python_path was set for each call
         paths = [call.kwargs["python_path"] for call in mock_install.call_args_list]
         assert "/python/a" in paths
         assert "/python/b" in paths
