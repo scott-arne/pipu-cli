@@ -11,7 +11,19 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from typing import TextIO
+from typing import IO, Optional, Protocol
+
+
+class SupportsWriteFlush(Protocol):
+    """Narrow writer protocol for streaming pip output.
+
+    Matches any object that can receive text chunks and flush them,
+    including ``sys.stdout``, ``io.StringIO``, and any caller-defined
+    ``write(text) -> int | None`` / ``flush() -> None`` implementation.
+    """
+
+    def write(self, text: str, /) -> int | None: ...
+    def flush(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -73,7 +85,7 @@ class InterruptToken:
                 pass
 
 
-def _drain(stream: TextIO, sink: list[str] | None, tee: TextIO | None) -> None:
+def _drain(stream: IO[str], sink: list[str] | None, tee: Optional[SupportsWriteFlush]) -> None:
     """Read ``stream`` line-by-line, append to ``sink``, optionally mirror to ``tee``.
 
     :param stream: File-like handle attached to the subprocess pipe.
@@ -127,7 +139,7 @@ def run_pip(
     argv: list[str],
     *,
     python_path: str | None = None,
-    output_stream: TextIO | None = None,
+    output_stream: Optional[SupportsWriteFlush] = None,
     timeout: int = 300,
     stream_output: bool = True,
     interrupt_token: InterruptToken | None = None,

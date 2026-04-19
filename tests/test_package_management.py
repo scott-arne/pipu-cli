@@ -2240,6 +2240,7 @@ def test_install_packages_timeout(mock_popen):
 
     # Create mock process that times out
     mock_process = mock_popen(returncode=0, stdout_lines=[], stderr_lines=[])
+    mock_process.poll.return_value = None
     mock_process.wait.side_effect = subprocess.TimeoutExpired("pip", 300)
 
     with patch("subprocess.Popen", return_value=mock_process):
@@ -2249,8 +2250,7 @@ def test_install_packages_timeout(mock_popen):
     assert result[0].name == "slow-pkg"
     assert result[0].upgraded is False
     assert result[0].version == Version("1.0.0")
-    # Verify kill was called
-    mock_process.kill.assert_called_once()
+    assert result[0].failure_reason == "Installation timed out"
 
 
 def test_install_packages_exception():
@@ -2949,7 +2949,7 @@ class TestPythonPathInstallation:
             )
         ]
 
-        with patch("pipu_cli.package_management.subprocess.Popen") as mock_popen, \
+        with patch("pipu_cli._subprocess.subprocess.Popen") as mock_popen, \
              patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
             mock_process = MagicMock()
             mock_process.stdout = MagicMock()
@@ -2957,6 +2957,7 @@ class TestPythonPathInstallation:
             mock_process.stderr = MagicMock()
             mock_process.stderr.readline = MagicMock(return_value="")
             mock_process.wait.return_value = 0
+            mock_process.returncode = 0
             mock_popen.return_value = mock_process
 
             mock_versions.return_value = {
@@ -2986,10 +2987,14 @@ class TestPythonPathInstallation:
             )
         ]
 
-        with patch("pipu_cli.package_management.subprocess.Popen") as mock_popen, \
+        with patch("pipu_cli._subprocess.subprocess.Popen") as mock_popen, \
              patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
             mock_process = MagicMock()
-            mock_process.communicate.return_value = ("Success", "")
+            mock_process.stdout = MagicMock()
+            mock_process.stdout.readline = MagicMock(return_value="")
+            mock_process.stderr = MagicMock()
+            mock_process.stderr.readline = MagicMock(return_value="")
+            mock_process.wait.return_value = 0
             mock_process.returncode = 0
             mock_popen.return_value = mock_process
 
@@ -3004,6 +3009,76 @@ class TestPythonPathInstallation:
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "/other/python"
         assert results[0].upgraded is True
+
+    def test_install_packages_interrupt_token_propagates(self):
+        """install_packages routes interrupt_token through run_pip's early-return branch."""
+        from pipu_cli._subprocess import InterruptToken
+        from pipu_cli.package_management import install_packages
+
+        token = InterruptToken()
+        token.set()
+
+        upgrade_packages = [
+            UpgradePackageInfo(
+                name="requests",
+                version=Version("2.28.0"),
+                upgradable=True,
+                latest_version=Version("2.31.0"),
+            )
+        ]
+
+        with patch("pipu_cli._subprocess.subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.stdout = MagicMock()
+            mock_process.stdout.readline = MagicMock(return_value="")
+            mock_process.stderr = MagicMock()
+            mock_process.stderr.readline = MagicMock(return_value="")
+            mock_process.wait.return_value = 0
+            mock_process.returncode = 0
+            mock_process.poll.return_value = 0
+            mock_popen.return_value = mock_process
+
+            results = install_packages(upgrade_packages, interrupt_token=token)
+
+        assert len(results) == 1
+        assert results[0].upgraded is False
+        assert results[0].failure_reason == "Installation interrupted"
+
+    def test_reinstall_editable_interrupt_token_propagates(self):
+        """reinstall_editable_packages routes interrupt_token through run_pip's early-return branch."""
+        from pipu_cli._subprocess import InterruptToken
+        from pipu_cli.package_management import reinstall_editable_packages
+
+        token = InterruptToken()
+        token.set()
+
+        editable_packages = [
+            UpgradePackageInfo(
+                name="my-pkg",
+                version=Version("0.1.0"),
+                upgradable=True,
+                latest_version=Version("0.2.0"),
+                is_editable=True,
+                editable_location="/home/user/my-pkg",
+            )
+        ]
+
+        with patch("pipu_cli._subprocess.subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.stdout = MagicMock()
+            mock_process.stdout.readline = MagicMock(return_value="")
+            mock_process.stderr = MagicMock()
+            mock_process.stderr.readline = MagicMock(return_value="")
+            mock_process.wait.return_value = 0
+            mock_process.returncode = 0
+            mock_process.poll.return_value = 0
+            mock_popen.return_value = mock_process
+
+            results = reinstall_editable_packages(editable_packages, interrupt_token=token)
+
+        assert len(results) == 1
+        assert results[0].upgraded is False
+        assert results[0].failure_reason == "Installation interrupted"
 
 
 # ============================================================================

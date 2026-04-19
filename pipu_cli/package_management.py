@@ -20,6 +20,8 @@ from pip._internal.network.session import PipSession
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.models.release_control import ReleaseControl
 
+from pipu_cli._subprocess import InterruptToken, PipResult, run_pip
+
 # Set up module logger
 logger = logging.getLogger(__name__)
 
@@ -1028,6 +1030,30 @@ def _stream_reader(
         pipe.close()
 
 
+def _make_failed_upgrade_results(
+    packages: List[UpgradePackageInfo],
+    reason: str,
+) -> List[UpgradedPackage]:
+    """Construct :class:`UpgradedPackage` entries for a batched install failure.
+
+    :param packages: The candidates that would have been upgraded.
+    :param reason: Failure reason attached to each result.
+    :returns: One :class:`UpgradedPackage` per input, all with ``upgraded=False``.
+    """
+    return [
+        UpgradedPackage(
+            name=pkg.name,
+            version=pkg.version,
+            upgraded=False,
+            previous_version=pkg.version,
+            is_editable=pkg.is_editable,
+            editable_location=pkg.editable_location,
+            failure_reason=reason,
+        )
+        for pkg in packages
+    ]
+
+
 def _get_remote_package_versions(
     python_path: str,
     canonical_names: List[str],
@@ -1094,7 +1120,8 @@ def install_packages(
     output_stream: Optional[OutputStream] = None,
     timeout: int = 300,
     version_constraints: Optional[Dict[str, str]] = None,
-    python_path: Optional[str] = None
+    python_path: Optional[str] = None,
+    interrupt_token: Optional[InterruptToken] = None,
 ) -> List[UpgradedPackage]:
     """
     Install/upgrade packages using pip.
@@ -1104,13 +1131,18 @@ def install_packages(
     it checks which packages were successfully upgraded by comparing installed
     versions with previous versions.
 
-    :param packages_to_upgrade: List of UpgradePackageInfo objects to upgrade
-    :param output_stream: Optional stream implementing write() and flush() for live progress updates
-    :param timeout: Timeout in seconds for the installation (default: 300)
-    :param version_constraints: Optional dict mapping package names (lowercase) to version specifiers (e.g., "==2.31.0")
-    :param python_path: Path to Python interpreter (default: None for current environment)
-    :returns: List of UpgradedPackage objects with upgrade status
-    :raises RuntimeError: If pip command cannot be executed
+    :param packages_to_upgrade: List of UpgradePackageInfo objects to upgrade.
+    :param output_stream: Optional stream implementing ``write()`` and ``flush()``
+        for live progress updates.
+    :param timeout: Timeout in seconds for the installation (default: 300).
+    :param version_constraints: Optional dict mapping package names (lowercase)
+        to version specifiers (e.g. ``"==2.31.0"``).
+    :param python_path: Path to Python interpreter (default: ``None`` for the
+        current environment).
+    :param interrupt_token: Optional cross-thread cancellation token. When set,
+        the pip subprocess is terminated and every candidate is returned with
+        ``failure_reason="Installation interrupted"``.
+    :returns: List of UpgradedPackage objects with upgrade status.
     """
     if not packages_to_upgrade:
         return []
@@ -1135,72 +1167,42 @@ def install_packages(
             # Just upgrade to latest
             package_specs.append(pkg.name)
 
-    executable = python_path if python_path is not None else sys.executable
-    cmd = [
-        executable, '-m', 'pip', 'install',
-        '--upgrade'
-    ] + package_specs
+    argv = ['-m', 'pip', 'install', '--upgrade'] + package_specs
 
-    process = None
     try:
         # Write initial message to output stream
         if output_stream:
             output_stream.write(f"Upgrading {len(package_specs)} package(s)...\n")
             output_stream.flush()
 
-        # Run pip install with real-time output streaming
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1  # Line-buffered
+        result: PipResult = run_pip(
+            argv,
+            python_path=python_path,
+            output_stream=output_stream,
+            timeout=timeout,
+            stream_output=True,
+            interrupt_token=interrupt_token,
         )
 
-        # Create threads for concurrent reading of stdout and stderr
-        lock = threading.Lock()
-        stderr_lines: List[str] = []
-        stdout_lines: List[str] = []
-        stdout_thread = threading.Thread(
-            target=_stream_reader,
-            args=(process.stdout, output_stream, lock, stdout_lines),
-            daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=_stream_reader,
-            args=(process.stderr, output_stream, lock, stderr_lines),
-            daemon=True
-        )
+        if result.timed_out:
+            if output_stream:
+                output_stream.write("ERROR: Timeout during package upgrade\n")
+                output_stream.flush()
+            logger.error("Timeout during package upgrade")
+            return _make_failed_upgrade_results(packages_to_upgrade, "Installation timed out")
 
-        # Start threads
-        stdout_thread.start()
-        stderr_thread.start()
+        if result.interrupted:
+            logger.warning("Package upgrade interrupted")
+            return _make_failed_upgrade_results(packages_to_upgrade, "Installation interrupted")
 
-        # Wait for threads to complete
-        stdout_thread.join()
-        stderr_thread.join()
-
-        # Wait for process to finish
-        returncode = process.wait(timeout=timeout)
-
-        # Check overall installation status
-        if returncode != 0:
-            # Entire installation failed
-            logger.warning(f"Package upgrade failed with return code {returncode}")
-            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
-            failure_msg = error_output or f"pip exit code {returncode}"
-            return [
-                UpgradedPackage(
-                    name=pkg.name,
-                    version=pkg.version,
-                    upgraded=False,
-                    previous_version=pkg.version,
-                    is_editable=pkg.is_editable,
-                    editable_location=pkg.editable_location,
-                    failure_reason=failure_msg,
-                )
-                for pkg in packages_to_upgrade
-            ]
+        if result.returncode != 0:
+            logger.warning(f"Package upgrade failed with return code {result.returncode}")
+            captured = (result.stderr or result.stdout or "").strip()
+            reason = (
+                f"pip exit code {result.returncode}: {captured[:500]}"
+                if captured else f"pip exit code {result.returncode}"
+            )
+            return _make_failed_upgrade_results(packages_to_upgrade, reason)
 
         # Installation succeeded - now determine which packages were actually upgraded
         if python_path is not None:
@@ -1248,81 +1250,48 @@ def install_packages(
 
         return results
 
-    except subprocess.TimeoutExpired:
-        # Timeout occurred - kill the process and ensure cleanup
-        if process is not None:
-            try:
-                process.kill()
-                process.wait()  # Ensure process is cleaned up
-            except Exception as e:
-                logger.warning(f"Error cleaning up timed-out process: {e}")
-
-        if output_stream:
-            output_stream.write("ERROR: Timeout during package upgrade\n")
-            output_stream.flush()
-
-        logger.error("Timeout during package upgrade")
-
-        # Mark all packages as not upgraded
-        return [
-            UpgradedPackage(
-                name=pkg.name,
-                version=pkg.version,
-                upgraded=False,
-                previous_version=pkg.version,
-                is_editable=pkg.is_editable,
-                editable_location=pkg.editable_location,
-                failure_reason="Installation timed out"
-            )
-            for pkg in packages_to_upgrade
-        ]
-
     except Exception as e:
-        # Other errors
+        # Non-subprocess errors (argv assembly, post-install version lookup, etc.)
         if output_stream:
             output_stream.write(f"ERROR: Failed to upgrade packages: {e}\n")
             output_stream.flush()
 
         logger.error(f"Error upgrading packages: {e}")
 
-        # Mark all packages as not upgraded
-        return [
-            UpgradedPackage(
-                name=pkg.name,
-                version=pkg.version,
-                upgraded=False,
-                previous_version=pkg.version,
-                is_editable=pkg.is_editable,
-                editable_location=pkg.editable_location,
-                failure_reason=f"Installation failed: {e}"
-            )
-            for pkg in packages_to_upgrade
-        ]
+        return _make_failed_upgrade_results(packages_to_upgrade, f"Installation failed: {e}")
 
 
 def reinstall_editable_packages(
     editable_packages: List[UpgradePackageInfo],
     output_stream: Optional[OutputStream] = None,
     timeout: int = 300,
-    python_path: Optional[str] = None
+    python_path: Optional[str] = None,
+    interrupt_token: Optional[InterruptToken] = None,
 ) -> List[UpgradedPackage]:
     """
     Reinstall editable packages to update their version metadata.
 
-    Uses `pip install --config-settings editable_mode=compat -e <path>` to reinstall
-    each editable package. This updates the package version in the environment
-    while maintaining the editable install.
+    Uses ``pip install --config-settings editable_mode=compat -e <path>`` to
+    reinstall each editable package. This updates the package version in the
+    environment while maintaining the editable install.
 
-    :param editable_packages: List of UpgradePackageInfo objects for editable packages
-    :param output_stream: Optional stream implementing write() and flush() for live progress updates
-    :param timeout: Timeout in seconds for each installation (default: 300)
-    :param python_path: Path to Python interpreter (default: None for current environment)
-    :returns: List of UpgradedPackage objects with upgrade status
+    :param editable_packages: List of UpgradePackageInfo objects for editable packages.
+    :param output_stream: Optional stream implementing ``write()`` and
+        ``flush()`` for live progress updates.
+    :param timeout: Timeout in seconds for each installation (default: 300).
+    :param python_path: Path to Python interpreter (default: ``None`` for the
+        current environment).
+    :param interrupt_token: Optional cross-thread cancellation token. When set,
+        the in-flight pip subprocess is terminated and the current package is
+        recorded with ``failure_reason="Installation interrupted"``. Remaining
+        packages in the list are then skipped. Skipped packages are omitted
+        from the result list entirely.
+    :returns: List of UpgradedPackage objects with upgrade status.
     """
     if not editable_packages:
         return []
 
-    results = []
+    results: List[UpgradedPackage] = []
 
     for pkg in editable_packages:
         if not pkg.editable_location:
@@ -1342,71 +1311,35 @@ def reinstall_editable_packages(
             output_stream.write(f"Reinstalling editable package: {pkg.name} from {pkg.editable_location}\n")
             output_stream.flush()
 
-        executable = python_path if python_path is not None else sys.executable
-        cmd = [
-            executable, '-m', 'pip', 'install',
+        argv = [
+            '-m', 'pip', 'install',
             '--no-build-isolation',
             '--config-settings', 'editable_mode=compat',
-            '-e', pkg.editable_location
+            '-e', pkg.editable_location,
         ]
 
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
+            result = run_pip(
+                argv,
+                python_path=python_path,
+                timeout=timeout,
+                stream_output=False,
+                interrupt_token=interrupt_token,
             )
 
-            # Read output
-            stdout, stderr = process.communicate(timeout=timeout)
-            returncode = process.returncode
-
-            if output_stream and stdout:
-                output_stream.write(stdout)
-            if output_stream and stderr:
-                output_stream.write(stderr)
+            # Spinner UI suppresses live streaming; mirror captured output once here
+            # so the debug log / caller sees what pip actually said.
+            if output_stream and result.stdout:
+                output_stream.write(result.stdout)
+            if output_stream and result.stderr:
+                output_stream.write(result.stderr)
             if output_stream:
                 output_stream.flush()
 
-            if returncode == 0:
-                # Get the new version after reinstall
-                canonical_name = canonicalize_name(pkg.name)
-                new_version = pkg.version  # Default to old version
-
-                if python_path is not None:
-                    remote_versions = _get_remote_package_versions(
-                        python_path, [canonical_name], timeout=30
-                    )
-                    if canonical_name in remote_versions:
-                        new_version = remote_versions[canonical_name]
-                else:
-                    env = get_default_environment()
-                    for dist in env.iter_all_distributions():
-                        dist_name = dist.metadata.get("name", "")
-                        if canonicalize_name(dist_name) == canonical_name:
-                            try:
-                                new_version = Version(str(dist.version))
-                            except InvalidVersion:
-                                pass
-                            break
-
-                # For editable packages, a successful pip install is sufficient
-                # to consider the reinstall successful. The version is determined
-                # by the local source, not PyPI, so it may not increase.
-                results.append(UpgradedPackage(
-                    name=pkg.name,
-                    version=new_version,
-                    upgraded=True,
-                    previous_version=pkg.version,
-                    is_editable=True,
-                    editable_location=pkg.editable_location
-                ))
-                logger.info(f"Reinstalled editable package {pkg.name}: {pkg.version} -> {new_version}")
-            else:
-                error_output = (stderr or stdout or "").strip()
-                failure_msg = error_output or f"pip exit code {returncode}"
+            if result.timed_out:
+                if output_stream:
+                    output_stream.write(f"ERROR: Timeout reinstalling {pkg.name}\n")
+                    output_stream.flush()
                 results.append(UpgradedPackage(
                     name=pkg.name,
                     version=pkg.version,
@@ -1414,24 +1347,75 @@ def reinstall_editable_packages(
                     previous_version=pkg.version,
                     is_editable=True,
                     editable_location=pkg.editable_location,
-                    failure_reason=failure_msg,
+                    failure_reason="Installation timed out",
+                ))
+                logger.error(f"Timeout reinstalling editable package {pkg.name}")
+                continue
+
+            if result.interrupted:
+                results.append(UpgradedPackage(
+                    name=pkg.name,
+                    version=pkg.version,
+                    upgraded=False,
+                    previous_version=pkg.version,
+                    is_editable=True,
+                    editable_location=pkg.editable_location,
+                    failure_reason="Installation interrupted",
+                ))
+                logger.warning(f"Interrupted reinstalling editable package {pkg.name}")
+                continue
+
+            if result.returncode != 0:
+                captured = (result.stderr or result.stdout or "").strip()
+                reason = (
+                    f"pip exit code {result.returncode}: {captured[:500]}"
+                    if captured else f"pip exit code {result.returncode}"
+                )
+                results.append(UpgradedPackage(
+                    name=pkg.name,
+                    version=pkg.version,
+                    upgraded=False,
+                    previous_version=pkg.version,
+                    is_editable=True,
+                    editable_location=pkg.editable_location,
+                    failure_reason=reason,
                 ))
                 logger.warning(f"Failed to reinstall editable package {pkg.name}")
+                continue
 
-        except subprocess.TimeoutExpired:
-            if output_stream:
-                output_stream.write(f"ERROR: Timeout reinstalling {pkg.name}\n")
-                output_stream.flush()
+            # Get the new version after reinstall
+            canonical_name = canonicalize_name(pkg.name)
+            new_version = pkg.version  # Default to old version
+
+            if python_path is not None:
+                remote_versions = _get_remote_package_versions(
+                    python_path, [canonical_name], timeout=30
+                )
+                if canonical_name in remote_versions:
+                    new_version = remote_versions[canonical_name]
+            else:
+                env = get_default_environment()
+                for dist in env.iter_all_distributions():
+                    dist_name = dist.metadata.get("name", "")
+                    if canonicalize_name(dist_name) == canonical_name:
+                        try:
+                            new_version = Version(str(dist.version))
+                        except InvalidVersion:
+                            pass
+                        break
+
+            # For editable packages, a successful pip install is sufficient
+            # to consider the reinstall successful. The version is determined
+            # by the local source, not PyPI, so it may not increase.
             results.append(UpgradedPackage(
                 name=pkg.name,
-                version=pkg.version,
-                upgraded=False,
+                version=new_version,
+                upgraded=True,
                 previous_version=pkg.version,
                 is_editable=True,
                 editable_location=pkg.editable_location,
-                failure_reason="Installation timed out"
             ))
-            logger.error(f"Timeout reinstalling editable package {pkg.name}")
+            logger.info(f"Reinstalled editable package {pkg.name}: {pkg.version} -> {new_version}")
 
         except Exception as e:
             if output_stream:
@@ -1444,7 +1428,7 @@ def reinstall_editable_packages(
                 previous_version=pkg.version,
                 is_editable=True,
                 editable_location=pkg.editable_location,
-                failure_reason=f"Installation failed: {e}"
+                failure_reason=f"Installation failed: {e}",
             ))
             logger.error(f"Error reinstalling editable package {pkg.name}: {e}")
 
