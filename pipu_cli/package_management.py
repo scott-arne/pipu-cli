@@ -361,6 +361,101 @@ def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
     return constrained_dependencies
 
 
+def _build_pip_session(
+    *, timeout: int, include_prereleases: bool = False,
+) -> tuple[PipSession, PackageFinder]:
+    """Construct a pip network session and a configured package finder.
+
+    Centralizes the Configuration / PipSession / PackageFinder wiring
+    used by both the parallel and serial version-probing code paths.
+
+    :param timeout: Network timeout in seconds, applied to ``session.timeout``.
+    :param include_prereleases: When ``True``, the finder allows prereleases
+        via :class:`ReleaseControl` ``{":all:"}``.
+    :returns: The ``(session, finder)`` pair.
+    :raises ConnectionError: If :class:`PipSession` construction fails.
+    """
+    config: Optional[Configuration]
+    try:
+        config = Configuration(isolated=False, load_only=None)
+        config.load()
+    except Exception as e:
+        logger.warning(f"Could not load pip configuration: {e}")
+        config = None
+
+    index_url: Optional[str] = None
+    if config:
+        try:
+            index_url = config.get_value("global.index-url")
+        except Exception:
+            pass
+    index_url = index_url or "https://pypi.org/simple/"
+
+    extra_index_urls: List[str] = []
+    if config:
+        try:
+            raw_extra_urls = config.get_value("global.extra-index-url")
+            if raw_extra_urls:
+                if isinstance(raw_extra_urls, str):
+                    extra_index_urls = [
+                        url.strip()
+                        for url in raw_extra_urls.split('\n')
+                        if url.strip() and not url.strip().startswith('#')
+                    ]
+                elif isinstance(raw_extra_urls, list):
+                    extra_index_urls = raw_extra_urls
+        except Exception:
+            pass
+
+    all_index_urls = [index_url] + extra_index_urls
+
+    trusted_hosts: List[str] = []
+    if config:
+        try:
+            raw_trusted_hosts = config.get_value("global.trusted-host")
+            if raw_trusted_hosts:
+                if isinstance(raw_trusted_hosts, str):
+                    trusted_hosts = [
+                        host.strip()
+                        for host in raw_trusted_hosts.split('\n')
+                        if host.strip() and not host.strip().startswith('#')
+                    ]
+                elif isinstance(raw_trusted_hosts, list):
+                    trusted_hosts = raw_trusted_hosts
+        except Exception:
+            pass
+
+    try:
+        session = PipSession()
+        session.timeout = timeout
+        for host in trusted_hosts:
+            host = host.strip()
+            if host:
+                session.add_trusted_host(host, source="pip configuration")
+    except Exception as e:
+        raise ConnectionError(f"Failed to create network session: {e}") from e
+
+    release_control = ReleaseControl(all_releases={":all:"}) if include_prereleases else None
+    selection_prefs = SelectionPreferences(
+        allow_yanked=False,
+        release_control=release_control,
+    )
+    search_scope = SearchScope.create(
+        find_links=[],
+        index_urls=all_index_urls,
+        no_index=False,
+    )
+    link_collector = LinkCollector(
+        session=session,
+        search_scope=search_scope,
+    )
+    package_finder = PackageFinder.create(
+        link_collector=link_collector,
+        selection_prefs=selection_prefs,
+    )
+    return session, package_finder
+
+
 def get_latest_versions_parallel(
     installed_packages: List[InstalledPackage],
     timeout: int = 10,
@@ -386,98 +481,8 @@ def get_latest_versions_parallel(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Load pip configuration to get index URLs and trusted hosts
-    try:
-        config = Configuration(isolated=False, load_only=None)
-        config.load()
-    except Exception as e:
-        logger.warning(f"Could not load pip configuration: {e}")
-        config = None
-
-    # Get index URL (primary package index)
-    index_url = None
-    if config:
-        try:
-            index_url = config.get_value("global.index-url")
-        except Exception:
-            pass
-    index_url = index_url or "https://pypi.org/simple/"
-
-    # Get extra index URLs (additional package indexes)
-    extra_index_urls = []
-    if config:
-        try:
-            raw_extra_urls = config.get_value("global.extra-index-url")
-            if raw_extra_urls:
-                # Handle both string and list formats
-                if isinstance(raw_extra_urls, str):
-                    # Split by newlines and filter out comments/empty lines
-                    extra_index_urls = [
-                        url.strip()
-                        for url in raw_extra_urls.split('\n')
-                        if url.strip() and not url.strip().startswith('#')
-                    ]
-                elif isinstance(raw_extra_urls, list):
-                    extra_index_urls = raw_extra_urls
-        except Exception:
-            pass
-
-    # Combine all index URLs
-    all_index_urls = [index_url] + extra_index_urls
-
-    # Get trusted hosts (hosts that don't require HTTPS verification)
-    trusted_hosts = []
-    if config:
-        try:
-            raw_trusted_hosts = config.get_value("global.trusted-host")
-            if raw_trusted_hosts:
-                # Handle both string and list formats
-                if isinstance(raw_trusted_hosts, str):
-                    # Split by newlines and filter out comments/empty lines
-                    trusted_hosts = [
-                        host.strip()
-                        for host in raw_trusted_hosts.split('\n')
-                        if host.strip() and not host.strip().startswith('#')
-                    ]
-                elif isinstance(raw_trusted_hosts, list):
-                    trusted_hosts = raw_trusted_hosts
-        except Exception:
-            pass
-
-    # Create pip session for network requests
-    try:
-        session = PipSession()
-        session.timeout = timeout
-
-        # Add trusted hosts to session
-        for host in trusted_hosts:
-            host = host.strip()
-            if host:
-                session.add_trusted_host(host, source="pip configuration")
-    except Exception as e:
-        raise ConnectionError(f"Failed to create network session: {e}") from e
-
-    # Set up package finder with configured indexes
-    release_control = ReleaseControl(all_releases={":all:"}) if include_prereleases else None
-    selection_prefs = SelectionPreferences(
-        allow_yanked=False,
-        release_control=release_control
-    )
-
-    search_scope = SearchScope.create(
-        find_links=[],
-        index_urls=all_index_urls,
-        no_index=False
-    )
-
-    link_collector = LinkCollector(
-        session=session,
-        search_scope=search_scope
-    )
-
-    package_finder = PackageFinder.create(
-        link_collector=link_collector,
-        selection_prefs=selection_prefs
+    session, package_finder = _build_pip_session(
+        timeout=timeout, include_prereleases=include_prereleases,
     )
 
     # Thread-safe result storage and progress tracking
@@ -582,98 +587,8 @@ def get_latest_versions(
     :raises ConnectionError: If unable to connect to package indexes
     :raises RuntimeError: If unable to load pip configuration
     """
-    # Load pip configuration to get index URLs and trusted hosts
-    try:
-        config = Configuration(isolated=False, load_only=None)
-        config.load()
-    except Exception as e:
-        logger.warning(f"Could not load pip configuration: {e}")
-        config = None
-
-    # Get index URL (primary package index)
-    index_url = None
-    if config:
-        try:
-            index_url = config.get_value("global.index-url")
-        except Exception:
-            pass
-    index_url = index_url or "https://pypi.org/simple/"
-
-    # Get extra index URLs (additional package indexes)
-    extra_index_urls = []
-    if config:
-        try:
-            raw_extra_urls = config.get_value("global.extra-index-url")
-            if raw_extra_urls:
-                # Handle both string and list formats
-                if isinstance(raw_extra_urls, str):
-                    # Split by newlines and filter out comments/empty lines
-                    extra_index_urls = [
-                        url.strip()
-                        for url in raw_extra_urls.split('\n')
-                        if url.strip() and not url.strip().startswith('#')
-                    ]
-                elif isinstance(raw_extra_urls, list):
-                    extra_index_urls = raw_extra_urls
-        except Exception:
-            pass
-
-    # Combine all index URLs
-    all_index_urls = [index_url] + extra_index_urls
-
-    # Get trusted hosts (hosts that don't require HTTPS verification)
-    trusted_hosts = []
-    if config:
-        try:
-            raw_trusted_hosts = config.get_value("global.trusted-host")
-            if raw_trusted_hosts:
-                # Handle both string and list formats
-                if isinstance(raw_trusted_hosts, str):
-                    # Split by newlines and filter out comments/empty lines
-                    trusted_hosts = [
-                        host.strip()
-                        for host in raw_trusted_hosts.split('\n')
-                        if host.strip() and not host.strip().startswith('#')
-                    ]
-                elif isinstance(raw_trusted_hosts, list):
-                    trusted_hosts = raw_trusted_hosts
-        except Exception:
-            pass
-
-    # Create pip session for network requests
-    try:
-        session = PipSession()
-        session.timeout = timeout
-
-        # Add trusted hosts to session
-        for host in trusted_hosts:
-            host = host.strip()
-            if host:
-                session.add_trusted_host(host, source="pip configuration")
-    except Exception as e:
-        raise ConnectionError(f"Failed to create network session: {e}") from e
-
-    # Set up package finder with configured indexes
-    release_control = ReleaseControl(all_releases={":all:"}) if include_prereleases else None
-    selection_prefs = SelectionPreferences(
-        allow_yanked=False,
-        release_control=release_control
-    )
-
-    search_scope = SearchScope.create(
-        find_links=[],
-        index_urls=all_index_urls,
-        no_index=False
-    )
-
-    link_collector = LinkCollector(
-        session=session,
-        search_scope=search_scope
-    )
-
-    package_finder = PackageFinder.create(
-        link_collector=link_collector,
-        selection_prefs=selection_prefs
+    session, package_finder = _build_pip_session(
+        timeout=timeout, include_prereleases=include_prereleases,
     )
 
     # Query latest version for each package
