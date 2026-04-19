@@ -18,6 +18,7 @@ from pipu_cli.package_management import (
     resolve_upgradable_packages,
     install_packages,
     run_pip_install,
+    run_pip_uninstall,
     _get_editable_packages,
     _extract_constrained_dependencies,
 )
@@ -2615,115 +2616,6 @@ def test_install_packages_output_stream_exception_error():
 # Tests for real-time streaming functionality
 # ============================================================================
 
-def test_stream_reader_writes_lines_to_stream():
-    """Test that _stream_reader correctly reads and writes lines."""
-    from io import StringIO
-    import threading
-    from pipu_cli.package_management import _stream_reader
-
-    # Create mock pipe
-    mock_pipe = Mock()
-    lines = ["Line 1\n", "Line 2\n", "Line 3\n", ""]
-    mock_pipe.readline = Mock(side_effect=lines)
-    mock_pipe.close = Mock()
-
-    # Create output stream
-    output_stream = StringIO()
-    lock = threading.Lock()
-
-    # Run stream reader
-    _stream_reader(mock_pipe, output_stream, lock)
-
-    # Verify output
-    output = output_stream.getvalue()
-    assert "Line 1\n" in output
-    assert "Line 2\n" in output
-    assert "Line 3\n" in output
-
-    # Verify pipe was closed
-    mock_pipe.close.assert_called_once()
-
-
-def test_stream_reader_handles_none_stream():
-    """Test that _stream_reader handles None stream gracefully."""
-    import threading
-    from pipu_cli.package_management import _stream_reader
-
-    # Create mock pipe
-    mock_pipe = Mock()
-    lines = ["Line 1\n", "Line 2\n", ""]
-    mock_pipe.readline = Mock(side_effect=lines)
-    mock_pipe.close = Mock()
-
-    lock = threading.Lock()
-
-    # Run stream reader with None stream - should not crash
-    _stream_reader(mock_pipe, None, lock)
-
-    # Verify pipe was still closed
-    mock_pipe.close.assert_called_once()
-
-
-def test_stream_reader_handles_pipe_exception():
-    """Test that _stream_reader handles exceptions during reading."""
-    from io import StringIO
-    import threading
-    from pipu_cli.package_management import _stream_reader
-
-    # Create mock pipe that raises exception
-    mock_pipe = Mock()
-    mock_pipe.readline = Mock(side_effect=IOError("Pipe broken"))
-    mock_pipe.close = Mock()
-
-    output_stream = StringIO()
-    lock = threading.Lock()
-
-    # Should not crash
-    _stream_reader(mock_pipe, output_stream, lock)
-
-    # Verify pipe was closed even after exception
-    mock_pipe.close.assert_called_once()
-
-
-def test_stream_reader_thread_safe_writing():
-    """Test that concurrent writes are thread-safe."""
-    from io import StringIO
-    import threading
-    from pipu_cli.package_management import _stream_reader
-
-    output_stream = StringIO()
-    lock = threading.Lock()
-
-    # Create two mock pipes
-    mock_pipe1 = Mock()
-    mock_pipe1.readline = Mock(side_effect=["Thread1-Line1\n", "Thread1-Line2\n", ""])
-    mock_pipe1.close = Mock()
-
-    mock_pipe2 = Mock()
-    mock_pipe2.readline = Mock(side_effect=["Thread2-Line1\n", "Thread2-Line2\n", ""])
-    mock_pipe2.close = Mock()
-
-    # Run both readers concurrently
-    thread1 = threading.Thread(target=_stream_reader, args=(mock_pipe1, output_stream, lock))
-    thread2 = threading.Thread(target=_stream_reader, args=(mock_pipe2, output_stream, lock))
-
-    thread1.start()
-    thread2.start()
-
-    thread1.join()
-    thread2.join()
-
-    # Verify all lines were written (order may vary)
-    output = output_stream.getvalue()
-    assert "Thread1-Line1\n" in output
-    assert "Thread1-Line2\n" in output
-    assert "Thread2-Line1\n" in output
-    assert "Thread2-Line2\n" in output
-
-    # Verify both pipes were closed
-    mock_pipe1.close.assert_called_once()
-    mock_pipe2.close.assert_called_once()
-
 
 def test_install_packages_streams_output_progressively(mock_popen):
     """Test that output is written progressively, not all at once."""
@@ -3181,6 +3073,7 @@ class TestRunPipInstall:
         mock_process.stderr.readline = Mock(side_effect=["", ""])
         mock_process.stderr.close = Mock()
         mock_process.wait.return_value = 0
+        mock_process.returncode = 0
 
         with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process), \
              patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
@@ -3207,6 +3100,7 @@ class TestRunPipInstall:
         mock_process.stderr.readline = Mock(side_effect=["", ""])
         mock_process.stderr.close = Mock()
         mock_process.wait.return_value = 1
+        mock_process.returncode = 1
 
         with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process), \
              patch("pipu_cli.package_management._get_local_package_versions", return_value={}):
@@ -3227,6 +3121,7 @@ class TestRunPipInstall:
         mock_process.stderr.readline = Mock(side_effect=["", ""])
         mock_process.stderr.close = Mock()
         mock_process.wait.return_value = 0
+        mock_process.returncode = 0
 
         with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
              patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
@@ -3246,3 +3141,170 @@ class TestRunPipInstall:
         """Empty package list returns empty results."""
         results = run_pip_install([])
         assert results == []
+
+
+# ============================================================================
+# Tests for run_pip_install and run_pip_uninstall via shared run_pip helper
+# ============================================================================
+
+
+class TestRunPipInstallAndUninstallViaRunPip:
+    """Verify that run_pip_install and run_pip_uninstall delegate to run_pip.
+
+    These tests monkeypatch ``pipu_cli.package_management.run_pip`` so we can
+    craft :class:`PipResult` return values without spinning up real subprocesses,
+    and then assert that each function translates those results into the
+    documented ``InstalledResult`` / ``UninstalledResult`` shape.
+    """
+
+    # ---- run_pip_install ---------------------------------------------------
+
+    def test_run_pip_install_success(self):
+        """A zero-exit PipResult yields installed=True and no failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=0, stdout="", stderr="")
+        with patch("pipu_cli.package_management.run_pip", return_value=fake) as mock_rp, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+            mock_versions.side_effect = [
+                {},
+                {"requests": Version("2.31.0")},
+            ]
+
+            results = run_pip_install(["requests"])
+
+        mock_rp.assert_called_once()
+        assert len(results) == 1
+        assert results[0].installed is True
+        assert results[0].failure_reason is None
+        assert results[0].version == Version("2.31.0")
+
+    def test_run_pip_install_nonzero(self):
+        """Non-zero returncode yields failure_reason including the captured stderr."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=1, stdout="", stderr="ERROR: No matching distribution")
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch("pipu_cli.package_management._get_local_package_versions", return_value={}):
+            results = run_pip_install(["badpkg"])
+
+        assert len(results) == 1
+        assert results[0].installed is False
+        assert results[0].failure_reason == "pip exit code 1: ERROR: No matching distribution"
+
+    def test_run_pip_install_timeout(self):
+        """timed_out=True PipResult yields 'Installation timed out' failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=-1, stdout="", stderr="", timed_out=True)
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch("pipu_cli.package_management._get_local_package_versions", return_value={}):
+            results = run_pip_install(["requests"])
+
+        assert len(results) == 1
+        assert results[0].installed is False
+        assert results[0].failure_reason == "Installation timed out"
+
+    def test_run_pip_install_interrupted(self):
+        """interrupted=True PipResult yields 'Installation interrupted' failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=-1, stdout="", stderr="", interrupted=True)
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch("pipu_cli.package_management._get_local_package_versions", return_value={}):
+            results = run_pip_install(["requests"])
+
+        assert len(results) == 1
+        assert results[0].installed is False
+        assert results[0].failure_reason == "Installation interrupted"
+
+    # ---- run_pip_uninstall -------------------------------------------------
+
+    def test_run_pip_uninstall_success(self):
+        """A zero-exit PipResult yields uninstalled=True and no failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=0, stdout="", stderr="")
+        with patch("pipu_cli.package_management.run_pip", return_value=fake) as mock_rp, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+            # Pre: installed; Post: absent
+            mock_versions.side_effect = [
+                {"requests": Version("2.31.0")},
+                {},
+            ]
+
+            results = run_pip_uninstall(["requests"])
+
+        mock_rp.assert_called_once()
+        assert len(results) == 1
+        assert results[0].uninstalled is True
+        assert results[0].failure_reason is None
+        assert results[0].previous_version == Version("2.31.0")
+
+    def test_run_pip_uninstall_nonzero(self):
+        """Non-zero returncode yields failure_reason including the captured stderr."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=1, stdout="", stderr="ERROR: Cannot uninstall")
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch(
+                "pipu_cli.package_management._get_local_package_versions",
+                return_value={"requests": Version("2.31.0")},
+             ):
+            results = run_pip_uninstall(["requests"])
+
+        assert len(results) == 1
+        assert results[0].uninstalled is False
+        assert results[0].failure_reason == "pip exit code 1: ERROR: Cannot uninstall"
+
+    def test_run_pip_uninstall_timeout(self):
+        """timed_out=True PipResult yields 'Uninstall timed out' failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=-1, stdout="", stderr="", timed_out=True)
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch(
+                "pipu_cli.package_management._get_local_package_versions",
+                return_value={"requests": Version("2.31.0")},
+             ):
+            results = run_pip_uninstall(["requests"])
+
+        assert len(results) == 1
+        assert results[0].uninstalled is False
+        assert results[0].failure_reason == "Uninstall timed out"
+
+    def test_run_pip_uninstall_interrupted(self):
+        """interrupted=True PipResult yields 'Uninstall interrupted' failure_reason."""
+        from pipu_cli._subprocess import PipResult
+
+        fake = PipResult(returncode=-1, stdout="", stderr="", interrupted=True)
+        with patch("pipu_cli.package_management.run_pip", return_value=fake), \
+             patch(
+                "pipu_cli.package_management._get_local_package_versions",
+                return_value={"requests": Version("2.31.0")},
+             ):
+            results = run_pip_uninstall(["requests"])
+
+        assert len(results) == 1
+        assert results[0].uninstalled is False
+        assert results[0].failure_reason == "Uninstall interrupted"
+
+    def test_run_pip_uninstall_not_installed_precheck(self):
+        """If every requested package is absent pre-call, skip the pip invocation entirely.
+
+        The precheck uses _get_local_package_versions (or the remote equivalent).
+        When the package is missing, run_pip_uninstall must short-circuit to
+        UninstalledResult(uninstalled=True, already_absent=True) WITHOUT invoking run_pip.
+        """
+        with patch("pipu_cli.package_management.run_pip") as mock_rp, \
+             patch(
+                "pipu_cli.package_management._get_local_package_versions",
+                return_value={},
+             ):
+            results = run_pip_uninstall(["requests"])
+
+        mock_rp.assert_not_called()
+        assert len(results) == 1
+        assert results[0].uninstalled is True
+        assert results[0].already_absent is True
+        assert results[0].previous_version is None

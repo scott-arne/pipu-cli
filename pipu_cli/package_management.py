@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, IO, List, Optional, Protocol, Callable, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Callable, runtime_checkable
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version, InvalidVersion
@@ -1002,34 +1002,6 @@ def resolve_upgradable_packages_with_reasons(
     return upgradable, blocked
 
 
-def _stream_reader(
-    pipe: IO[str],
-    stream: Optional[OutputStream],
-    lock: threading.Lock,
-    capture: Optional[List[str]] = None,
-) -> None:
-    """Read lines from a pipe and write to a stream with thread-safe locking.
-
-    :param pipe: Input pipe to read from (stdout or stderr from subprocess)
-    :param stream: Output stream to write to (or None to discard)
-    :param lock: Threading lock for synchronized writes
-    :param capture: Optional list to append lines to for later inspection
-    """
-    try:
-        for line in iter(pipe.readline, ''):
-            if line:
-                if capture is not None:
-                    capture.append(line)
-                if stream:
-                    with lock:
-                        stream.write(line)
-                        stream.flush()
-    except Exception as e:
-        logger.warning(f"Error reading from pipe: {e}")
-    finally:
-        pipe.close()
-
-
 def _make_failed_upgrade_results(
     packages: List[UpgradePackageInfo],
     reason: str,
@@ -1474,11 +1446,14 @@ def run_pip_install(
     timeout: int = 300,
     python_path: Optional[str] = None,
     pre: bool = False,
+    interrupt_token: Optional[InterruptToken] = None,
 ) -> List[InstalledResult]:
     """Install packages using pip.
 
     Wraps ``pip install`` (with ``-U`` by default) and reports what was
-    installed, updated, or left unchanged.
+    installed, updated, or left unchanged. Delegates subprocess lifecycle,
+    output streaming, timeout enforcement, and cancellation to
+    :func:`pipu_cli._subprocess.run_pip`.
 
     :param package_specs: Package specifications (e.g. ``["requests", "numpy==1.24"]``)
     :param upgrade: Add ``-U`` flag to pip install (default: True)
@@ -1486,6 +1461,9 @@ def run_pip_install(
     :param timeout: Subprocess timeout in seconds (default: 300)
     :param python_path: Path to Python interpreter for remote environments
     :param pre: Include pre-release versions
+    :param interrupt_token: Optional cross-thread cancellation token. When set,
+        the pip subprocess is terminated and every candidate is returned with
+        ``failure_reason="Installation interrupted"``.
     :returns: List of InstalledResult objects describing the outcome
     """
     if not package_specs:
@@ -1502,59 +1480,59 @@ def run_pip_install(
     else:
         pre_versions = _get_local_package_versions(canonical_names)
 
-    # Build pip command
-    executable = python_path if python_path is not None else sys.executable
-    cmd = [executable, '-m', 'pip', 'install']
-    if upgrade:
-        cmd.append('-U')
-    if pre:
-        cmd.append('--pre')
-    cmd.extend(package_specs)
+    def _failed_results(reason: str) -> List[InstalledResult]:
+        return [
+            InstalledResult(
+                name=name_to_spec[cn],
+                version=pre_versions.get(cn, Version("0")),
+                installed=False,
+                previous_version=pre_versions.get(cn),
+                failure_reason=reason,
+            )
+            for cn in canonical_names
+        ]
 
-    process = None
+    # Build pip argv (python interpreter is supplied by run_pip)
+    argv: List[str] = ['-m', 'pip', 'install']
+    if upgrade:
+        argv.append('-U')
+    if pre:
+        argv.append('--pre')
+    argv.extend(package_specs)
+
     try:
         if output_stream:
             output_stream.write(f"Installing {len(package_specs)} package(s)...\n")
             output_stream.flush()
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        result: PipResult = run_pip(
+            argv,
+            python_path=python_path,
+            output_stream=output_stream,
+            timeout=timeout,
+            stream_output=True,
+            interrupt_token=interrupt_token,
         )
 
-        lock = threading.Lock()
-        stderr_lines: List[str] = []
-        stdout_lines: List[str] = []
-        stdout_thread = threading.Thread(
-            target=_stream_reader, args=(process.stdout, output_stream, lock, stdout_lines), daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=_stream_reader, args=(process.stderr, output_stream, lock, stderr_lines), daemon=True
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-        stdout_thread.join()
-        stderr_thread.join()
+        if result.timed_out:
+            if output_stream:
+                output_stream.write("ERROR: Timeout during package installation\n")
+                output_stream.flush()
+            logger.warning("Timeout during package installation")
+            return _failed_results("Installation timed out")
 
-        returncode = process.wait(timeout=timeout)
+        if result.interrupted:
+            logger.warning("Package installation interrupted")
+            return _failed_results("Installation interrupted")
 
-        if returncode != 0:
-            logger.warning(f"pip install failed with return code {returncode}")
-            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
-            failure_msg = error_output or f"pip exit code {returncode}"
-            return [
-                InstalledResult(
-                    name=name_to_spec[cn],
-                    version=pre_versions.get(cn, Version("0")),
-                    installed=False,
-                    previous_version=pre_versions.get(cn),
-                    failure_reason=failure_msg,
-                )
-                for cn in canonical_names
-            ]
+        if result.returncode != 0:
+            logger.warning(f"pip install failed with return code {result.returncode}")
+            captured = (result.stderr or result.stdout or "").strip()
+            reason = (
+                f"pip exit code {result.returncode}: {captured[:500]}"
+                if captured else f"pip exit code {result.returncode}"
+            )
+            return _failed_results(reason)
 
         # Snapshot post-install versions
         if python_path is not None:
@@ -1587,46 +1565,15 @@ def run_pip_install(
 
         return results
 
-    except subprocess.TimeoutExpired:
-        if process is not None:
-            try:
-                process.kill()
-                process.wait()
-            except Exception as e:
-                logger.warning(f"Error cleaning up timed-out process: {e}")
-
-        if output_stream:
-            output_stream.write("ERROR: Timeout during package installation\n")
-            output_stream.flush()
-
-        return [
-            InstalledResult(
-                name=name_to_spec[cn],
-                version=pre_versions.get(cn, Version("0")),
-                installed=False,
-                previous_version=pre_versions.get(cn),
-                failure_reason="Installation timed out",
-            )
-            for cn in canonical_names
-        ]
-
     except Exception as e:
+        # Non-subprocess errors (argv assembly, post-install version lookup, etc.)
         if output_stream:
             output_stream.write(f"ERROR: Failed to install packages: {e}\n")
             output_stream.flush()
 
         logger.error(f"Error installing packages: {e}")
 
-        return [
-            InstalledResult(
-                name=name_to_spec[cn],
-                version=pre_versions.get(cn, Version("0")),
-                installed=False,
-                previous_version=pre_versions.get(cn),
-                failure_reason=f"Installation failed: {e}",
-            )
-            for cn in canonical_names
-        ]
+        return _failed_results(f"Installation failed: {e}")
 
 
 def run_pip_uninstall(
@@ -1634,13 +1581,23 @@ def run_pip_uninstall(
     output_stream: Optional[OutputStream] = None,
     timeout: int = 300,
     python_path: Optional[str] = None,
+    interrupt_token: Optional[InterruptToken] = None,
 ) -> List[UninstalledResult]:
     """Uninstall packages using pip.
+
+    Delegates subprocess lifecycle, output streaming, timeout enforcement,
+    and cancellation to :func:`pipu_cli._subprocess.run_pip`. Packages that
+    are already absent at the time of the call are short-circuited to
+    ``UninstalledResult(uninstalled=True, already_absent=True)`` without
+    invoking pip.
 
     :param package_names: Package names to uninstall.
     :param output_stream: Optional stream for real-time pip output.
     :param timeout: Subprocess timeout in seconds (default: 300).
     :param python_path: Path to Python interpreter for remote environments.
+    :param interrupt_token: Optional cross-thread cancellation token. When set,
+        the pip subprocess is terminated and every remaining candidate is
+        returned with ``failure_reason="Uninstall interrupted"``.
     :returns: List of UninstalledResult objects describing the outcome.
     """
     if not package_names:
@@ -1680,53 +1637,54 @@ def run_pip_uninstall(
     else:
         partial_results = []
 
-    executable = python_path if python_path is not None else sys.executable
-    cmd = [executable, '-m', 'pip', 'uninstall', '-y']
-    cmd.extend([name_to_orig[cn] for cn in canonical_names])
+    def _failed_results(reason: str) -> List[UninstalledResult]:
+        return partial_results + [
+            UninstalledResult(
+                name=name_to_orig[cn],
+                previous_version=pre_versions.get(cn),
+                uninstalled=False,
+                failure_reason=reason,
+            )
+            for cn in canonical_names
+        ]
 
-    process = None
+    # Build pip argv (python interpreter is supplied by run_pip)
+    argv: List[str] = ['-m', 'pip', 'uninstall', '-y']
+    argv.extend([name_to_orig[cn] for cn in canonical_names])
+
     try:
         if output_stream:
             output_stream.write(f"Uninstalling {len(canonical_names)} package(s)...\n")
             output_stream.flush()
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        result: PipResult = run_pip(
+            argv,
+            python_path=python_path,
+            output_stream=output_stream,
+            timeout=timeout,
+            stream_output=True,
+            interrupt_token=interrupt_token,
         )
 
-        lock = threading.Lock()
-        stderr_lines: List[str] = []
-        stdout_lines: List[str] = []
-        stdout_thread = threading.Thread(
-            target=_stream_reader, args=(process.stdout, output_stream, lock, stdout_lines), daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=_stream_reader, args=(process.stderr, output_stream, lock, stderr_lines), daemon=True
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-        stdout_thread.join()
-        stderr_thread.join()
+        if result.timed_out:
+            if output_stream:
+                output_stream.write("ERROR: Timeout during package uninstallation\n")
+                output_stream.flush()
+            logger.warning("Timeout during package uninstallation")
+            return _failed_results("Uninstall timed out")
 
-        returncode = process.wait(timeout=timeout)
+        if result.interrupted:
+            logger.warning("Package uninstallation interrupted")
+            return _failed_results("Uninstall interrupted")
 
-        if returncode != 0:
-            logger.warning(f"pip uninstall failed with return code {returncode}")
-            error_output = "".join(stderr_lines).strip() or "".join(stdout_lines).strip()
-            failure_msg = error_output or f"pip exit code {returncode}"
-            return partial_results + [
-                UninstalledResult(
-                    name=name_to_orig[cn],
-                    previous_version=pre_versions.get(cn),
-                    uninstalled=False,
-                    failure_reason=failure_msg,
-                )
-                for cn in canonical_names
-            ]
+        if result.returncode != 0:
+            logger.warning(f"pip uninstall failed with return code {result.returncode}")
+            captured = (result.stderr or result.stdout or "").strip()
+            reason = (
+                f"pip exit code {result.returncode}: {captured[:500]}"
+                if captured else f"pip exit code {result.returncode}"
+            )
+            return _failed_results(reason)
 
         if python_path is not None:
             post_versions = _get_remote_package_versions(python_path, canonical_names, timeout=30)
@@ -1751,41 +1709,12 @@ def run_pip_uninstall(
 
         return results
 
-    except subprocess.TimeoutExpired:
-        if process is not None:
-            try:
-                process.kill()
-                process.wait()
-            except Exception as e:
-                logger.warning(f"Error cleaning up timed-out process: {e}")
-
-        if output_stream:
-            output_stream.write("ERROR: Timeout during package uninstallation\n")
-            output_stream.flush()
-
-        return partial_results + [
-            UninstalledResult(
-                name=name_to_orig[cn],
-                previous_version=pre_versions.get(cn),
-                uninstalled=False,
-                failure_reason="Uninstallation timed out",
-            )
-            for cn in canonical_names
-        ]
-
     except Exception as e:
+        # Non-subprocess errors (argv assembly, post-uninstall version lookup, etc.)
         if output_stream:
             output_stream.write(f"ERROR: Failed to uninstall packages: {e}\n")
             output_stream.flush()
 
         logger.error(f"Error uninstalling packages: {e}")
 
-        return partial_results + [
-            UninstalledResult(
-                name=name_to_orig[cn],
-                previous_version=pre_versions.get(cn),
-                uninstalled=False,
-                failure_reason=f"Uninstallation failed: {e}",
-            )
-            for cn in canonical_names
-        ]
+        return _failed_results(f"Uninstallation failed: {e}")
