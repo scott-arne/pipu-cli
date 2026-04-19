@@ -21,10 +21,10 @@ from rich.table import Table
 from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
-    _parse_package_name,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
+    parse_package_spec,
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
     reinstall_editable_packages,
@@ -72,21 +72,6 @@ from pipu_cli.cache import (
 click.rich_click.USE_RICH_MARKUP = True
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
-
-
-def parse_package_spec(spec: str) -> tuple[str, Optional[str]]:
-    """Parse a package specification like 'requests==2.31.0' or 'requests>=2.30'.
-
-    :param spec: Package specification string
-    :returns: Tuple of (package_name, version_constraint or None)
-    """
-    # Common specifier patterns (check longest operators first to avoid partial matches)
-    for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
-        if op in spec:
-            parts = spec.split(op, 1)
-            return (parts[0].strip(), op + parts[1].strip())
-
-    return (spec.strip(), None)
 
 
 @click.group(invoke_without_command=True)
@@ -472,12 +457,12 @@ def _step3_resolve_packages(
     if packages:
         requested_packages = set()
         for spec in packages:
-            name, constraint = parse_package_spec(spec)
-            requested_packages.add(name.lower())
-            if constraint:
-                package_constraints[name.lower()] = constraint
+            parsed = parse_package_spec(spec)
+            requested_packages.add(parsed.name)
+            if parsed.constraint_str:
+                package_constraints[parsed.name] = parsed.constraint_str
 
-        can_upgrade = [pkg for pkg in can_upgrade if pkg.name.lower() in requested_packages]
+        can_upgrade = [pkg for pkg in can_upgrade if canonicalize_name(pkg.name) in requested_packages]
 
         if debug:
             console.print(f"  [dim]Filtering to: {', '.join(packages)}[/dim]")
@@ -526,9 +511,9 @@ def _step5_install_packages(
         # Build pinned specs
         specs = []
         for pkg in non_editable_packages:
-            name_lower = pkg.name.lower()
-            if name_lower in package_constraints:
-                specs.append(f"{pkg.name}{package_constraints[name_lower]}")
+            name_key = canonicalize_name(pkg.name)
+            if name_key in package_constraints:
+                specs.append(f"{pkg.name}{package_constraints[name_key]}")
             else:
                 specs.append(f"{pkg.name}=={pkg.latest_version}")
 
@@ -1595,8 +1580,8 @@ def _run_group_upgrade(
                 excluded_names = {n.strip().lower() for n in exclude_str.split(',')}
             can_upgrade = [p for p in upgradable if p.name.lower() not in excluded_names]
             if packages:
-                requested = {parse_package_spec(s)[0].lower() for s in packages}
-                can_upgrade = [p for p in can_upgrade if p.name.lower() in requested]
+                requested = {parse_package_spec(s).name for s in packages}
+                can_upgrade = [p for p in can_upgrade if canonicalize_name(p.name) in requested]
 
             env_upgrades[env_name] = can_upgrade
 
@@ -1662,9 +1647,9 @@ def _run_group_upgrade(
             for pkg in upgrades:
                 if pkg.is_editable:
                     continue
-                name_lower = pkg.name.lower()
-                if name_lower in package_constraints:
-                    specs.append(f"{pkg.name}{package_constraints[name_lower]}")
+                name_key = canonicalize_name(pkg.name)
+                if name_key in package_constraints:
+                    specs.append(f"{pkg.name}{package_constraints[name_key]}")
                 else:
                     specs.append(f"{pkg.name}=={pkg.latest_version}")
             env_specs[env_name] = specs
@@ -2113,7 +2098,7 @@ def _run_group_install(
 
     try:
         # Phase 1: Inspect current state across all environments
-        canonical_pkgs = [_parse_package_name(p) for p in packages]
+        canonical_pkgs = [parse_package_spec(p).name for p in packages]
         env_versions: dict[str, dict[str, Optional[Version]]] = {}
 
         if ui:
@@ -2403,7 +2388,7 @@ def _run_group_uninstall(
 
     try:
         # Phase 1: Inspect current state across all environments
-        canonical_pkgs = [_parse_package_name(p) for p in packages]
+        canonical_pkgs = [parse_package_spec(p).name for p in packages]
         env_versions: dict[str, dict[str, Optional[Version]]] = {}
 
         if ui:

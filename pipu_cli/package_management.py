@@ -1,6 +1,8 @@
 """Package management functions for pipu-cli."""
 
 import logging
+import os.path
+import re
 import subprocess
 import sys
 import threading
@@ -104,6 +106,94 @@ class UninstalledResult:
     uninstalled: bool
     already_absent: bool = False
     failure_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParsedSpec:
+    """Result of parsing a user-facing package spec.
+
+    :param name: Canonicalized (PEP 503) package name.
+    :param specifier: The :class:`~packaging.specifiers.SpecifierSet`;
+        empty for bare names and for file/URL inputs.
+    :param raw: The original input string, untouched.
+    """
+    name: str
+    specifier: SpecifierSet
+    raw: str
+
+    @property
+    def constraint_str(self) -> Optional[str]:
+        """Return the specifier as a string or ``None`` when empty.
+
+        Back-compat shim for call sites written against the old
+        ``cli.parse_package_spec -> tuple[str, Optional[str]]`` contract.
+
+        .. note::
+            Multi-clause specifiers are normalized to
+            :class:`~packaging.specifiers.SpecifierSet`'s canonical sorted
+            order (e.g. ``">=2.30,<3.0"`` stringifies to ``"<3.0,>=2.30"``).
+            Callers comparing the result to a raw input string should
+            compare :class:`~packaging.specifiers.SpecifierSet` objects
+            directly to stay order-insensitive.
+
+        :returns: ``str(self.specifier)`` if non-empty, else ``None``.
+        """
+        s = str(self.specifier)
+        return s if s else None
+
+
+def parse_package_spec(spec: str) -> ParsedSpec:
+    """Parse a pip-style requirement string or local package file path.
+
+    Accepts:
+
+    - Plain names: ``requests``, ``Requests``.
+    - PEP 508 specifiers: ``requests==2.31.0``, ``requests>=2.30,<3.0``,
+      ``requests[security]>=2.30``.
+    - Local wheel / sdist paths: ``./pkg-1.0-py3-none-any.whl``,
+      ``/tmp/my-pkg-1.2.3.tar.gz`` -- the specifier is empty in this case.
+
+    :param spec: User-supplied requirement string or file path.
+    :returns: :class:`ParsedSpec` with canonicalized name, specifier, raw input.
+    :raises ValueError: When ``spec`` is neither a valid PEP 508 requirement
+        nor an existing local wheel/sdist path.
+    """
+    stripped = spec.strip()
+
+    # File-path detection (mirrors the old _parse_package_name logic).
+    if os.path.isfile(os.path.expanduser(stripped)):
+        filename = os.path.basename(stripped)
+        whl = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._]*[A-Za-z0-9])?)-', filename)
+        if filename.endswith('.whl') and whl:
+            return ParsedSpec(
+                name=canonicalize_name(whl.group(1)),
+                specifier=SpecifierSet(),
+                raw=spec,
+            )
+        sdist = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)[-][\d]', filename)
+        if sdist:
+            return ParsedSpec(
+                name=canonicalize_name(sdist.group(1)),
+                specifier=SpecifierSet(),
+                raw=spec,
+            )
+        # Last-resort: first token before the first dash-digit
+        fallback = filename.split('-')[0].split('.')[0]
+        return ParsedSpec(
+            name=canonicalize_name(fallback),
+            specifier=SpecifierSet(),
+            raw=spec,
+        )
+
+    try:
+        req = Requirement(stripped)
+    except InvalidRequirement as e:
+        raise ValueError(f"Invalid package spec {spec!r}: {e}") from e
+    return ParsedSpec(
+        name=canonicalize_name(req.name),
+        specifier=req.specifier,
+        raw=spec,
+    )
 
 
 def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = None) -> List[InstalledPackage]:
@@ -1203,38 +1293,6 @@ def reinstall_editable_packages(
     return results
 
 
-def _parse_package_name(spec: str) -> str:
-    """Extract the canonical package name from a pip install spec.
-
-    Handles regular specs (``requests``, ``numpy==1.24``), local file paths
-    (``/path/to/pkg-1.0.tar.gz``, ``./pkg-1.0-py3-none-any.whl``), and URLs.
-
-    :param spec: Package specification, file path, or URL.
-    :returns: Canonical package name.
-    """
-    import os.path
-    import re
-
-    stripped = spec.strip()
-
-    if os.path.isfile(os.path.expanduser(stripped)):
-        filename = os.path.basename(stripped)
-        # Wheel: name-version(-tags).whl
-        whl = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._]*[A-Za-z0-9])?)-', filename)
-        if filename.endswith('.whl') and whl:
-            return canonicalize_name(whl.group(1))
-        # Sdist: name-version.tar.gz / .zip / .tar.bz2
-        sdist = re.match(r'^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)[-][\d]', filename)
-        if sdist:
-            return canonicalize_name(sdist.group(1))
-        return canonicalize_name(filename.split('-')[0].split('.')[0])
-
-    for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
-        if op in stripped:
-            return canonicalize_name(stripped.split(op, 1)[0].strip())
-    return canonicalize_name(stripped)
-
-
 def run_pip_install(
     package_specs: List[str],
     upgrade: bool = True,
@@ -1265,8 +1323,16 @@ def run_pip_install(
     if not package_specs:
         return []
 
-    # Extract canonical names for version lookups
-    canonical_names = [_parse_package_name(spec) for spec in package_specs]
+    # Extract canonical names for version lookups. VCS URLs, git+/http(s) specs,
+    # and similar inputs are not PEP 508 requirements and raise ValueError from
+    # parse_package_spec; fall back to canonicalize_name(spec) so pip still sees
+    # the raw spec and version snapshotting has a stable dict key.
+    canonical_names: List[str] = []
+    for spec in package_specs:
+        try:
+            canonical_names.append(parse_package_spec(spec).name)
+        except ValueError:
+            canonical_names.append(canonicalize_name(spec))
     # Map canonical name back to the original spec for result reporting
     name_to_spec = dict(zip(canonical_names, package_specs))
 

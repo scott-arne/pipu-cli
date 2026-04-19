@@ -15,6 +15,7 @@ from pipu_cli.package_management import (
     UpgradedPackage,
     inspect_installed_packages,
     get_latest_versions,
+    parse_package_spec,
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
     install_packages,
@@ -3177,6 +3178,46 @@ class TestRunPipInstall:
         results = run_pip_install([])
         assert results == []
 
+    def test_vcs_url_spec_does_not_raise(self):
+        """VCS / URL specs (not PEP 508) must not abort the batch.
+
+        ``parse_package_spec`` raises :class:`ValueError` for inputs like
+        ``git+https://...`` or ``https://example.com/pkg.whl`` because they
+        aren't valid :class:`packaging.requirements.Requirement` inputs.
+        ``run_pip_install`` must catch that, fall back to a canonical key
+        derived from the raw spec, and still hand the spec to pip.
+        """
+        mock_process = Mock()
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = Mock(side_effect=["", ""])
+        mock_process.stdout.close = Mock()
+        mock_process.stderr = Mock()
+        mock_process.stderr.readline = Mock(side_effect=["", ""])
+        mock_process.stderr.close = Mock()
+        mock_process.wait.return_value = 0
+        mock_process.returncode = 0
+
+        vcs_spec = "git+https://github.com/foo/bar.git"
+
+        with patch("pipu_cli.package_management.subprocess.Popen", return_value=mock_process) as mock_popen, \
+             patch("pipu_cli.package_management._get_local_package_versions") as mock_versions:
+
+            # Pre- and post-install snapshots: the VCS-derived key isn't a real
+            # installed package, so both snapshots are empty.
+            mock_versions.side_effect = [{}, {}]
+
+            # The key assertion: no ValueError propagates.
+            results = run_pip_install([vcs_spec])
+
+        # pip was still invoked with the raw VCS spec.
+        cmd = mock_popen.call_args[0][0]
+        assert vcs_spec in cmd
+        # One result row, keyed by the original spec, marked as failed-to-find
+        # (since post_ver is None) — this matches the old _parse_package_name
+        # behavior where the name lookup returned a meaningless key.
+        assert len(results) == 1
+        assert results[0].name == vcs_spec
+
 
 # ============================================================================
 # Tests for run_pip_install and run_pip_uninstall via shared run_pip helper
@@ -3343,3 +3384,56 @@ class TestRunPipInstallAndUninstallViaRunPip:
         assert results[0].uninstalled is True
         assert results[0].already_absent is True
         assert results[0].previous_version is None
+
+
+class TestParsePackageSpec:
+    """Tests for the unified parse_package_spec / ParsedSpec helper."""
+
+    @pytest.mark.parametrize("spec,expected_name,expected_specifier", [
+        ("requests", "requests", ""),
+        ("Requests", "requests", ""),
+        ("my.namespaced-pkg", "my-namespaced-pkg", ""),
+        ("requests==2.31.0", "requests", "==2.31.0"),
+        ("requests>=2.30,<3.0", "requests", ">=2.30,<3.0"),
+        ("requests[security]>=2.30", "requests", ">=2.30"),
+    ])
+    def test_parse_package_spec(self, spec, expected_name, expected_specifier):
+        from packaging.specifiers import SpecifierSet
+        parsed = parse_package_spec(spec)
+        assert parsed.name == expected_name
+        # Compare as SpecifierSet to be order-insensitive (str() sorts).
+        assert parsed.specifier == SpecifierSet(expected_specifier)
+
+    def test_parse_package_spec_invalid_raises(self):
+        with pytest.raises(ValueError):
+            parse_package_spec("not a valid spec!!!")
+
+    @pytest.mark.parametrize("spec,expected_constraint_str", [
+        ("requests", None),
+        ("requests==2.31.0", "==2.31.0"),
+        # Multi-clause SpecifierSet stringifies in sorted order.
+        ("requests>=2.30,<3.0", "<3.0,>=2.30"),
+    ])
+    def test_parsed_spec_constraint_str_matches_legacy_cli_tuple(
+        self, spec, expected_constraint_str
+    ):
+        parsed = parse_package_spec(spec)
+        assert parsed.constraint_str == expected_constraint_str
+
+    def test_parse_package_spec_accepts_local_wheel(self, tmp_path):
+        """File-path specs were accepted by the old ``_parse_package_name``.
+
+        ``pipu install ./pkg-1.0-py3-none-any.whl`` is a documented feature;
+        the unified parser must keep handling it.
+        """
+        wheel = tmp_path / "requests-2.31.0-py3-none-any.whl"
+        wheel.write_bytes(b"")
+        parsed = parse_package_spec(str(wheel))
+        assert parsed.name == "requests"
+        assert str(parsed.specifier) == ""
+
+    def test_parse_package_spec_accepts_local_sdist(self, tmp_path):
+        sdist = tmp_path / "my-pkg-1.2.3.tar.gz"
+        sdist.write_bytes(b"")
+        parsed = parse_package_spec(str(sdist))
+        assert parsed.name == "my-pkg"

@@ -714,3 +714,87 @@ class TestInstallCommand:
             result = runner.invoke(cli, ["install", "badpkg", "--yes"])
 
         assert result.exit_code == 1
+
+
+class TestDottedNameConstraintPropagation:
+    """End-to-end regression: dotted-name constraints reach pip intact.
+
+    Before Commit 6 the CLI stored ``package_constraints[name.lower()]``
+    from the user-supplied spec and looked it up via ``pkg.name.lower()``
+    from the installed package. For a package whose PyPI name is dotted
+    but whose installed ``Distribution.name`` is lowercase (e.g.
+    ``Zope.Interface`` vs. ``zope.interface``), the storage key and the
+    lookup key must PEP 503 canonicalize to the same value
+    (``"zope-interface"``), otherwise the user's ``==5.4.0`` constraint
+    would silently drop and pip would be invoked with a bare name.
+
+    The unit-level parser invariants for this case live in
+    ``tests/test_package_management.py::TestParsePackageSpec``; this test
+    runs the whole CLI upgrade path with mocks and checks that the final
+    spec list handed to ``download_packages``/``install_from_local``
+    still carries the version constraint.
+    """
+
+    def test_dotted_name_constraint_reaches_download_and_install(self, runner):
+        """``pipu upgrade Zope.Interface==5.4.0`` must pin to ==5.4.0 downstream."""
+        from pipu_cli.package_management import UpgradedPackage
+
+        installed = [
+            InstalledPackage(
+                name="zope.interface",
+                version=Version("5.3.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        upgradable = [
+            UpgradePackageInfo(
+                name="zope.interface",
+                version=Version("5.3.0"),
+                upgradable=True,
+                latest_version=Version("5.5.0"),
+                is_editable=False,
+            )
+        ]
+
+        with patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions") as mock_latest, \
+             patch("pipu_cli.cli.resolve_upgradable_packages", return_value=upgradable), \
+             patch("pipu_cli.cli.download_packages") as mock_download, \
+             patch("pipu_cli.cli.install_from_local") as mock_install_local, \
+             patch("pipu_cli.rollback.save_state"):
+
+            mock_latest.return_value = {installed[0]: Mock(version=Version("5.5.0"))}
+            mock_install_local.return_value = [
+                UpgradedPackage(
+                    name="zope.interface",
+                    version=Version("5.4.0"),
+                    upgraded=True,
+                    previous_version=Version("5.3.0"),
+                    is_editable=False,
+                )
+            ]
+
+            result = runner.invoke(
+                cli,
+                ["upgrade", "Zope.Interface==5.4.0", "--yes", "--no-cache", "-p", "1"],
+            )
+
+        assert result.exit_code == 0, result.output
+
+        # Storage key is canonicalize_name("Zope.Interface") == "zope-interface".
+        # Lookup key is canonicalize_name(pkg.name) == canonicalize_name("zope.interface")
+        # == "zope-interface". The two must agree, otherwise the spec builder at
+        # cli._step5_install_packages falls through to "==latest" and the
+        # user's constraint is silently dropped.
+        mock_download.assert_called_once()
+        download_specs = mock_download.call_args.kwargs["specs"]
+        assert "zope.interface==5.4.0" in download_specs, (
+            f"Expected pinned spec in download specs, got {download_specs!r}"
+        )
+
+        mock_install_local.assert_called_once()
+        install_specs = mock_install_local.call_args.kwargs["specs"]
+        assert "zope.interface==5.4.0" in install_specs, (
+            f"Expected pinned spec in install specs, got {install_specs!r}"
+        )

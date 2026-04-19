@@ -7,14 +7,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from pipu_cli.package_management import (
     UpgradedPackage,
     _get_local_package_versions,
     _get_remote_package_versions,
-    _parse_package_name,
+    parse_package_spec,
 )
+
+
+def _canonical_name_for_spec(spec: str) -> str:
+    """Return a canonical key for ``spec``, tolerating VCS/URL inputs.
+
+    ``parse_package_spec`` raises :class:`ValueError` for inputs that
+    aren't valid PEP 508 requirements or local files (e.g. ``git+https://``
+    URLs). Such specs are still valid pip arguments, so we fall back to
+    :func:`packaging.utils.canonicalize_name` on the raw spec to produce a
+    stable lookup key without aborting the batch.
+    """
+    try:
+        return parse_package_spec(spec).name
+    except ValueError:
+        return canonicalize_name(spec)
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +180,7 @@ def install_from_local(
         return []
 
     executable = python_path or sys.executable
-    canonical_names = [_parse_package_name(s) for s in specs]
+    canonical_names = [_canonical_name_for_spec(s) for s in specs]
 
     if python_path:
         pre_versions = _get_remote_package_versions(python_path, canonical_names)
@@ -198,7 +214,7 @@ def install_from_local(
 
     results: List[UpgradedPackage] = []
     for spec in specs:
-        name = _parse_package_name(spec)
+        name = _canonical_name_for_spec(spec)
         pre_ver = pre_versions.get(name)
         post_ver = post_versions.get(name)
 
