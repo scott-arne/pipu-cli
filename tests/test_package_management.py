@@ -16,6 +16,7 @@ from pipu_cli.package_management import (
     inspect_installed_packages,
     get_latest_versions,
     resolve_upgradable_packages,
+    resolve_upgradable_packages_with_reasons,
     install_packages,
     run_pip_install,
     run_pip_uninstall,
@@ -1595,6 +1596,40 @@ def test_resolve_upgradable_packages_invalid_specifier():
     b_result = result[0]
     # Should be conservative and block the upgrade due to invalid specifier
     assert b_result.upgradable is False
+
+
+def test_resolve_upgradable_matches_with_reasons():
+    """Plain resolver must agree with the with-reasons resolver on upgradable names.
+
+    Permanent regression guard: when resolve_upgradable_packages becomes a wrapper
+    around resolve_upgradable_packages_with_reasons, this keeps us from ever
+    letting the two implementations drift again.
+    """
+    # Reuse a constraint-violated scenario that exercises the fixed-point loop.
+    # Mirrors test_resolve_upgradable_packages_constraint_violated_non_upgrading
+    # but verifies both resolvers agree.
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+    }
+    all_installed = [installed_a, installed_b]
+
+    plain = resolve_upgradable_packages(upgrade_candidates, all_installed)
+    upgradable, _blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates, all_installed
+    )
+
+    names_plain = {p.name for p in plain if p.upgradable}
+    names_with_reasons = {p.name for p in upgradable}
+    assert names_plain == names_with_reasons
 
 
 def test_resolve_upgradable_packages_invalid_specifier_upgrading():

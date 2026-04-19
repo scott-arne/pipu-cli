@@ -739,154 +739,35 @@ def resolve_upgradable_packages(
     upgrade_candidates: Dict[InstalledPackage, Package],
     all_installed: List[InstalledPackage]
 ) -> List[UpgradePackageInfo]:
+    """Resolve upgradable packages, discarding block reasons.
+
+    Thin wrapper around :func:`resolve_upgradable_packages_with_reasons`.
+    The plain list includes every candidate (upgradable and blocked), with
+    the ``upgradable`` flag set accordingly, matching the prior contract.
+
+    :param upgrade_candidates: Dict mapping installed packages to their latest available versions.
+    :param all_installed: List of all installed packages (for constraint checking).
+    :returns: List of UpgradePackageInfo objects, each flagged upgradable or not.
     """
-    Resolve which packages can be safely upgraded considering dependency constraints.
-
-    This function uses a fixed-point iteration algorithm to handle circular dependencies.
-    It repeatedly refines the set of upgradable packages until it stabilizes (reaches a
-    fixed point where no more packages need to be removed).
-
-    A package can be upgraded if:
-    1. Its new version doesn't violate constraints from packages NOT being upgraded, OR
-    2. ALL packages whose constraints would be violated ARE being upgraded
-
-    The algorithm:
-    1. Start with all packages that have newer versions available
-    2. Check constraints for each package against current upgrading set
-    3. Remove packages that violate constraints
-    4. Repeat steps 2-3 until no changes occur (fixed point)
-
-    Examples:
-    - If Package A constrains "B<2.0" and B upgrades to 1.9: B is upgradable (constraint satisfied)
-    - If Package A constrains "B<2.0" and B upgrades to 2.5, and A is NOT upgrading: B is NOT upgradable
-    - If Package A constrains "B<2.0" and B upgrades to 2.5, and A IS upgrading: B is upgradable
-    - If A requires B==1.0 and B wants to upgrade, C depends on B:
-      * B is NOT upgradable (violates A's exact constraint)
-      * C cannot use "B is upgrading" to justify its upgrade
-      * Fixed-point iteration removes B from upgrading set in first pass
-      * Second pass sees B not upgrading, removes C if it violates B's constraints
-
-    Performance:
-    - Time complexity: O(n * m * k) where:
-      * n = number of packages with updates available
-      * m = number of iterations (typically 1-3, max n)
-      * k = average constraints per package (typically small)
-    - Space complexity: O(n) for upgrading_packages set and constraints_on map
-    - Convergence: Guaranteed (monotonically shrinking set, terminates when empty or stable)
-    - Practical performance: Fast for typical package sets (tested with 182 packages)
-
-    :param upgrade_candidates: Dict mapping installed packages to their latest available versions
-    :param all_installed: List of all installed packages (for constraint checking)
-    :returns: List of UpgradePackageInfo objects indicating which packages can be upgraded
-    """
-    # Build a reverse dependency map: package_name -> [(constraining_package, specifier)]
-    # This tells us which packages have constraints on a given package
-    constraints_on: Dict[str, List[tuple[InstalledPackage, str]]] = {}
-
-    for pkg in all_installed:
-        for dep_name, specifier_str in pkg.constrained_dependencies.items():
-            if dep_name not in constraints_on:
-                constraints_on[dep_name] = []
-            constraints_on[dep_name].append((pkg, specifier_str))
-
-    # Filter to only actual upgrades (latest > installed)
-    actual_upgrades = {
-        pkg: latest_pkg
-        for pkg, latest_pkg in upgrade_candidates.items()
-        if latest_pkg.version > pkg.version
-    }
-
-    # Fixed-point iteration: start with all actual upgrades, iteratively remove violators
-    upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
-
-    max_iterations = len(upgrading_packages) + 1  # Safety limit
-    converged = False
-
-    for iteration in range(1, max_iterations + 1):
-        packages_to_remove = set()
-
-        # Check each potential upgrade against current upgrading set
-        for installed_pkg, latest_pkg in actual_upgrades.items():
-            canonical_name = canonicalize_name(installed_pkg.name)
-
-            # Skip if already removed in a previous iteration
-            if canonical_name not in upgrading_packages:
-                continue
-
-            latest_version = latest_pkg.version
-
-            # Check all constraints on this package
-            if canonical_name in constraints_on:
-                for constraining_pkg, specifier_str in constraints_on[canonical_name]:
-                    try:
-                        specifier = SpecifierSet(specifier_str)
-                        satisfies = latest_version in specifier
-
-                        if not satisfies:
-                            # Constraint violated - check if constraining package is being upgraded
-                            constraining_canonical = canonicalize_name(constraining_pkg.name)
-                            if constraining_canonical not in upgrading_packages:
-                                # Constraint violated by non-upgrading package - cannot upgrade
-                                packages_to_remove.add(canonical_name)
-                                logger.debug(
-                                    f"Iteration {iteration}: Cannot upgrade {installed_pkg.name} to {latest_version}: "
-                                    f"violates constraint {specifier_str} from {constraining_pkg.name} "
-                                    f"which is not being upgraded"
-                                )
-                                break
-                            else:
-                                # Constraint violated but constraining package is being upgraded
-                                logger.debug(
-                                    f"Iteration {iteration}: Can upgrade {installed_pkg.name} to {latest_version}: "
-                                    f"violates constraint {specifier_str} from {constraining_pkg.name} "
-                                    f"but {constraining_pkg.name} is also being upgraded"
-                                )
-
-                    except (InvalidSpecifier, Exception) as e:
-                        logger.warning(
-                            f"Invalid specifier '{specifier_str}' for {canonical_name} "
-                            f"from {constraining_pkg.name}: {e}"
-                        )
-                        # If we can't parse the specifier, be conservative and block the upgrade
-                        # unless the constraining package is being upgraded
-                        constraining_canonical = canonicalize_name(constraining_pkg.name)
-                        if constraining_canonical not in upgrading_packages:
-                            packages_to_remove.add(canonical_name)
-                            break
-
-        # Remove packages that violate constraints
-        if not packages_to_remove:
-            logger.debug(f"Fixed point reached after {iteration} iteration(s)")
-            converged = True
-            break
-
-        logger.debug(f"Iteration {iteration}: Removing {len(packages_to_remove)} package(s): {packages_to_remove}")
-        upgrading_packages -= packages_to_remove
-
-    if not converged:
-        logger.warning(f"Fixed-point iteration did not converge after {max_iterations} iterations")
-
-    # Build result list with upgradability determined by final upgrading set
-    result = []
-    for installed_pkg, latest_pkg in upgrade_candidates.items():
-        canonical_name = canonicalize_name(installed_pkg.name)
-        latest_version = latest_pkg.version
-
-        # Check if this is actually an upgrade and made it through fixed-point iteration
-        can_upgrade = (
-            latest_version > installed_pkg.version and
-            canonical_name in upgrading_packages
-        )
-
+    upgradable, _blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates, all_installed
+    )
+    # Preserve prior contract: return one entry per candidate with
+    # upgradable flag set. _with_reasons returns only truly upgradable
+    # entries in the first tuple element, so we rebuild the full list.
+    upgradable_names = {p.name for p in upgradable}
+    result: List[UpgradePackageInfo] = list(upgradable)
+    for pkg, latest in upgrade_candidates.items():
+        if pkg.name in upgradable_names:
+            continue
         result.append(UpgradePackageInfo(
-            name=installed_pkg.name,
-            version=installed_pkg.version,
-            upgradable=can_upgrade,
-            latest_version=latest_version,
-            is_editable=installed_pkg.is_editable,
-            editable_location=installed_pkg.editable_location
+            name=pkg.name,
+            version=pkg.version,
+            upgradable=False,
+            latest_version=latest.version,
+            is_editable=pkg.is_editable,
+            editable_location=pkg.editable_location,
         ))
-
     return result
 
 
