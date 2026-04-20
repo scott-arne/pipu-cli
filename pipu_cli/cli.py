@@ -3,7 +3,6 @@
 import json
 import logging
 import multiprocessing as mp
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import tempfile
 import time
@@ -18,6 +17,8 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
+from pipu_cli._group_runner import GroupContext, prepare_group, run_per_env_parallel
+from pipu_cli._subprocess import InterruptToken
 from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
@@ -93,6 +94,94 @@ def cli(ctx: click.Context) -> None:
         ctx.invoke(upgrade)
 
 
+def _apply_config_defaults(
+    ctx: click.Context,
+    config: dict,
+    field_defaults: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve params that weren't explicitly set via CLI against config.
+
+    Implements the "CLI > project > user config" precedence used by every
+    ``@click.command`` that reads from :func:`pipu_cli.config_file.load_config`:
+    for each field whose Click :class:`ParameterSource` is ``DEFAULT``, the
+    value is pulled from the merged config with the supplied baseline
+    fallback. If the user set the flag on the command line, the CLI value
+    wins and ``field_defaults[name]`` is untouched.
+
+    :param ctx: Click context (for :meth:`click.Context.get_parameter_source`).
+    :param config: Merged config dict from project + user config files.
+    :param field_defaults: Mapping of param name -> baseline default used
+        when neither CLI nor config provides a value.
+    :returns: Dict keyed by the same param names, holding the resolved
+        value for each.
+    """
+    resolved: dict[str, Any] = {}
+    for name, default in field_defaults.items():
+        if ctx.get_parameter_source(name) == ParameterSource.DEFAULT:
+            resolved[name] = get_config_value(config, name, default)
+        else:
+            resolved[name] = ctx.params.get(name, default)
+    return resolved
+
+
+def _configure_debug_logging(console: Console, debug: bool, output: str) -> None:
+    """Enable DEBUG-level logging when ``--debug`` is set in a human-mode run.
+
+    Extracted from the five identical ``if debug and output != "json":``
+    blocks in ``update`` / ``upgrade`` / ``outdated`` / ``install`` /
+    ``uninstall``. Silences the noisier pip loggers and prints the
+    "Debug mode enabled" banner that users rely on as a sanity check.
+
+    :param console: Rich console the banner is written to.
+    :param debug: Whether ``--debug`` was passed (CLI or via config).
+    :param output: Output mode; debug output is suppressed in JSON mode
+        so stdout stays machine-parseable.
+    """
+    if not (debug and output != "json"):
+        return
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(message)s',
+        handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
+    )
+    logging.getLogger('pip._internal').setLevel(logging.WARNING)
+    logging.getLogger('pip._vendor').setLevel(logging.WARNING)
+    console.print("[dim]Debug mode enabled[/dim]\n")
+
+
+def _print_cache_diagnostics(
+    console: Console,
+    *,
+    no_cache: bool,
+    cache_enabled: bool,
+    cache_ttl: Optional[int],
+    output: str,
+) -> bool:
+    """Resolve cache TTL, check freshness, and render the "using cached data" line.
+
+    Extracted from the duplicate blocks in ``upgrade`` (cli.py:781-786)
+    and ``outdated`` (cli.py:1020-1025). The ``no_cache`` CLI flag is
+    folded in at the ``cache_enabled`` site, so this helper only needs
+    the already-combined ``cache_enabled`` value; ``no_cache`` is accepted
+    for symmetry with call sites and to keep the decision local.
+
+    :param console: Rich console used for the human-mode banner.
+    :param no_cache: Whether ``--no-cache`` was passed.
+    :param cache_enabled: Already-combined flag (config cache_enabled AND
+        not ``--no-cache``).
+    :param cache_ttl: CLI/config TTL override in seconds; ``None`` means
+        "use :data:`pipu_cli.config.DEFAULT_CACHE_TTL`".
+    :param output: Output mode; the banner is suppressed in JSON mode.
+    :returns: ``True`` if the cache should be used for this run.
+    """
+    effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+    use_cache = cache_enabled and not no_cache and is_cache_fresh(effective_cache_ttl)
+    if use_cache and output != "json":
+        cache_age = get_cache_age_seconds()
+        console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+    return use_cache
+
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -143,27 +232,24 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
 
     # Load configuration file
     config = load_config()
-    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
-        timeout = get_config_value(config, 'timeout', 10)
-    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
-        pre = get_config_value(config, 'pre', False)
-    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
-        debug = get_config_value(config, 'debug', False)
-    if ctx.get_parameter_source('parallel') == ParameterSource.DEFAULT:
-        parallel = get_config_value(config, 'parallel', min(4, mp.cpu_count()))
-    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
-        output = get_config_value(config, 'output', 'human')
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            'timeout': 10,
+            'pre': False,
+            'debug': False,
+            'parallel': min(4, mp.cpu_count()),
+            'output': 'human',
+        },
+    )
+    timeout = resolved['timeout']
+    pre = resolved['pre']
+    debug = resolved['debug']
+    parallel = resolved['parallel']
+    output = resolved['output']
 
-    # Configure logging
-    if debug and output != "json":
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(message)s',
-            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
-        )
-        logging.getLogger('pip._internal').setLevel(logging.WARNING)
-        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
-        console.print("[dim]Debug mode enabled[/dim]\n")
+    _configure_debug_logging(console, debug, output)
 
     try:
         # Step 1: Inspect installed packages
@@ -698,27 +784,35 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     config = load_config()
 
     # Apply config file values only when CLI option is at its default
-    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
-        timeout = get_config_value(config, 'timeout', 10)
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            'timeout': 10,
+            'pre': False,
+            'yes': False,
+            'debug': False,
+            'dry_run': False,
+            'show_blocked': False,
+            'output': 'human',
+            'cache_ttl': DEFAULT_CACHE_TTL,
+        },
+    )
+    timeout = resolved['timeout']
+    pre = resolved['pre']
+    yes = resolved['yes']
+    debug = resolved['debug']
+    dry_run = resolved['dry_run']
+    show_blocked = resolved['show_blocked']
+    output = resolved['output']
+    cache_ttl = resolved['cache_ttl']
+
+    # exclude has its own parsing pathway
     if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
         exclude_list = get_config_value(config, 'exclude', [])
         exclude_str = ','.join(exclude_list) if exclude_list else ""
     else:
         exclude_str = _parse_excludes(exclude)
-    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
-        pre = get_config_value(config, 'pre', False)
-    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
-        yes = get_config_value(config, 'yes', False)
-    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
-        debug = get_config_value(config, 'debug', False)
-    if ctx.get_parameter_source('dry_run') == ParameterSource.DEFAULT:
-        dry_run = get_config_value(config, 'dry_run', False)
-    if ctx.get_parameter_source('show_blocked') == ParameterSource.DEFAULT:
-        show_blocked = get_config_value(config, 'show_blocked', False)
-    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
-        output = get_config_value(config, 'output', 'human')
-    if ctx.get_parameter_source('cache_ttl') == ParameterSource.DEFAULT:
-        cache_ttl = get_config_value(config, 'cache_ttl', DEFAULT_CACHE_TTL)
 
     # Check if caching is enabled
     cache_enabled = get_config_value(config, 'cache_enabled', True) and not no_cache
@@ -751,16 +845,8 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
         interactive = False
 
     # Configure logging
+    _configure_debug_logging(console, debug, output)
     if debug and output != "json":
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(message)s',
-            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
-        )
-        logging.getLogger('pip._internal').setLevel(logging.WARNING)
-        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
-        console.print("[dim]Debug mode enabled[/dim]\n")
-
         # Show cache diagnostics
         info = get_cache_info()
         console.print("[dim]Cache diagnostics:[/dim]")
@@ -778,12 +864,13 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
     try:
         # Check cache freshness
-        effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
-        use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl)
-
-        if use_cache and output != "json":
-            cache_age = get_cache_age_seconds()
-            console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+        use_cache = _print_cache_diagnostics(
+            console,
+            no_cache=no_cache,
+            cache_enabled=cache_enabled,
+            cache_ttl=cache_ttl,
+            output=output,
+        )
 
         # Step 1: Inspect installed packages
         installed_packages, step1_time = _step1_inspect_packages(
@@ -958,20 +1045,26 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
 
     # Load config and apply defaults (same pattern as upgrade)
     config = load_config()
-    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
-        timeout = get_config_value(config, 'timeout', 10)
-    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
-        pre = get_config_value(config, 'pre', False)
-    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
-        debug = get_config_value(config, 'debug', False)
-    if ctx.get_parameter_source('show_blocked') == ParameterSource.DEFAULT:
-        show_blocked = get_config_value(config, 'show_blocked', True)
-    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
-        output = get_config_value(config, 'output', 'human')
-    if ctx.get_parameter_source('parallel') == ParameterSource.DEFAULT:
-        parallel = get_config_value(config, 'parallel', min(4, mp.cpu_count()))
-    if ctx.get_parameter_source('cache_ttl') == ParameterSource.DEFAULT:
-        cache_ttl = get_config_value(config, 'cache_ttl', DEFAULT_CACHE_TTL)
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            'timeout': 10,
+            'pre': False,
+            'debug': False,
+            'show_blocked': True,
+            'output': 'human',
+            'parallel': min(4, mp.cpu_count()),
+            'cache_ttl': DEFAULT_CACHE_TTL,
+        },
+    )
+    timeout = resolved['timeout']
+    pre = resolved['pre']
+    debug = resolved['debug']
+    show_blocked = resolved['show_blocked']
+    output = resolved['output']
+    parallel = resolved['parallel']
+    cache_ttl = resolved['cache_ttl']
 
     # Process excludes
     if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
@@ -993,16 +1086,8 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         )
         return
 
+    _configure_debug_logging(console, debug, output)
     if debug and output != "json":
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(message)s',
-            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
-        )
-        logging.getLogger('pip._internal').setLevel(logging.WARNING)
-        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
-        console.print("[dim]Debug mode enabled[/dim]\n")
-
         # Show cache diagnostics
         info = get_cache_info()
         console.print("[dim]Cache diagnostics:[/dim]")
@@ -1017,12 +1102,13 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         console.print()
 
     try:
-        effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
-        use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl)
-
-        if use_cache and output != "json":
-            cache_age = get_cache_age_seconds()
-            console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+        use_cache = _print_cache_diagnostics(
+            console,
+            no_cache=no_cache,
+            cache_enabled=cache_enabled,
+            cache_ttl=cache_ttl,
+            output=output,
+        )
 
         # Step 1: Inspect
         installed_packages, step1_time = _step1_inspect_packages(console, output, timeout, debug, total_steps=3)
@@ -1448,6 +1534,54 @@ def group_delete(group_name: str) -> None:
     sys.exit(0)
 
 
+def _upgrade_install_single_env(
+    env_name: str,
+    env_path: str,
+    specs: list[str],
+    *,
+    dest_dir: Path,
+    tracker: Any = None,
+    interrupt_token: Optional[InterruptToken] = None,
+) -> list:
+    """Install pre-downloaded wheels into a single env for the group upgrade path.
+
+    :param env_name: Short name used for tracker display.
+    :param env_path: Python executable path for the target env.
+    :param specs: Wheel specs to install (already downloaded into ``dest_dir``).
+    :param dest_dir: Shared temp dir holding the downloaded wheels.
+    :param tracker: Optional group-install progress tracker.
+    :param interrupt_token: Shared cancel signal; accepted for worker
+        contract parity. :func:`install_from_local` does not yet plumb the
+        token through to :func:`pipu_cli._subprocess.run_pip`, so the
+        caller's ``KeyboardInterrupt`` handler still provides the
+        primary cancellation path.
+    :returns: List of per-package install results (empty on worker-level
+        exception so that one failing env doesn't poison the fan-out).
+    """
+    del interrupt_token  # not consumed today; kept for signature parity
+    from pipu_cli.download import install_from_local
+
+    try:
+        callback = None
+        if tracker:
+            def on_install(spec: str, en: str = env_name) -> None:
+                pkg_name = spec.split("==")[0] if "==" in spec else spec
+                tracker.advance(en, pkg_name)
+            callback = on_install
+        results = install_from_local(
+            dest_dir=dest_dir, specs=specs,
+            python_path=env_path,
+            progress_callback=callback,
+        )
+        if tracker:
+            tracker.complete_env(env_name)
+        return results
+    except Exception as e:
+        if tracker:
+            tracker.fail_env(env_name, str(e))
+        return []
+
+
 def _run_group_upgrade(
     group_name: str, console: Console, output: str,
     timeout: int, pre: bool, yes: bool, debug: bool,
@@ -1459,38 +1593,12 @@ def _run_group_upgrade(
     cache_enabled: bool,
 ) -> None:
     """Execute upgrade across all environments in a group using consolidated pipeline."""
-    import os
-
-    environments = get_group(group_name)
-    if environments is None:
-        if output == "json":
-            print(json.dumps({"error": f"Group '{group_name}' not found"}))
-        else:
-            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
-        sys.exit(1)
+    group_ctx = prepare_group(group_name, console=console, output=output)
+    env_name_map = group_ctx.envs
+    valid_envs = list(env_name_map.values())
+    reverse_map = {v: k for k, v in env_name_map.items()}  # full_path -> short_name
 
     ui = UpgradeUI(console) if output != "json" else None
-
-    # Build short name mapping
-    env_name_map: dict[str, str] = {}  # short_name -> full_path
-    used_names: set[str] = set()
-    valid_envs: list[str] = []
-    for env_path in environments:
-        if not os.path.exists(env_path):
-            if output != "json":
-                console.print(f"[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
-            continue
-        valid_envs.append(env_path)
-        from pipu_cli.pretty import extract_env_short_name
-        short = extract_env_short_name(env_path, existing_names=used_names)
-        env_name_map[short] = env_path
-        used_names.add(short)
-
-    if not valid_envs:
-        console.print("[yellow]No valid environments in group.[/yellow]")
-        sys.exit(1)
-
-    reverse_map = {v: k for k, v in env_name_map.items()}  # full_path -> short_name
 
     try:
         # Phase 1: Inspect all environments
@@ -1657,7 +1765,7 @@ def _run_group_upgrade(
         with tempfile.TemporaryDirectory(prefix="pipu-group-") as tmp_dir:
             dest_dir = Path(tmp_dir)
 
-            from pipu_cli.download import download_packages_for_group, install_from_local
+            from pipu_cli.download import download_packages_for_group
 
             if ui:
                 unique_specs = list(dict.fromkeys(
@@ -1683,58 +1791,33 @@ def _run_group_upgrade(
             else:
                 download_packages_for_group(env_specs, dest_dir, pre=pre, max_workers=parallel)
 
-            # Phase 7: Install per environment
-            env_results: dict[str, list] = {}
+            # Phase 7: Install per environment (fanned out via shared runner)
             env_order = list(env_name_map.keys())
-
             active_envs = [name for name in env_order if env_specs.get(name)]
-
-            def _install_env(env_name: str, tracker=None):
-                env_path = env_name_map[env_name]
-                specs = env_specs[env_name]
-                try:
-                    callback = None
-                    if tracker:
-                        def on_install(spec: str, en=env_name) -> None:
-                            pkg_name = spec.split("==")[0] if "==" in spec else spec
-                            tracker.advance(en, pkg_name)
-                        callback = on_install
-                    results = install_from_local(
-                        dest_dir=dest_dir, specs=specs,
-                        python_path=env_path,
-                        progress_callback=callback,
-                    )
-                    if tracker:
-                        tracker.complete_env(env_name)
-                    return env_name, results
-                except Exception as e:
-                    if tracker:
-                        tracker.fail_env(env_name, str(e))
-                    return env_name, []
+            active_ctx = GroupContext(
+                name=group_ctx.name,
+                envs={name: env_name_map[name] for name in active_envs},
+            )
 
             if ui:
                 env_totals = {name: len(env_specs.get(name, [])) for name in active_envs}
                 group_tracker = ui.show_group_install_progress(active_envs, env_totals)
-
-                with ThreadPoolExecutor(max_workers=len(active_envs)) as executor:
-                    futures = {
-                        executor.submit(_install_env, name, group_tracker): name
-                        for name in active_envs
-                    }
-                    for future in as_completed(futures):
-                        name, results = future.result()
-                        env_results[name] = results
-
-                group_tracker.finish()
             else:
-                with ThreadPoolExecutor(max_workers=len(active_envs)) as executor:
-                    futures = {
-                        executor.submit(_install_env, name): name
-                        for name in active_envs
-                    }
-                    for future in as_completed(futures):
-                        name, results = future.result()
-                        env_results[name] = results
+                group_tracker = None
+
+            def _upgrade_worker(name: str, path: str, token: InterruptToken) -> list:
+                return _upgrade_install_single_env(
+                    name, path, env_specs[name],
+                    dest_dir=dest_dir, tracker=group_tracker,
+                    interrupt_token=token,
+                )
+
+            env_results = (
+                run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
+            )
+
+            if group_tracker is not None:
+                group_tracker.finish()
 
             # Handle editable packages per environment
             for env_name, upgrades in env_upgrades.items():
@@ -1792,6 +1875,119 @@ def _run_group_upgrade(
         sys.exit(130)
 
 
+def _outdated_single_env(
+    env_path: str,
+    *,
+    console: Console,
+    output: str,
+    timeout: int,
+    pre: bool,
+    debug: bool,
+    exclude_str: str,
+    show_blocked: bool,
+    parallel: int,
+    cache_enabled: bool,
+    cache_ttl: Optional[int],
+    json_formatter: Optional[JsonOutputFormatter],
+    interrupt_token: Optional[InterruptToken] = None,
+) -> Optional[dict[str, Any]]:
+    """Run the full outdated pipeline for a single env.
+
+    Prints the env panel and the per-env sections (in human mode) as the
+    original serial implementation did; returns the JSON-ready record when
+    ``output == "json"`` so the caller can aggregate it into the group
+    result list.
+
+    :param env_path: Python executable path for this environment.
+    :param console: Rich console for human-mode output.
+    :param output: Output mode (``"human"`` or ``"json"``).
+    :param timeout: Network timeout for inspect / version checks.
+    :param pre: Include pre-release versions in the latest-version probe.
+    :param debug: Debug mode flag (forwarded to step helpers).
+    :param exclude_str: Comma-separated package names to exclude.
+    :param show_blocked: Whether to surface blocked-by-constraint packages.
+    :param parallel: Parallelism hint for the version fetcher.
+    :param cache_enabled: Whether pip cache reads are permitted at all.
+    :param cache_ttl: CLI/config TTL override in seconds.
+    :param json_formatter: Shared formatter (required in JSON mode).
+    :param interrupt_token: Shared cancel signal; accepted for worker
+        contract parity but not consumed inside this helper (the inspect /
+        version-fetch paths don't spawn pip subprocesses that honor it).
+    :returns: A per-env JSON record in JSON mode, else ``None``.
+    """
+    del interrupt_token  # not consumed today; kept for signature parity
+
+    if output != "json":
+        console.print()
+        console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
+        console.print()
+
+    try:
+        effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+        use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl, python_path=env_path)
+
+        if use_cache and output != "json":
+            cache_age = get_cache_age_seconds(python_path=env_path)
+            console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
+
+        installed_packages, _ = _step1_inspect_packages(
+            console, output, timeout, debug, total_steps=3, python_path=env_path
+        )
+        if not installed_packages:
+            if output != "json":
+                console.print("[yellow]No packages found.[/yellow]")
+                return None
+            return {
+                "environment": env_path,
+                "upgradable": [], "blocked": [], "results": [],
+                "summary": {"total": 0, "upgraded": 0, "failed": 0},
+            }
+
+        latest_versions, _, _ = _step2_get_latest_versions(
+            console, output, debug, installed_packages, use_cache, cache_enabled,
+            timeout, pre, parallel, total_steps=3, python_path=env_path
+        )
+        if not latest_versions:
+            if output != "json":
+                console.print("\n[bold green]All packages are up to date![/bold green]")
+                return None
+            return {
+                "environment": env_path,
+                "upgradable": [], "blocked": [], "results": [],
+                "summary": {"total": 0, "upgraded": 0, "failed": 0},
+            }
+
+        can_upgrade, blocked_packages, _, _ = _step3_resolve_packages(
+            console, output, debug, latest_versions, installed_packages,
+            show_blocked, exclude_str, (), total_steps=3
+        )
+
+        if output != "json":
+            if can_upgrade:
+                console.print("\n[bold]Packages with updates available:\n")
+                print_upgradable_packages_table(can_upgrade, console=console)
+            else:
+                console.print("\n[yellow]No packages can be upgraded.[/yellow]")
+            if show_blocked and blocked_packages:
+                console.print()
+                print_blocked_packages_table(blocked_packages, console=console)
+            return None
+
+        assert json_formatter is not None
+        return {
+            "environment": env_path,
+            "upgradable": [json_formatter._package_to_dict(p) for p in can_upgrade],
+            "blocked": [json_formatter._package_to_dict(p) for p in blocked_packages] if show_blocked else [],
+            "results": [],
+            "summary": {"total": 0, "upgraded": 0, "failed": 0},
+        }
+
+    except Exception as e:
+        if output != "json":
+            console.print(f"\n[red]Error in {env_path}:[/red] {e}")
+        return None
+
+
 def _run_group_outdated(
     group_name: str, console: Console, output: str,
     timeout: int, pre: bool, debug: bool,
@@ -1800,95 +1996,29 @@ def _run_group_outdated(
     json_formatter: Optional[JsonOutputFormatter],
     cache_enabled: bool,
 ) -> None:
-    """Execute outdated check across all environments in a group."""
-    import os
+    """Execute outdated check across all environments in a group.
 
-    environments = get_group(group_name)
-    if environments is None:
-        if output == "json":
-            print(json.dumps({"error": f"Group '{group_name}' not found"}))
-        else:
-            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
-        sys.exit(1)
+    Kept serial so the per-env console panels don't interleave with each
+    other. ``no_cache`` is already folded into ``cache_enabled`` by the
+    caller and is accepted for signature parity with the outer command.
+    """
+    del no_cache  # already folded into cache_enabled at call site
+    group_ctx = prepare_group(group_name, console=console, output=output)
 
     group_results: list[dict[str, Any]] = []
 
     try:
-        for env_path in environments:
-            if not os.path.exists(env_path):
-                if output != "json":
-                    console.print(f"\n[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
-                continue
-
-            if output != "json":
-                console.print()
-                console.print(Panel(env_path, title="Environment", border_style="cyan", expand=False))
-                console.print()
-
-            try:
-                effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
-                use_cache = cache_enabled and is_cache_fresh(effective_cache_ttl, python_path=env_path)
-
-                if use_cache and output != "json":
-                    cache_age = get_cache_age_seconds(python_path=env_path)
-                    console.print(f"[dim]Using cached data ({format_cache_age(cache_age)})[/dim]\n")
-
-                installed_packages, _ = _step1_inspect_packages(
-                    console, output, timeout, debug, total_steps=3, python_path=env_path
-                )
-                if not installed_packages:
-                    if output != "json":
-                        console.print("[yellow]No packages found.[/yellow]")
-                    if output == "json":
-                        group_results.append({
-                            "environment": env_path,
-                            "upgradable": [], "blocked": [], "results": [],
-                            "summary": {"total": 0, "upgraded": 0, "failed": 0},
-                        })
-                    continue
-
-                latest_versions, _, _ = _step2_get_latest_versions(
-                    console, output, debug, installed_packages, use_cache, cache_enabled,
-                    timeout, pre, parallel, total_steps=3, python_path=env_path
-                )
-                if not latest_versions:
-                    if output != "json":
-                        console.print("\n[bold green]All packages are up to date![/bold green]")
-                    if output == "json":
-                        group_results.append({
-                            "environment": env_path,
-                            "upgradable": [], "blocked": [], "results": [],
-                            "summary": {"total": 0, "upgraded": 0, "failed": 0},
-                        })
-                    continue
-
-                can_upgrade, blocked_packages, _, _ = _step3_resolve_packages(
-                    console, output, debug, latest_versions, installed_packages,
-                    show_blocked, exclude_str, (), total_steps=3
-                )
-
-                if output != "json":
-                    if can_upgrade:
-                        console.print("\n[bold]Packages with updates available:\n")
-                        print_upgradable_packages_table(can_upgrade, console=console)
-                    else:
-                        console.print("\n[yellow]No packages can be upgraded.[/yellow]")
-                    if show_blocked and blocked_packages:
-                        console.print()
-                        print_blocked_packages_table(blocked_packages, console=console)
-                else:
-                    assert json_formatter is not None
-                    group_results.append({
-                        "environment": env_path,
-                        "upgradable": [json_formatter._package_to_dict(p) for p in can_upgrade],
-                        "blocked": [json_formatter._package_to_dict(p) for p in blocked_packages] if show_blocked else [],
-                        "results": [],
-                        "summary": {"total": 0, "upgraded": 0, "failed": 0},
-                    })
-
-            except Exception as e:
-                if output != "json":
-                    console.print(f"\n[red]Error in {env_path}:[/red] {e}")
+        for env_path in group_ctx.envs.values():
+            record = _outdated_single_env(
+                env_path,
+                console=console, output=output,
+                timeout=timeout, pre=pre, debug=debug,
+                exclude_str=exclude_str, show_blocked=show_blocked,
+                parallel=parallel, cache_enabled=cache_enabled,
+                cache_ttl=cache_ttl, json_formatter=json_formatter,
+            )
+            if record is not None:
+                group_results.append(record)
 
     except KeyboardInterrupt:
         console.show_cursor(True)
@@ -1962,16 +2092,22 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
 
     # Load configuration file
     config = load_config()
-    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
-        timeout = get_config_value(config, 'timeout', 300)
-    if ctx.get_parameter_source('pre') == ParameterSource.DEFAULT:
-        pre = get_config_value(config, 'pre', False)
-    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
-        yes = get_config_value(config, 'yes', False)
-    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
-        debug = get_config_value(config, 'debug', False)
-    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
-        output = get_config_value(config, 'output', 'human')
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            'timeout': 300,
+            'pre': False,
+            'yes': False,
+            'debug': False,
+            'output': 'human',
+        },
+    )
+    timeout = resolved['timeout']
+    pre = resolved['pre']
+    yes = resolved['yes']
+    debug = resolved['debug']
+    output = resolved['output']
 
     json_formatter = JsonOutputFormatter() if output == "json" else None
 
@@ -1984,16 +2120,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
         )
         return
 
-    # Configure logging
-    if debug and output != "json":
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(message)s',
-            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
-        )
-        logging.getLogger('pip._internal').setLevel(logging.WARNING)
-        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
-        console.print("[dim]Debug mode enabled[/dim]\n")
+    _configure_debug_logging(console, debug, output)
 
     try:
         # Step 1: Show what will be installed and confirm
@@ -2051,6 +2178,52 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
         sys.exit(1)
 
 
+def _install_single_env(
+    env_name: str,
+    env_path: str,
+    *,
+    packages: tuple,
+    no_update: bool,
+    timeout: int,
+    pre: bool,
+    tracker: Any = None,
+    interrupt_token: Optional[InterruptToken] = None,
+) -> list:
+    """Install a package list into a single env for the group install path.
+
+    :param env_name: Short name used for tracker display.
+    :param env_path: Python executable path for the target env.
+    :param packages: User-supplied package specs.
+    :param no_update: When True, uses plain ``pip install`` (no ``-U``).
+    :param timeout: Subprocess timeout in seconds.
+    :param pre: Include pre-release versions.
+    :param tracker: Optional group-install progress tracker.
+    :param interrupt_token: Shared cancel signal; accepted for worker
+        contract parity. :func:`run_pip_install` does not yet plumb the
+        token through to :func:`pipu_cli._subprocess.run_pip`, so the
+        caller's ``KeyboardInterrupt`` handler still provides the
+        primary cancellation path.
+    :returns: List of per-package install results (empty on worker-level
+        exception so that one failing env doesn't poison the fan-out).
+    """
+    del interrupt_token  # not consumed today; kept for signature parity
+    try:
+        results = run_pip_install(
+            package_specs=list(packages),
+            upgrade=not no_update,
+            timeout=timeout,
+            python_path=env_path,
+            pre=pre,
+        )
+        if tracker:
+            tracker.complete_env(env_name)
+        return results
+    except Exception as e:
+        if tracker:
+            tracker.fail_env(env_name, str(e))
+        return []
+
+
 def _run_group_install(
     group_name: str, console: Console, output: str,
     packages: tuple, no_update: bool, timeout: int,
@@ -2058,43 +2231,18 @@ def _run_group_install(
     json_formatter: Optional[JsonOutputFormatter],
 ) -> None:
     """Execute install across all environments in a group."""
-    import os
+    del debug  # signature parity; install's debug handling happens upstream
     from pipu_cli.pretty import (
-        extract_env_short_name, print_env_legend,
+        print_env_legend,
         print_group_install_matrix, print_group_install_results_matrix,
     )
 
-    environments = get_group(group_name)
-    if environments is None:
-        if output == "json":
-            print(json.dumps({"error": f"Group '{group_name}' not found"}))
-        else:
-            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
-        sys.exit(1)
+    group_ctx = prepare_group(group_name, console=console, output=output)
+    env_name_map = group_ctx.envs
+    valid_envs = list(env_name_map.values())
+    reverse_map = {v: k for k, v in env_name_map.items()}
 
     ui = UpgradeUI(console) if output != "json" else None
-
-    env_name_map: dict[str, str] = {}
-    used_names: set[str] = set()
-    valid_envs: list[str] = []
-    for env_path in environments:
-        if not os.path.exists(env_path):
-            if output != "json":
-                console.print(f"[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
-            continue
-        valid_envs.append(env_path)
-        short = extract_env_short_name(env_path, existing_names=used_names)
-        env_name_map[short] = env_path
-        used_names.add(short)
-
-    if not valid_envs:
-        if output != "json":
-            console.print("[yellow]No valid environments in group.[/yellow]")
-        else:
-            print(json.dumps({"error": "No valid environments in group"}))
-        sys.exit(1)
-
-    reverse_map = {v: k for k, v in env_name_map.items()}
 
     try:
         # Phase 1: Inspect current state across all environments
@@ -2137,51 +2285,27 @@ def _run_group_install(
                     console.print("[yellow]Installation cancelled.[/yellow]")
                     sys.exit(0)
 
-        # Phase 3: Parallel install across environments
-        env_results: dict[str, list] = {}
+        # Phase 3: Parallel install across environments via shared runner
         env_order = list(env_name_map.keys())
-
-        def _install_env(env_name: str, tracker=None):
-            env_path = env_name_map[env_name]
-            try:
-                results = run_pip_install(
-                    package_specs=list(packages),
-                    upgrade=not no_update,
-                    timeout=timeout,
-                    python_path=env_path,
-                    pre=pre,
-                )
-                if tracker:
-                    tracker.complete_env(env_name)
-                return env_name, results
-            except Exception as e:
-                if tracker:
-                    tracker.fail_env(env_name, str(e))
-                return env_name, []
 
         if ui:
             env_totals = {name: len(packages) for name in env_order}
             group_tracker = ui.show_group_install_progress(env_order, env_totals)
-
-            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
-                futures = {
-                    executor.submit(_install_env, name, group_tracker): name
-                    for name in env_order
-                }
-                for future in as_completed(futures):
-                    name, results = future.result()
-                    env_results[name] = results
-
-            group_tracker.finish()
         else:
-            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
-                futures = {
-                    executor.submit(_install_env, name): name
-                    for name in env_order
-                }
-                for future in as_completed(futures):
-                    name, results = future.result()
-                    env_results[name] = results
+            group_tracker = None
+
+        def _install_worker(name: str, path: str, token: InterruptToken) -> list:
+            return _install_single_env(
+                name, path,
+                packages=packages, no_update=no_update,
+                timeout=timeout, pre=pre,
+                tracker=group_tracker, interrupt_token=token,
+            )
+
+        env_results = run_per_env_parallel(group_ctx, _install_worker)
+
+        if group_tracker is not None:
+            group_tracker.finish()
 
         # Phase 4: Show results
         if output == "json":
@@ -2266,14 +2390,20 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
     console = Console()
 
     config = load_config()
-    if ctx.get_parameter_source('timeout') == ParameterSource.DEFAULT:
-        timeout = get_config_value(config, 'timeout', 300)
-    if ctx.get_parameter_source('yes') == ParameterSource.DEFAULT:
-        yes = get_config_value(config, 'yes', False)
-    if ctx.get_parameter_source('debug') == ParameterSource.DEFAULT:
-        debug = get_config_value(config, 'debug', False)
-    if ctx.get_parameter_source('output') == ParameterSource.DEFAULT:
-        output = get_config_value(config, 'output', 'human')
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            'timeout': 300,
+            'yes': False,
+            'debug': False,
+            'output': 'human',
+        },
+    )
+    timeout = resolved['timeout']
+    yes = resolved['yes']
+    debug = resolved['debug']
+    output = resolved['output']
 
     json_formatter = JsonOutputFormatter() if output == "json" else None
 
@@ -2285,15 +2415,7 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
         )
         return
 
-    if debug and output != "json":
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(message)s',
-            handlers=[RichHandler(console=console, show_time=False, show_path=False, markup=True)]
-        )
-        logging.getLogger('pip._internal').setLevel(logging.WARNING)
-        logging.getLogger('pip._vendor').setLevel(logging.WARNING)
-        console.print("[dim]Debug mode enabled[/dim]\n")
+    _configure_debug_logging(console, debug, output)
 
     try:
         if output != "json":
@@ -2341,6 +2463,44 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
         sys.exit(1)
 
 
+def _uninstall_single_env(
+    env_name: str,
+    env_path: str,
+    *,
+    packages: tuple,
+    timeout: int,
+    tracker: Any = None,
+    interrupt_token: Optional[InterruptToken] = None,
+) -> list:
+    """Uninstall a package list from a single env for the group uninstall path.
+
+    :param env_name: Short name used for tracker display.
+    :param env_path: Python executable path for the target env.
+    :param packages: User-supplied package names.
+    :param timeout: Subprocess timeout in seconds.
+    :param tracker: Optional group-install progress tracker (reused for
+        uninstall since the tracker is op-agnostic).
+    :param interrupt_token: Shared cancel signal; accepted for worker
+        contract parity.
+    :returns: List of per-package uninstall results (empty on worker-level
+        exception so that one failing env doesn't poison the fan-out).
+    """
+    del interrupt_token  # not consumed today; kept for signature parity
+    try:
+        results = run_pip_uninstall(
+            package_names=list(packages),
+            timeout=timeout,
+            python_path=env_path,
+        )
+        if tracker:
+            tracker.complete_env(env_name)
+        return results
+    except Exception as e:
+        if tracker:
+            tracker.fail_env(env_name, str(e))
+        return []
+
+
 def _run_group_uninstall(
     group_name: str, console: Console, output: str,
     packages: tuple, timeout: int,
@@ -2348,43 +2508,17 @@ def _run_group_uninstall(
     json_formatter: Optional[JsonOutputFormatter],
 ) -> None:
     """Execute uninstall across all environments in a group."""
-    import os
     from pipu_cli.pretty import (
-        extract_env_short_name, print_env_legend,
+        print_env_legend,
         print_group_uninstall_matrix, print_group_uninstall_results_matrix,
     )
 
-    environments = get_group(group_name)
-    if environments is None:
-        if output == "json":
-            print(json.dumps({"error": f"Group '{group_name}' not found"}))
-        else:
-            console.print(f"[red]Group not found:[/red] [cyan]{group_name}[/cyan]")
-        sys.exit(1)
+    group_ctx = prepare_group(group_name, console=console, output=output)
+    env_name_map = group_ctx.envs
+    valid_envs = list(env_name_map.values())
+    reverse_map = {v: k for k, v in env_name_map.items()}
 
     ui = UpgradeUI(console) if output != "json" else None
-
-    env_name_map: dict[str, str] = {}
-    used_names: set[str] = set()
-    valid_envs: list[str] = []
-    for env_path in environments:
-        if not os.path.exists(env_path):
-            if output != "json":
-                console.print(f"[yellow]Warning: Skipping {env_path} (path not found)[/yellow]")
-            continue
-        valid_envs.append(env_path)
-        short = extract_env_short_name(env_path, existing_names=used_names)
-        env_name_map[short] = env_path
-        used_names.add(short)
-
-    if not valid_envs:
-        if output != "json":
-            console.print("[yellow]No valid environments in group.[/yellow]")
-        else:
-            print(json.dumps({"error": "No valid environments in group"}))
-        sys.exit(1)
-
-    reverse_map = {v: k for k, v in env_name_map.items()}
 
     try:
         # Phase 1: Inspect current state across all environments
@@ -2425,49 +2559,26 @@ def _run_group_uninstall(
                     console.print("[yellow]Uninstallation cancelled.[/yellow]")
                     sys.exit(0)
 
-        # Phase 3: Parallel uninstall across environments
-        env_results: dict[str, list] = {}
+        # Phase 3: Parallel uninstall across environments via shared runner
         env_order = list(env_name_map.keys())
-
-        def _uninstall_env(env_name: str, tracker=None):
-            env_path = env_name_map[env_name]
-            try:
-                results = run_pip_uninstall(
-                    package_names=list(packages),
-                    timeout=timeout,
-                    python_path=env_path,
-                )
-                if tracker:
-                    tracker.complete_env(env_name)
-                return env_name, results
-            except Exception as e:
-                if tracker:
-                    tracker.fail_env(env_name, str(e))
-                return env_name, []
 
         if ui:
             env_totals = {name: len(packages) for name in env_order}
             group_tracker = ui.show_group_install_progress(env_order, env_totals)
-
-            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
-                futures = {
-                    executor.submit(_uninstall_env, name, group_tracker): name
-                    for name in env_order
-                }
-                for future in as_completed(futures):
-                    name, results = future.result()
-                    env_results[name] = results
-
-            group_tracker.finish()
         else:
-            with ThreadPoolExecutor(max_workers=len(env_order)) as executor:
-                futures = {
-                    executor.submit(_uninstall_env, name): name
-                    for name in env_order
-                }
-                for future in as_completed(futures):
-                    name, results = future.result()
-                    env_results[name] = results
+            group_tracker = None
+
+        def _uninstall_worker(name: str, path: str, token: InterruptToken) -> list:
+            return _uninstall_single_env(
+                name, path,
+                packages=packages, timeout=timeout,
+                tracker=group_tracker, interrupt_token=token,
+            )
+
+        env_results = run_per_env_parallel(group_ctx, _uninstall_worker)
+
+        if group_tracker is not None:
+            group_tracker.finish()
 
         # Phase 4: Show results
         if output == "json":

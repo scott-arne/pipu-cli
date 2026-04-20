@@ -543,21 +543,21 @@ class TestGroupExecution:
 
     def test_upgrade_group_not_found(self, runner):
         """upgrade -g with non-existent group shows error."""
-        with patch("pipu_cli.cli.get_group", return_value=None):
+        with patch("pipu_cli._group_runner.get_group", return_value=None):
             result = runner.invoke(cli, ["upgrade", "-g", "nogroup", "--yes"])
         assert "not found" in result.output.lower()
         assert result.exit_code == 1
 
     def test_outdated_group_not_found(self, runner):
         """outdated -g with non-existent group shows error."""
-        with patch("pipu_cli.cli.get_group", return_value=None):
+        with patch("pipu_cli._group_runner.get_group", return_value=None):
             result = runner.invoke(cli, ["outdated", "-g", "nogroup"])
         assert "not found" in result.output.lower()
         assert result.exit_code == 1
 
     def test_upgrade_group_runs_per_environment(self, runner):
         """upgrade -g inspects each environment in consolidated pipeline."""
-        with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/b"]), \
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a", "/python/b"]), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]) as mock_inspect, \
              patch("os.path.exists", return_value=True):
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
@@ -572,7 +572,7 @@ class TestGroupExecution:
         def path_exists(path):
             return path == "/python/a"
 
-        with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/missing"]), \
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a", "/python/missing"]), \
              patch("os.path.exists", side_effect=path_exists), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]):
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
@@ -581,7 +581,7 @@ class TestGroupExecution:
 
     def test_upgrade_group_shows_summary(self, runner):
         """upgrade -g shows phase progress and result summary."""
-        with patch("pipu_cli.cli.get_group", return_value=["/python/a"]), \
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a"]), \
              patch("os.path.exists", return_value=True), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]):
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
@@ -682,7 +682,7 @@ class TestInstallCommand:
 
     def test_install_group_not_found(self, runner):
         """install -g with non-existent group shows error."""
-        with patch("pipu_cli.cli.get_group", return_value=None):
+        with patch("pipu_cli._group_runner.get_group", return_value=None):
             result = runner.invoke(cli, ["install", "requests", "-g", "nogroup", "--yes"])
         assert "not found" in result.output.lower()
         assert result.exit_code == 1
@@ -693,7 +693,7 @@ class TestInstallCommand:
             InstalledResult(name="requests", version=Version("2.31.0"),
                             installed=True, previous_version=None)
         ]
-        with patch("pipu_cli.cli.get_group", return_value=["/python/a", "/python/b"]), \
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a", "/python/b"]), \
              patch("os.path.exists", return_value=True), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=[]), \
              patch("pipu_cli.cli.run_pip_install", return_value=results) as mock_install:
