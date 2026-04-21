@@ -1,7 +1,8 @@
 """Upgrade UI display layer using Rich progress components."""
 
 import threading
-from typing import Dict, List, Optional, Set
+from types import TracebackType
+from typing import Dict, List, Optional, Set, Type
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -99,6 +100,43 @@ class DownloadTracker:
         self._live.update(self._progress)
         self._live.stop()
 
+    def cleanup(self) -> None:
+        """Stop the progress display. Safe to call multiple times.
+
+        Idempotent alias for :meth:`finish` that swallows errors from an
+        already-stopped :class:`~rich.live.Live`.
+        """
+        try:
+            self.finish()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "DownloadTracker":
+        """Enter the context manager; the live display is already running."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        """Stop the live display and unconditionally restore the cursor.
+
+        :param exc_type: Exception type (unused).
+        :param exc: Exception instance (unused).
+        :param tb: Traceback (unused).
+        :returns: ``None`` so exceptions propagate.
+        """
+        try:
+            self.cleanup()
+        finally:
+            try:
+                self._live.console.show_cursor(True)
+            except Exception:
+                # Swallow errors during interrupt cleanup: stdout may already be closed.
+                pass
+
 
 class GroupInstallTracker:
     """Tracks per-environment install progress with fixed-width aligned bars.
@@ -185,6 +223,43 @@ class GroupInstallTracker:
         """Stop the progress display."""
         self._progress.stop()
 
+    def cleanup(self) -> None:
+        """Stop the progress display. Safe to call multiple times.
+
+        Idempotent alias for :meth:`finish` that swallows errors from an
+        already-stopped :class:`~rich.progress.Progress`.
+        """
+        try:
+            self.finish()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "GroupInstallTracker":
+        """Enter the context manager; the progress display is already running."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        """Stop the progress display and unconditionally restore the cursor.
+
+        :param exc_type: Exception type (unused).
+        :param exc: Exception instance (unused).
+        :param tb: Traceback (unused).
+        :returns: ``None`` so exceptions propagate.
+        """
+        try:
+            self.cleanup()
+        finally:
+            try:
+                self._progress.console.show_cursor(True)
+            except Exception:
+                # Swallow errors during interrupt cleanup: stdout may already be closed.
+                pass
+
 
 class UpgradeUI:
     """Manages upgrade command display: spinner/checkmark phases and progress trackers."""
@@ -210,6 +285,32 @@ class UpgradeUI:
             self._active_task_id = None
             self._active_description = None
         self.console.show_cursor(True)
+
+    def __enter__(self) -> "UpgradeUI":
+        """Enter the context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        """Stop any active progress and unconditionally restore the cursor.
+
+        :param exc_type: Exception type (unused).
+        :param exc: Exception instance (unused).
+        :param tb: Traceback (unused).
+        :returns: ``None`` so exceptions propagate.
+        """
+        try:
+            self.cleanup()
+        finally:
+            try:
+                self.console.show_cursor(True)
+            except Exception:
+                # Swallow errors during interrupt cleanup: stdout may already be closed.
+                pass
 
     def start_phase(self, description: str) -> None:
         """Start a new phase with a spinner.

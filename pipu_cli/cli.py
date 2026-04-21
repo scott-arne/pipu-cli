@@ -6,6 +6,7 @@ import multiprocessing as mp
 import sys
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Optional
 
@@ -863,149 +864,142 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     ui = UpgradeUI(console) if output != "json" else None
 
     try:
-        # Check cache freshness
-        use_cache = _print_cache_diagnostics(
-            console,
-            no_cache=no_cache,
-            cache_enabled=cache_enabled,
-            cache_ttl=cache_ttl,
-            output=output,
-        )
+        with (ui if ui is not None else nullcontext()):
+            # Check cache freshness
+            use_cache = _print_cache_diagnostics(
+                console,
+                no_cache=no_cache,
+                cache_enabled=cache_enabled,
+                cache_ttl=cache_ttl,
+                output=output,
+            )
 
-        # Step 1: Inspect installed packages
-        installed_packages, step1_time = _step1_inspect_packages(
-            console, output, timeout, debug, ui=ui,
-        )
+            # Step 1: Inspect installed packages
+            installed_packages, step1_time = _step1_inspect_packages(
+                console, output, timeout, debug, ui=ui,
+            )
 
-        if not installed_packages:
-            if output == "json":
-                print('{"error": "No packages found"}')
-            else:
-                console.print("[yellow]No packages found.[/yellow]")
-            sys.exit(0)
+            if not installed_packages:
+                if output == "json":
+                    print('{"error": "No packages found"}')
+                else:
+                    console.print("[yellow]No packages found.[/yellow]")
+                sys.exit(0)
 
-        # Step 2: Get latest versions (from cache or network)
-        latest_versions, step2_time, _ = _step2_get_latest_versions(
-            console, output, debug, installed_packages, use_cache, cache_enabled,
-            timeout, pre, parallel, ui=ui,
-        )
+            # Step 2: Get latest versions (from cache or network)
+            latest_versions, step2_time, _ = _step2_get_latest_versions(
+                console, output, debug, installed_packages, use_cache, cache_enabled,
+                timeout, pre, parallel, ui=ui,
+            )
 
-        if not latest_versions:
-            if output == "json":
-                print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
-            else:
-                console.print("\n[bold green]All packages are up to date![/bold green]")
-            sys.exit(0)
+            if not latest_versions:
+                if output == "json":
+                    print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
+                else:
+                    console.print("\n[bold green]All packages are up to date![/bold green]")
+                sys.exit(0)
 
-        # Step 3: Resolve upgradable packages
-        can_upgrade, blocked_packages, package_constraints, step3_time = _step3_resolve_packages(
-            console, output, debug, latest_versions, installed_packages, show_blocked,
-            exclude_str, packages, ui=ui,
-        )
+            # Step 3: Resolve upgradable packages
+            can_upgrade, blocked_packages, package_constraints, step3_time = _step3_resolve_packages(
+                console, output, debug, latest_versions, installed_packages, show_blocked,
+                exclude_str, packages, ui=ui,
+            )
 
-        if not can_upgrade:
+            if not can_upgrade:
+                if output == "json":
+                    assert json_formatter is not None
+                    json_data = json_formatter.format_all(
+                        upgradable=[],
+                        blocked=blocked_packages if show_blocked else None
+                    )
+                    print(json_data)
+                else:
+                    console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
+                    if show_blocked and blocked_packages:
+                        console.print()
+                        print_blocked_packages_table(blocked_packages, console=console)
+                sys.exit(0)
+
+            # Step 4: Display table and ask for confirmation
             if output == "json":
                 assert json_formatter is not None
-                json_data = json_formatter.format_all(
-                    upgradable=[],
-                    blocked=blocked_packages if show_blocked else None
-                )
-                print(json_data)
+                if dry_run:
+                    json_data = json_formatter.format_all(
+                        upgradable=can_upgrade,
+                        blocked=blocked_packages if show_blocked else None
+                    )
+                    print(json_data)
+                    sys.exit(0)
             else:
-                console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
+                console.print()
+                print_upgradable_packages_table(can_upgrade, console=console)
+
                 if show_blocked and blocked_packages:
                     console.print()
                     print_blocked_packages_table(blocked_packages, console=console)
-            sys.exit(0)
 
-        # Step 4: Display table and ask for confirmation
-        if output == "json":
-            assert json_formatter is not None
-            if dry_run:
-                json_data = json_formatter.format_all(
-                    upgradable=can_upgrade,
-                    blocked=blocked_packages if show_blocked else None
-                )
-                print(json_data)
-                sys.exit(0)
-        else:
-            console.print()
-            print_upgradable_packages_table(can_upgrade, console=console)
+                if interactive:
+                    can_upgrade = select_packages_interactively(can_upgrade, console)
+                    if not can_upgrade:
+                        console.print("[yellow]No packages selected for upgrade.[/yellow]")
+                        sys.exit(0)
 
-            if show_blocked and blocked_packages:
-                console.print()
-                print_blocked_packages_table(blocked_packages, console=console)
-
-            if interactive:
-                can_upgrade = select_packages_interactively(can_upgrade, console)
-                if not can_upgrade:
-                    console.print("[yellow]No packages selected for upgrade.[/yellow]")
+                if dry_run:
+                    console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
                     sys.exit(0)
 
-            if dry_run:
-                console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
-                sys.exit(0)
+            # Skip confirmation if interactive mode (already confirmed) or --yes flag
+            if not yes and not interactive and output != "json":
+                console.print()
+                confirm = click.confirm(f"Upgrade {len(can_upgrade)} package(s)?", default=True)
+                if not confirm:
+                    console.print("[yellow]Upgrade cancelled.[/yellow]")
+                    sys.exit(0)
 
-        # Skip confirmation if interactive mode (already confirmed) or --yes flag
-        if not yes and not interactive and output != "json":
-            console.print()
-            confirm = click.confirm(f"Upgrade {len(can_upgrade)} package(s)?", default=True)
-            if not confirm:
-                console.print("[yellow]Upgrade cancelled.[/yellow]")
-                sys.exit(0)
-
-        # Step 5: Install packages
-        results, step5_time = _step5_install_packages(
-            console, output, can_upgrade, package_constraints, ui=ui, debug=debug,
-            parallel=parallel,
-        )
-
-        # Update requirements file if requested
-        if update_requirements:
-            from pathlib import Path
-            from pipu_cli.requirements import update_requirements_file
-            req_path = Path(update_requirements)
-            updated = update_requirements_file(req_path, results)
-            if updated and output != "json":
-                console.print(f"\n[bold green]Updated {updated} package(s) in {update_requirements}[/bold green]")
-
-        # Print results summary
-        if output == "json":
-            assert json_formatter is not None
-            json_data = json_formatter.format_all(
-                upgradable=can_upgrade,
-                blocked=blocked_packages if show_blocked else None,
-                results=results
+            # Step 5: Install packages
+            results, step5_time = _step5_install_packages(
+                console, output, can_upgrade, package_constraints, ui=ui, debug=debug,
+                parallel=parallel,
             )
-            print(json_data)
-        else:
-            print_upgrade_results(results, console=console, verbose=debug)
 
-            if debug:
-                console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
-                total_time = step1_time + step2_time + step3_time + step5_time
-                console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
+            # Update requirements file if requested
+            if update_requirements:
+                from pathlib import Path
+                from pipu_cli.requirements import update_requirements_file
+                req_path = Path(update_requirements)
+                updated = update_requirements_file(req_path, results)
+                if updated and output != "json":
+                    console.print(f"\n[bold green]Updated {updated} package(s) in {update_requirements}[/bold green]")
 
-        # Exit with appropriate code
-        failed = [pkg for pkg in results if not pkg.upgraded]
-        if failed:
-            sys.exit(1)
-        else:
-            sys.exit(0)
+            # Print results summary
+            if output == "json":
+                assert json_formatter is not None
+                json_data = json_formatter.format_all(
+                    upgradable=can_upgrade,
+                    blocked=blocked_packages if show_blocked else None,
+                    results=results
+                )
+                print(json_data)
+            else:
+                print_upgrade_results(results, console=console, verbose=debug)
+
+                if debug:
+                    console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
+                    total_time = step1_time + step2_time + step3_time + step5_time
+                    console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
+
+            # Exit with appropriate code
+            failed = [pkg for pkg in results if not pkg.upgraded]
+            if failed:
+                sys.exit(1)
+            else:
+                sys.exit(0)
 
     except KeyboardInterrupt:
-        if ui:
-            ui.cleanup()
-        console.show_cursor(True)
         sys.exit(130)
     except click.Abort:
-        if ui:
-            ui.cleanup()
-        console.show_cursor(True)
         sys.exit(130)
     except Exception as e:
-        if ui:
-            ui.cleanup()
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)
 
@@ -1601,277 +1595,275 @@ def _run_group_upgrade(
     ui = UpgradeUI(console) if output != "json" else None
 
     try:
-        # Phase 1: Inspect all environments
-        env_installed: dict[str, list] = {}
-        if ui:
-            ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
-        for env_path in valid_envs:
-            installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
-            env_installed[reverse_map[env_path]] = installed
-        if ui:
-            total_pkgs = sum(len(v) for v in env_installed.values())
-            ui.complete_phase(f"Found {total_pkgs} total packages")
+        with (ui if ui is not None else nullcontext()):
+            # Phase 1: Inspect all environments
+            env_installed: dict[str, list] = {}
+            if ui:
+                ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
+            for env_path in valid_envs:
+                installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
+                env_installed[reverse_map[env_path]] = installed
+            if ui:
+                total_pkgs = sum(len(v) for v in env_installed.values())
+                ui.complete_phase(f"Found {total_pkgs} total packages")
 
-        # Phase 2: Fetch latest versions (deduplicated across environments)
-        if ui:
-            ui.start_phase("Checking for updates across all environments...")
-        # Merge all installed packages for a single version check
-        all_installed_by_name: dict = {}
-        for env_name, installed in env_installed.items():
-            for pkg in installed:
-                key = pkg.name.lower()
-                if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
-                    all_installed_by_name[key] = pkg
-        all_installed = list(all_installed_by_name.values())
+            # Phase 2: Fetch latest versions (deduplicated across environments)
+            if ui:
+                ui.start_phase("Checking for updates across all environments...")
+            # Merge all installed packages for a single version check
+            all_installed_by_name: dict = {}
+            for env_name, installed in env_installed.items():
+                for pkg in installed:
+                    key = pkg.name.lower()
+                    if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
+                        all_installed_by_name[key] = pkg
+            all_installed = list(all_installed_by_name.values())
 
-        effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
-        use_cache = cache_enabled and not no_cache
-        cache_was_used = False
+            effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+            use_cache = cache_enabled and not no_cache
+            cache_was_used = False
 
-        latest_versions: dict = {}
+            latest_versions: dict = {}
 
-        # Try cache first (using first env as cache key)
-        if use_cache and is_cache_fresh(effective_cache_ttl, python_path=valid_envs[0]):
-            cache_data = load_cache(python_path=valid_envs[0])
-            if cache_data and cache_data.latest_versions:
-                for pkg in all_installed:
-                    name_lower = pkg.name.lower()
-                    if name_lower in cache_data.latest_versions:
-                        try:
-                            latest_ver = Version(cache_data.latest_versions[name_lower])
-                            if latest_ver > pkg.version:
-                                latest_versions[pkg] = Package(name=pkg.name, version=latest_ver)
-                        except Exception:
-                            pass
-                cache_was_used = True
+            # Try cache first (using first env as cache key)
+            if use_cache and is_cache_fresh(effective_cache_ttl, python_path=valid_envs[0]):
+                cache_data = load_cache(python_path=valid_envs[0])
+                if cache_data and cache_data.latest_versions:
+                    for pkg in all_installed:
+                        name_lower = pkg.name.lower()
+                        if name_lower in cache_data.latest_versions:
+                            try:
+                                latest_ver = Version(cache_data.latest_versions[name_lower])
+                                if latest_ver > pkg.version:
+                                    latest_versions[pkg] = Package(name=pkg.name, version=latest_ver)
+                            except Exception:
+                                pass
+                    cache_was_used = True
 
-        if not cache_was_used:
-            if parallel > 1:
-                latest_versions = get_latest_versions_parallel(
-                    all_installed, timeout=timeout, include_prereleases=pre, max_workers=parallel,
-                )
-            else:
-                latest_versions = get_latest_versions(
-                    all_installed, timeout=timeout, include_prereleases=pre,
-                )
-            # Save to cache
-            if use_cache:
-                cache_dict = build_version_cache(latest_versions)
-                save_cache(cache_dict, include_prereleases=pre, python_path=valid_envs[0])
+            if not cache_was_used:
+                if parallel > 1:
+                    latest_versions = get_latest_versions_parallel(
+                        all_installed, timeout=timeout, include_prereleases=pre, max_workers=parallel,
+                    )
+                else:
+                    latest_versions = get_latest_versions(
+                        all_installed, timeout=timeout, include_prereleases=pre,
+                    )
+                # Save to cache
+                if use_cache:
+                    cache_dict = build_version_cache(latest_versions)
+                    save_cache(cache_dict, include_prereleases=pre, python_path=valid_envs[0])
 
-        # Re-key latest_versions by canonical name for cross-environment lookup
-        latest_by_name: dict[str, Package] = {
-            pkg.name.lower(): latest_versions[pkg] for pkg in latest_versions
-        }
+            # Re-key latest_versions by canonical name for cross-environment lookup
+            latest_by_name: dict[str, Package] = {
+                pkg.name.lower(): latest_versions[pkg] for pkg in latest_versions
+            }
 
-        if ui:
-            ui.complete_phase(f"{len(latest_versions)} packages with newer versions")
+            if ui:
+                ui.complete_phase(f"{len(latest_versions)} packages with newer versions")
 
-        # Phase 3: Resolve constraints per environment
-        if ui:
-            ui.start_phase("Resolving dependency constraints...")
-        env_upgrades: dict[str, list] = {}
-        all_blocked: list[tuple[str, BlockedPackageInfo]] = []
+            # Phase 3: Resolve constraints per environment
+            if ui:
+                ui.start_phase("Resolving dependency constraints...")
+            env_upgrades: dict[str, list] = {}
+            all_blocked: list[tuple[str, BlockedPackageInfo]] = []
 
-        for env_name, installed in env_installed.items():
-            env_latest = {pkg: latest_by_name[pkg.name.lower()] for pkg in installed if pkg.name.lower() in latest_by_name}
-            if show_blocked:
-                upgradable, blocked = resolve_upgradable_packages_with_reasons(env_latest, installed)
-                for b in blocked:
-                    all_blocked.append((env_name, b))
-            else:
-                upgradable = [p for p in resolve_upgradable_packages(env_latest, installed) if p.upgradable]
+            for env_name, installed in env_installed.items():
+                env_latest = {pkg: latest_by_name[pkg.name.lower()] for pkg in installed if pkg.name.lower() in latest_by_name}
+                if show_blocked:
+                    upgradable, blocked = resolve_upgradable_packages_with_reasons(env_latest, installed)
+                    for b in blocked:
+                        all_blocked.append((env_name, b))
+                else:
+                    upgradable = [p for p in resolve_upgradable_packages(env_latest, installed) if p.upgradable]
 
-            # Apply exclusions and package filters
-            excluded_names = set()
-            if exclude_str:
-                excluded_names = {n.strip().lower() for n in exclude_str.split(',')}
-            can_upgrade = [p for p in upgradable if p.name.lower() not in excluded_names]
-            if packages:
-                requested = {parse_package_spec(s).name for s in packages}
-                can_upgrade = [p for p in can_upgrade if canonicalize_name(p.name) in requested]
+                # Apply exclusions and package filters
+                excluded_names = set()
+                if exclude_str:
+                    excluded_names = {n.strip().lower() for n in exclude_str.split(',')}
+                can_upgrade = [p for p in upgradable if p.name.lower() not in excluded_names]
+                if packages:
+                    requested = {parse_package_spec(s).name for s in packages}
+                    can_upgrade = [p for p in can_upgrade if canonicalize_name(p.name) in requested]
 
-            env_upgrades[env_name] = can_upgrade
+                env_upgrades[env_name] = can_upgrade
 
-        total_upgradable = sum(len(v) for v in env_upgrades.values())
-        if ui:
-            ui.complete_phase(f"{total_upgradable} upgrades across {len(valid_envs)} environments")
+            total_upgradable = sum(len(v) for v in env_upgrades.values())
+            if ui:
+                ui.complete_phase(f"{total_upgradable} upgrades across {len(valid_envs)} environments")
 
-        if total_upgradable == 0:
+            if total_upgradable == 0:
+                if output != "json":
+                    console.print("\n[yellow]No packages can be upgraded.[/yellow]")
+                    if show_blocked and all_blocked:
+                        from pipu_cli.pretty import print_group_blocked_table
+                        print_group_blocked_table(all_blocked, console=console)
+                else:
+                    assert json_formatter is not None
+                    group_results = []
+                    for env_name in env_name_map:
+                        env_path = env_name_map[env_name]
+                        group_results.append({
+                            "environment": env_path,
+                            "upgradable": [],
+                            "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
+                            "results": [],
+                            "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                        })
+                    print(json_formatter.format_group_results(group_results))
+                sys.exit(0)
+
+            # Phase 4: Show matrix table and confirm
             if output != "json":
-                console.print("\n[yellow]No packages can be upgraded.[/yellow]")
+                console.print()
+                from pipu_cli.pretty import print_env_legend, print_group_upgrade_matrix
+                print_env_legend(env_name_map, console=console)
+                console.print()
+                print_group_upgrade_matrix(env_upgrades, env_name_map, console=console)
+
                 if show_blocked and all_blocked:
                     from pipu_cli.pretty import print_group_blocked_table
                     print_group_blocked_table(all_blocked, console=console)
-            else:
+
+                if not yes:
+                    console.print()
+                    confirm = click.confirm(
+                        f"Upgrade {total_upgradable} packages across {len(valid_envs)} environments?",
+                        default=True,
+                    )
+                    if not confirm:
+                        console.print("[yellow]Upgrade cancelled.[/yellow]")
+                        sys.exit(0)
+
+            # Phase 5: Save rollback state for each environment
+            from pipu_cli.rollback import save_state
+            for env_name, upgrades in env_upgrades.items():
+                if upgrades:
+                    env_path = env_name_map[env_name]
+                    pre_pkgs = [{"name": p.name, "version": str(p.version)} for p in upgrades]
+                    save_state(pre_pkgs, f"Pre-upgrade state ({env_path})")
+
+            # Phase 6: Shared download (editable packages bypass this)
+            env_specs: dict[str, list[str]] = {}
+            for env_name, upgrades in env_upgrades.items():
+                specs = []
+                for pkg in upgrades:
+                    if pkg.is_editable:
+                        continue
+                    name_key = canonicalize_name(pkg.name)
+                    if name_key in package_constraints:
+                        specs.append(f"{pkg.name}{package_constraints[name_key]}")
+                    else:
+                        specs.append(f"{pkg.name}=={pkg.latest_version}")
+                env_specs[env_name] = specs
+
+            with tempfile.TemporaryDirectory(prefix="pipu-group-") as tmp_dir:
+                dest_dir = Path(tmp_dir)
+
+                from pipu_cli.download import download_packages_for_group
+
+                if ui:
+                    unique_specs = list(dict.fromkeys(
+                        s for specs in env_specs.values() for s in specs
+                    ))
+                    tracker = ui.show_download_progress(unique_specs)
+                    def on_download_start(spec: str) -> None:
+                        tracker.start(spec)
+                    def on_download(spec: str, success: bool, error_msg: str) -> None:
+                        if success:
+                            tracker.complete(spec)
+                        else:
+                            tracker.fail(spec, error_msg)
+                    try:
+                        download_packages_for_group(
+                            env_specs, dest_dir, pre=pre, max_workers=parallel,
+                            progress_callback=on_download, start_callback=on_download_start,
+                        )
+                    except RuntimeError:
+                        pass
+                    finally:
+                        tracker.finish()
+                else:
+                    download_packages_for_group(env_specs, dest_dir, pre=pre, max_workers=parallel)
+
+                # Phase 7: Install per environment (fanned out via shared runner)
+                env_order = list(env_name_map.keys())
+                active_envs = [name for name in env_order if env_specs.get(name)]
+                active_ctx = GroupContext(
+                    name=group_ctx.name,
+                    envs={name: env_name_map[name] for name in active_envs},
+                )
+
+                if ui:
+                    env_totals = {name: len(env_specs.get(name, [])) for name in active_envs}
+                    group_tracker = ui.show_group_install_progress(active_envs, env_totals)
+                else:
+                    group_tracker = None
+
+                def _upgrade_worker(name: str, path: str, token: InterruptToken) -> list:
+                    return _upgrade_install_single_env(
+                        name, path, env_specs[name],
+                        dest_dir=dest_dir, tracker=group_tracker,
+                        interrupt_token=token,
+                    )
+
+                env_results = (
+                    run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
+                )
+
+                if group_tracker is not None:
+                    group_tracker.finish()
+
+                # Handle editable packages per environment
+                for env_name, upgrades in env_upgrades.items():
+                    editables = [p for p in upgrades if p.is_editable]
+                    if editables:
+                        env_path = env_name_map[env_name]
+                        if ui:
+                            ui.start_phase(f"Reinstalling {len(editables)} editable package(s) in {env_name}...")
+                        ed_results = reinstall_editable_packages(
+                            editables, timeout=300, python_path=env_path,
+                        )
+                        if ui:
+                            ui.complete_phase("done")
+                        if env_name in env_results:
+                            env_results[env_name].extend(ed_results)
+                        else:
+                            env_results[env_name] = list(ed_results)
+
+            # Phase 8: Show results
+            if output == "json":
                 assert json_formatter is not None
                 group_results = []
-                for env_name in env_name_map:
+                for env_name in env_order:
                     env_path = env_name_map[env_name]
+                    results = env_results.get(env_name, [])
+                    upgraded = len([r for r in results if r.upgraded])
+                    failed = len([r for r in results if not r.upgraded])
                     group_results.append({
                         "environment": env_path,
-                        "upgradable": [],
+                        "upgradable": [json_formatter._package_to_dict(p) for p in env_upgrades.get(env_name, [])],
                         "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
-                        "results": [],
-                        "summary": {"total": 0, "upgraded": 0, "failed": 0},
+                        "results": [json_formatter._package_to_dict(r) for r in results],
+                        "summary": {"total": upgraded + failed, "upgraded": upgraded, "failed": failed},
                     })
                 print(json_formatter.format_group_results(group_results))
+            else:
+                console.print()
+                from pipu_cli.pretty import print_group_results_matrix, print_group_blocked_table
+                print_group_results_matrix(env_results, env_name_map, console=console)
+                if show_blocked and all_blocked:
+                    print_group_blocked_table(all_blocked, console=console)
+
+            total_failed = sum(
+                len([r for r in env_results.get(n, []) if not r.upgraded])
+                for n in env_order
+            )
+            if total_failed:
+                sys.exit(1)
             sys.exit(0)
 
-        # Phase 4: Show matrix table and confirm
-        if output != "json":
-            console.print()
-            from pipu_cli.pretty import print_env_legend, print_group_upgrade_matrix
-            print_env_legend(env_name_map, console=console)
-            console.print()
-            print_group_upgrade_matrix(env_upgrades, env_name_map, console=console)
-
-            if show_blocked and all_blocked:
-                from pipu_cli.pretty import print_group_blocked_table
-                print_group_blocked_table(all_blocked, console=console)
-
-            if not yes:
-                console.print()
-                confirm = click.confirm(
-                    f"Upgrade {total_upgradable} packages across {len(valid_envs)} environments?",
-                    default=True,
-                )
-                if not confirm:
-                    console.print("[yellow]Upgrade cancelled.[/yellow]")
-                    sys.exit(0)
-
-        # Phase 5: Save rollback state for each environment
-        from pipu_cli.rollback import save_state
-        for env_name, upgrades in env_upgrades.items():
-            if upgrades:
-                env_path = env_name_map[env_name]
-                pre_pkgs = [{"name": p.name, "version": str(p.version)} for p in upgrades]
-                save_state(pre_pkgs, f"Pre-upgrade state ({env_path})")
-
-        # Phase 6: Shared download (editable packages bypass this)
-        env_specs: dict[str, list[str]] = {}
-        for env_name, upgrades in env_upgrades.items():
-            specs = []
-            for pkg in upgrades:
-                if pkg.is_editable:
-                    continue
-                name_key = canonicalize_name(pkg.name)
-                if name_key in package_constraints:
-                    specs.append(f"{pkg.name}{package_constraints[name_key]}")
-                else:
-                    specs.append(f"{pkg.name}=={pkg.latest_version}")
-            env_specs[env_name] = specs
-
-        with tempfile.TemporaryDirectory(prefix="pipu-group-") as tmp_dir:
-            dest_dir = Path(tmp_dir)
-
-            from pipu_cli.download import download_packages_for_group
-
-            if ui:
-                unique_specs = list(dict.fromkeys(
-                    s for specs in env_specs.values() for s in specs
-                ))
-                tracker = ui.show_download_progress(unique_specs)
-                def on_download_start(spec: str) -> None:
-                    tracker.start(spec)
-                def on_download(spec: str, success: bool, error_msg: str) -> None:
-                    if success:
-                        tracker.complete(spec)
-                    else:
-                        tracker.fail(spec, error_msg)
-                try:
-                    download_packages_for_group(
-                        env_specs, dest_dir, pre=pre, max_workers=parallel,
-                        progress_callback=on_download, start_callback=on_download_start,
-                    )
-                except RuntimeError:
-                    pass
-                finally:
-                    tracker.finish()
-            else:
-                download_packages_for_group(env_specs, dest_dir, pre=pre, max_workers=parallel)
-
-            # Phase 7: Install per environment (fanned out via shared runner)
-            env_order = list(env_name_map.keys())
-            active_envs = [name for name in env_order if env_specs.get(name)]
-            active_ctx = GroupContext(
-                name=group_ctx.name,
-                envs={name: env_name_map[name] for name in active_envs},
-            )
-
-            if ui:
-                env_totals = {name: len(env_specs.get(name, [])) for name in active_envs}
-                group_tracker = ui.show_group_install_progress(active_envs, env_totals)
-            else:
-                group_tracker = None
-
-            def _upgrade_worker(name: str, path: str, token: InterruptToken) -> list:
-                return _upgrade_install_single_env(
-                    name, path, env_specs[name],
-                    dest_dir=dest_dir, tracker=group_tracker,
-                    interrupt_token=token,
-                )
-
-            env_results = (
-                run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
-            )
-
-            if group_tracker is not None:
-                group_tracker.finish()
-
-            # Handle editable packages per environment
-            for env_name, upgrades in env_upgrades.items():
-                editables = [p for p in upgrades if p.is_editable]
-                if editables:
-                    env_path = env_name_map[env_name]
-                    if ui:
-                        ui.start_phase(f"Reinstalling {len(editables)} editable package(s) in {env_name}...")
-                    ed_results = reinstall_editable_packages(
-                        editables, timeout=300, python_path=env_path,
-                    )
-                    if ui:
-                        ui.complete_phase("done")
-                    if env_name in env_results:
-                        env_results[env_name].extend(ed_results)
-                    else:
-                        env_results[env_name] = list(ed_results)
-
-        # Phase 8: Show results
-        if output == "json":
-            assert json_formatter is not None
-            group_results = []
-            for env_name in env_order:
-                env_path = env_name_map[env_name]
-                results = env_results.get(env_name, [])
-                upgraded = len([r for r in results if r.upgraded])
-                failed = len([r for r in results if not r.upgraded])
-                group_results.append({
-                    "environment": env_path,
-                    "upgradable": [json_formatter._package_to_dict(p) for p in env_upgrades.get(env_name, [])],
-                    "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
-                    "results": [json_formatter._package_to_dict(r) for r in results],
-                    "summary": {"total": upgraded + failed, "upgraded": upgraded, "failed": failed},
-                })
-            print(json_formatter.format_group_results(group_results))
-        else:
-            console.print()
-            from pipu_cli.pretty import print_group_results_matrix, print_group_blocked_table
-            print_group_results_matrix(env_results, env_name_map, console=console)
-            if show_blocked and all_blocked:
-                print_group_blocked_table(all_blocked, console=console)
-
-        total_failed = sum(
-            len([r for r in env_results.get(n, []) if not r.upgraded])
-            for n in env_order
-        )
-        if total_failed:
-            sys.exit(1)
-        sys.exit(0)
-
     except KeyboardInterrupt:
-        if ui:
-            ui.cleanup()
-        console.show_cursor(True)
         sys.exit(130)
 
 
@@ -2245,103 +2237,101 @@ def _run_group_install(
     ui = UpgradeUI(console) if output != "json" else None
 
     try:
-        # Phase 1: Inspect current state across all environments
-        canonical_pkgs = [parse_package_spec(p).name for p in packages]
-        env_versions: dict[str, dict[str, Optional[Version]]] = {}
+        with (ui if ui is not None else nullcontext()):
+            # Phase 1: Inspect current state across all environments
+            canonical_pkgs = [parse_package_spec(p).name for p in packages]
+            env_versions: dict[str, dict[str, Optional[Version]]] = {}
 
-        if ui:
-            ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
+            if ui:
+                ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
 
-        for env_path in valid_envs:
-            installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
-            installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
-            short = reverse_map[env_path]
-            pkg_versions: dict[str, Optional[Version]] = {}
-            for i, spec in enumerate(packages):
-                pkg_versions[spec] = installed_map.get(canonical_pkgs[i])
-            env_versions[short] = pkg_versions
+            for env_path in valid_envs:
+                installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
+                installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
+                short = reverse_map[env_path]
+                pkg_versions: dict[str, Optional[Version]] = {}
+                for i, spec in enumerate(packages):
+                    pkg_versions[spec] = installed_map.get(canonical_pkgs[i])
+                env_versions[short] = pkg_versions
 
-        if ui:
-            ui.complete_phase(f"{len(valid_envs)} environments inspected")
+            if ui:
+                ui.complete_phase(f"{len(valid_envs)} environments inspected")
 
-        # Phase 2: Show matrix and confirm
-        if output != "json":
-            console.print()
-            print_env_legend(env_name_map, console=console)
-            console.print()
-            print_group_install_matrix(
-                env_versions, list(packages), env_name_map,
-                upgrade=not no_update, console=console,
-            )
-
-            if not yes:
-                action = "install/upgrade" if not no_update else "install"
+            # Phase 2: Show matrix and confirm
+            if output != "json":
                 console.print()
-                confirm = click.confirm(
-                    f"{action.capitalize()} {len(packages)} package(s) across {len(valid_envs)} environments?",
-                    default=True,
+                print_env_legend(env_name_map, console=console)
+                console.print()
+                print_group_install_matrix(
+                    env_versions, list(packages), env_name_map,
+                    upgrade=not no_update, console=console,
                 )
-                if not confirm:
-                    console.print("[yellow]Installation cancelled.[/yellow]")
-                    sys.exit(0)
 
-        # Phase 3: Parallel install across environments via shared runner
-        env_order = list(env_name_map.keys())
+                if not yes:
+                    action = "install/upgrade" if not no_update else "install"
+                    console.print()
+                    confirm = click.confirm(
+                        f"{action.capitalize()} {len(packages)} package(s) across {len(valid_envs)} environments?",
+                        default=True,
+                    )
+                    if not confirm:
+                        console.print("[yellow]Installation cancelled.[/yellow]")
+                        sys.exit(0)
 
-        if ui:
-            env_totals = {name: len(packages) for name in env_order}
-            group_tracker = ui.show_group_install_progress(env_order, env_totals)
-        else:
-            group_tracker = None
+            # Phase 3: Parallel install across environments via shared runner
+            env_order = list(env_name_map.keys())
 
-        def _install_worker(name: str, path: str, token: InterruptToken) -> list:
-            return _install_single_env(
-                name, path,
-                packages=packages, no_update=no_update,
-                timeout=timeout, pre=pre,
-                tracker=group_tracker, interrupt_token=token,
+            if ui:
+                env_totals = {name: len(packages) for name in env_order}
+                group_tracker = ui.show_group_install_progress(env_order, env_totals)
+            else:
+                group_tracker = None
+
+            def _install_worker(name: str, path: str, token: InterruptToken) -> list:
+                return _install_single_env(
+                    name, path,
+                    packages=packages, no_update=no_update,
+                    timeout=timeout, pre=pre,
+                    tracker=group_tracker, interrupt_token=token,
+                )
+
+            env_results = run_per_env_parallel(group_ctx, _install_worker)
+
+            if group_tracker is not None:
+                group_tracker.finish()
+
+            # Phase 4: Show results
+            if output == "json":
+                assert json_formatter is not None
+                group_results = []
+                for env_name in env_order:
+                    env_path = env_name_map[env_name]
+                    env_res = env_results.get(env_name, [])
+                    n_installed = len([r for r in env_res if r.installed])
+                    n_failed = len([r for r in env_res if not r.installed])
+                    group_results.append({
+                        "environment": env_path,
+                        "results": [json_formatter._package_to_dict(r) for r in env_res],
+                        "summary": {
+                            "total": len(env_res),
+                            "installed": n_installed,
+                            "failed": n_failed,
+                        },
+                    })
+                print(json_formatter.format_group_install_results(group_results))
+            else:
+                console.print()
+                print_group_install_results_matrix(env_results, env_name_map, console=console)
+
+            total_failed = sum(
+                len([r for r in env_results.get(n, []) if not r.installed])
+                for n in env_order
             )
-
-        env_results = run_per_env_parallel(group_ctx, _install_worker)
-
-        if group_tracker is not None:
-            group_tracker.finish()
-
-        # Phase 4: Show results
-        if output == "json":
-            assert json_formatter is not None
-            group_results = []
-            for env_name in env_order:
-                env_path = env_name_map[env_name]
-                env_res = env_results.get(env_name, [])
-                n_installed = len([r for r in env_res if r.installed])
-                n_failed = len([r for r in env_res if not r.installed])
-                group_results.append({
-                    "environment": env_path,
-                    "results": [json_formatter._package_to_dict(r) for r in env_res],
-                    "summary": {
-                        "total": len(env_res),
-                        "installed": n_installed,
-                        "failed": n_failed,
-                    },
-                })
-            print(json_formatter.format_group_install_results(group_results))
-        else:
-            console.print()
-            print_group_install_results_matrix(env_results, env_name_map, console=console)
-
-        total_failed = sum(
-            len([r for r in env_results.get(n, []) if not r.installed])
-            for n in env_order
-        )
-        if total_failed:
-            sys.exit(1)
-        sys.exit(0)
+            if total_failed:
+                sys.exit(1)
+            sys.exit(0)
 
     except KeyboardInterrupt:
-        if ui:
-            ui.cleanup()
-        console.show_cursor(True)
         sys.exit(130)
 
 
@@ -2521,106 +2511,104 @@ def _run_group_uninstall(
     ui = UpgradeUI(console) if output != "json" else None
 
     try:
-        # Phase 1: Inspect current state across all environments
-        canonical_pkgs = [parse_package_spec(p).name for p in packages]
-        env_versions: dict[str, dict[str, Optional[Version]]] = {}
+        with (ui if ui is not None else nullcontext()):
+            # Phase 1: Inspect current state across all environments
+            canonical_pkgs = [parse_package_spec(p).name for p in packages]
+            env_versions: dict[str, dict[str, Optional[Version]]] = {}
 
-        if ui:
-            ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
+            if ui:
+                ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
 
-        for env_path in valid_envs:
-            installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
-            installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
-            short = reverse_map[env_path]
-            pkg_versions: dict[str, Optional[Version]] = {}
-            for i, pkg_name in enumerate(packages):
-                pkg_versions[pkg_name] = installed_map.get(canonical_pkgs[i])
-            env_versions[short] = pkg_versions
+            for env_path in valid_envs:
+                installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
+                installed_map: dict[str, Version] = {canonicalize_name(p.name): p.version for p in installed}
+                short = reverse_map[env_path]
+                pkg_versions: dict[str, Optional[Version]] = {}
+                for i, pkg_name in enumerate(packages):
+                    pkg_versions[pkg_name] = installed_map.get(canonical_pkgs[i])
+                env_versions[short] = pkg_versions
 
-        if ui:
-            ui.complete_phase(f"{len(valid_envs)} environments inspected")
+            if ui:
+                ui.complete_phase(f"{len(valid_envs)} environments inspected")
 
-        # Phase 2: Show matrix and confirm
-        if output != "json":
-            console.print()
-            print_env_legend(env_name_map, console=console)
-            console.print()
-            print_group_uninstall_matrix(
-                env_versions, list(packages), env_name_map, console=console,
-            )
-
-            if not yes:
+            # Phase 2: Show matrix and confirm
+            if output != "json":
                 console.print()
-                confirm = click.confirm(
-                    f"Uninstall {len(packages)} package(s) across {len(valid_envs)} environments?",
-                    default=True,
+                print_env_legend(env_name_map, console=console)
+                console.print()
+                print_group_uninstall_matrix(
+                    env_versions, list(packages), env_name_map, console=console,
                 )
-                if not confirm:
-                    console.print("[yellow]Uninstallation cancelled.[/yellow]")
-                    sys.exit(0)
 
-        # Phase 3: Parallel uninstall across environments via shared runner
-        env_order = list(env_name_map.keys())
+                if not yes:
+                    console.print()
+                    confirm = click.confirm(
+                        f"Uninstall {len(packages)} package(s) across {len(valid_envs)} environments?",
+                        default=True,
+                    )
+                    if not confirm:
+                        console.print("[yellow]Uninstallation cancelled.[/yellow]")
+                        sys.exit(0)
 
-        if ui:
-            env_totals = {name: len(packages) for name in env_order}
-            group_tracker = ui.show_group_install_progress(env_order, env_totals)
-        else:
-            group_tracker = None
+            # Phase 3: Parallel uninstall across environments via shared runner
+            env_order = list(env_name_map.keys())
 
-        def _uninstall_worker(name: str, path: str, token: InterruptToken) -> list:
-            return _uninstall_single_env(
-                name, path,
-                packages=packages, timeout=timeout,
-                tracker=group_tracker, interrupt_token=token,
+            if ui:
+                env_totals = {name: len(packages) for name in env_order}
+                group_tracker = ui.show_group_install_progress(env_order, env_totals)
+            else:
+                group_tracker = None
+
+            def _uninstall_worker(name: str, path: str, token: InterruptToken) -> list:
+                return _uninstall_single_env(
+                    name, path,
+                    packages=packages, timeout=timeout,
+                    tracker=group_tracker, interrupt_token=token,
+                )
+
+            env_results = run_per_env_parallel(group_ctx, _uninstall_worker)
+
+            if group_tracker is not None:
+                group_tracker.finish()
+
+            # Phase 4: Show results
+            if output == "json":
+                assert json_formatter is not None
+                group_results = []
+                for env_name in env_order:
+                    env_path = env_name_map[env_name]
+                    results = env_results.get(env_name, [])
+                    uninstalled = len([r for r in results if r.uninstalled])
+                    failed = len([r for r in results if not r.uninstalled])
+                    group_results.append({
+                        "environment": env_path,
+                        "results": [{
+                            "name": r.name,
+                            "previous_version": str(r.previous_version) if r.previous_version else None,
+                            "uninstalled": r.uninstalled,
+                            "already_absent": r.already_absent,
+                            "failure_reason": r.failure_reason,
+                        } for r in results],
+                        "summary": {
+                            "total": len(results),
+                            "uninstalled": uninstalled,
+                            "failed": failed,
+                        },
+                    })
+                print(json_formatter.format_group_uninstall_results(group_results))
+            else:
+                console.print()
+                print_group_uninstall_results_matrix(env_results, env_name_map, console=console)
+
+            total_failed = sum(
+                len([r for r in env_results.get(n, []) if not r.uninstalled])
+                for n in env_order
             )
-
-        env_results = run_per_env_parallel(group_ctx, _uninstall_worker)
-
-        if group_tracker is not None:
-            group_tracker.finish()
-
-        # Phase 4: Show results
-        if output == "json":
-            assert json_formatter is not None
-            group_results = []
-            for env_name in env_order:
-                env_path = env_name_map[env_name]
-                results = env_results.get(env_name, [])
-                uninstalled = len([r for r in results if r.uninstalled])
-                failed = len([r for r in results if not r.uninstalled])
-                group_results.append({
-                    "environment": env_path,
-                    "results": [{
-                        "name": r.name,
-                        "previous_version": str(r.previous_version) if r.previous_version else None,
-                        "uninstalled": r.uninstalled,
-                        "already_absent": r.already_absent,
-                        "failure_reason": r.failure_reason,
-                    } for r in results],
-                    "summary": {
-                        "total": len(results),
-                        "uninstalled": uninstalled,
-                        "failed": failed,
-                    },
-                })
-            print(json_formatter.format_group_uninstall_results(group_results))
-        else:
-            console.print()
-            print_group_uninstall_results_matrix(env_results, env_name_map, console=console)
-
-        total_failed = sum(
-            len([r for r in env_results.get(n, []) if not r.uninstalled])
-            for n in env_order
-        )
-        if total_failed:
-            sys.exit(1)
-        sys.exit(0)
+            if total_failed:
+                sys.exit(1)
+            sys.exit(0)
 
     except KeyboardInterrupt:
-        if ui:
-            ui.cleanup()
-        console.show_cursor(True)
         sys.exit(130)
 
 

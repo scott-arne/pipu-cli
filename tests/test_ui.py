@@ -1,6 +1,9 @@
 """Tests for upgrade UI display."""
 
 from io import StringIO
+from unittest.mock import patch
+
+import pytest
 from rich.console import Console
 
 from pipu_cli.ui import UpgradeUI
@@ -154,3 +157,48 @@ class TestGroupInstallTracker:
         tracker.finish()
         output = console.file.getvalue()
         assert "main" in output
+
+
+class TestContextManagerCursorRestoration:
+    """Context manager protocol guarantees cursor restoration on exception."""
+
+    def test_upgrade_ui_restores_cursor_on_exception(self):
+        console = Console(file=StringIO(), force_terminal=True, highlight=False)
+        with patch.object(console, "show_cursor", wraps=console.show_cursor) as spy:
+            with pytest.raises(KeyboardInterrupt):
+                with UpgradeUI(console) as ui:
+                    ui.start_phase("Working...")
+                    raise KeyboardInterrupt
+            assert any(
+                call.args == (True,) or call.kwargs.get("visible") is True
+                for call in spy.call_args_list
+            ), f"show_cursor(True) was not called; calls={spy.call_args_list}"
+
+    def test_download_tracker_restores_cursor_on_exception(self):
+        console = Console(file=StringIO(), force_terminal=True, highlight=False)
+        ui = UpgradeUI(console)
+        with patch.object(console, "show_cursor", wraps=console.show_cursor) as spy:
+            with pytest.raises(KeyboardInterrupt):
+                with ui.show_download_progress(["requests==2.31.0"]) as tracker:
+                    tracker.start("requests==2.31.0")
+                    raise KeyboardInterrupt
+            assert any(
+                call.args == (True,) or call.kwargs.get("visible") is True
+                for call in spy.call_args_list
+            ), f"show_cursor(True) was not called; calls={spy.call_args_list}"
+
+    def test_group_install_tracker_restores_cursor_on_exception(self):
+        console = Console(file=StringIO(), force_terminal=True, highlight=False)
+        ui = UpgradeUI(console)
+        with patch.object(console, "show_cursor", wraps=console.show_cursor) as spy:
+            with pytest.raises(KeyboardInterrupt):
+                with ui.show_group_install_progress(
+                    env_names=["main"],
+                    env_totals={"main": 2},
+                ) as tracker:
+                    tracker.advance("main", "requests")
+                    raise KeyboardInterrupt
+            assert any(
+                call.args == (True,) or call.kwargs.get("visible") is True
+                for call in spy.call_args_list
+            ), f"show_cursor(True) was not called; calls={spy.call_args_list}"
