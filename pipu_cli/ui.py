@@ -14,6 +14,14 @@ CROSS = "\u2717"
 BULLET = "\u25cc"
 DOT = "\u00b7"
 
+STYLES = {
+    "success": "green",
+    "failure": "red",
+    "warning": "yellow",
+    "info": "cyan",
+    "dim": "dim",
+}
+
 ENV_NAME_MAX = 16
 PKG_NAME_MAX = 20
 
