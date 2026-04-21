@@ -11,7 +11,9 @@ is performed at upgrade time with the current installed package state.
 import hashlib
 import json
 import logging
+import os
 import sys
+import tempfile
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,11 @@ from pipu_cli.config import DEFAULT_CACHE_TTL, CACHE_BASE_DIR
 logger = logging.getLogger(__name__)
 
 
+#: Version of the on-disk cache schema. Bump when incompatible changes are made
+#: to :class:`CacheData`; loaders treat a mismatch as a stale cache.
+CACHE_SCHEMA_VERSION = 1
+
+
 @dataclass
 class CacheData:
     """Cache data structure - stores latest versions from PyPI."""
@@ -33,6 +40,7 @@ class CacheData:
     include_prereleases: bool
     # Maps package name (lowercase) to latest version string
     latest_versions: Dict[str, str]
+    schema_version: int = CACHE_SCHEMA_VERSION
 
 
 def get_environment_id(python_path: Optional[str] = None) -> str:
@@ -86,6 +94,14 @@ def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
         with open(cache_path, 'r') as f:
             data = json.load(f)
 
+        # Reject caches written by a different schema version so we never try
+        # to materialize a CacheData from an incompatible payload.
+        if data.get("schema_version") != CACHE_SCHEMA_VERSION:
+            logger.debug(
+                f"Cache schema version mismatch (got {data.get('schema_version')!r}), ignoring"
+            )
+            return None
+
         # Validate the cache is for the current environment
         env_id = get_environment_id(python_path=python_path)
         if data.get("environment_id") != env_id:
@@ -97,39 +113,84 @@ def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
             python_executable=data["python_executable"],
             updated_at=data["updated_at"],
             include_prereleases=data.get("include_prereleases", False),
-            latest_versions=data.get("latest_versions", {})
+            latest_versions=data.get("latest_versions", {}),
+            schema_version=data.get("schema_version", CACHE_SCHEMA_VERSION),
         )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.debug(f"Failed to load cache: {e}")
         return None
 
 
-def save_cache(latest_versions: Dict[str, str], include_prereleases: bool = False, python_path: Optional[str] = None) -> Path:
-    """Save latest version data to the cache.
+def save_cache(
+    latest_versions: Dict[str, str],
+    include_prereleases: bool = False,
+    python_path: Optional[str] = None,
+) -> Path:
+    """Save latest version data to the cache atomically.
 
-    :param latest_versions: Dictionary mapping package names (lowercase) to latest version strings
-    :param include_prereleases: Whether prereleases were included in version check
-    :param python_path: Optional path to Python executable for environment identification
-    :returns: Path to the saved cache file
+    Writes to a sibling temp file and calls :func:`os.replace` so a partial
+    write, a crash, or a concurrent writer cannot leave a truncated JSON
+    file on disk. The cache directory is created with mode ``0o700`` so
+    other users on the host cannot read the cache.
+
+    :param latest_versions: Mapping of canonicalized package names to latest version strings.
+    :param include_prereleases: Whether prereleases were included when probing.
+    :param python_path: Optional path to a Python executable (identifies the environment).
+    :returns: Path to the cache file.
     """
     cache_dir = get_cache_dir(python_path=python_path)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     cache_path = get_cache_path(python_path=python_path)
 
     cache_data = CacheData(
+        schema_version=CACHE_SCHEMA_VERSION,
         environment_id=get_environment_id(python_path=python_path),
         python_executable=python_path if python_path is not None else sys.executable,
         updated_at=datetime.now(timezone.utc).isoformat(),
         include_prereleases=include_prereleases,
-        latest_versions=latest_versions
+        latest_versions=latest_versions,
     )
 
-    with open(cache_path, 'w') as f:
-        json.dump(asdict(cache_data), f, indent=2)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=str(cache_dir),
+        prefix=cache_path.name + ".",
+        suffix=".tmp",
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        json.dump(asdict(cache_data), tmp, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, cache_path)
+    except Exception:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
 
     logger.debug(f"Cache saved to {cache_path}")
     return cache_path
+
+
+def _parse_iso_timestamp(raw: str) -> datetime:
+    """Parse an ISO 8601 timestamp and normalize to UTC-aware.
+
+    :param raw: ISO 8601 string (may or may not carry a tz offset).
+    :returns: A tz-aware ``datetime`` in UTC.
+    :raises ValueError: On malformed input (caller should treat as stale).
+    """
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL, python_path: Optional[str] = None) -> bool:
@@ -144,9 +205,7 @@ def is_cache_fresh(ttl_seconds: int = DEFAULT_CACHE_TTL, python_path: Optional[s
         return False
 
     try:
-        updated_at = datetime.fromisoformat(cache.updated_at)
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        updated_at = _parse_iso_timestamp(cache.updated_at)
 
         age = datetime.now(timezone.utc) - updated_at
         is_fresh = age.total_seconds() < ttl_seconds
@@ -169,9 +228,7 @@ def get_cache_age_seconds(python_path: Optional[str] = None) -> Optional[float]:
         return None
 
     try:
-        updated_at = datetime.fromisoformat(cache.updated_at)
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        updated_at = _parse_iso_timestamp(cache.updated_at)
 
         age = datetime.now(timezone.utc) - updated_at
         return age.total_seconds()

@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, Mock
 
+import pytest
 from packaging.version import Version
 
 from pipu_cli.cache import (
@@ -108,6 +109,8 @@ class TestLoadCache:
 
     def test_load_cache_success(self, tmp_path):
         """Test successful cache load."""
+        from pipu_cli.cache import CACHE_SCHEMA_VERSION
+
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
             cache_path = get_cache_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +118,7 @@ class TestLoadCache:
             env_id = get_environment_id()
             now = datetime.now(timezone.utc).isoformat()
             cache_data = {
+                "schema_version": CACHE_SCHEMA_VERSION,
                 "environment_id": env_id,
                 "python_executable": sys.executable,
                 "updated_at": now,
@@ -186,6 +190,36 @@ class TestSaveCache:
             assert "numpy" in loaded.latest_versions
             assert loaded.latest_versions["numpy"] == "1.26.0"
 
+    def test_save_cache_is_atomic_on_failure(self, tmp_path, monkeypatch):
+        """A failing os.replace must NOT truncate or remove the prior cache file."""
+        monkeypatch.setattr("pipu_cli.cache.CACHE_BASE_DIR", tmp_path)
+
+        # Seed a valid cache via the public API.
+        save_cache({"requests": "2.30.0"}, include_prereleases=False, python_path="/opt/py/bin/python")
+        cache_path = get_cache_path(python_path="/opt/py/bin/python")
+        original = cache_path.read_text()
+
+        # Force os.replace to fail; the new call must raise and leave the original intact.
+        def boom(*a, **k):
+            raise OSError("simulated atomic failure")
+        monkeypatch.setattr("pipu_cli.cache.os.replace", boom)
+        with pytest.raises(OSError):
+            save_cache({"requests": "2.99.0"}, include_prereleases=False, python_path="/opt/py/bin/python")
+        assert cache_path.read_text() == original
+        # And the scratch temp file must have been cleaned up.
+        leftovers = [p for p in cache_path.parent.iterdir() if p.suffix == ".tmp"]
+        assert leftovers == []
+
+    def test_schema_mismatch_treated_as_stale(self, tmp_path, monkeypatch):
+        """A cache file with a foreign schema_version must load as None, not crash."""
+        monkeypatch.setattr("pipu_cli.cache.CACHE_BASE_DIR", tmp_path)
+        save_cache({"requests": "2.30.0"}, include_prereleases=False, python_path="/opt/py/bin/python")
+        cache_path = get_cache_path(python_path="/opt/py/bin/python")
+        data = json.loads(cache_path.read_text())
+        data["schema_version"] = 999
+        cache_path.write_text(json.dumps(data))
+        assert load_cache(python_path="/opt/py/bin/python") is None
+
 
 class TestCacheFreshness:
     """Tests for cache freshness functions."""
@@ -203,6 +237,8 @@ class TestCacheFreshness:
 
     def test_is_cache_fresh_returns_false_for_old_cache(self, tmp_path):
         """Test is_cache_fresh returns False for stale cache."""
+        from pipu_cli.cache import CACHE_SCHEMA_VERSION
+
         with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
             cache_path = get_cache_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +247,7 @@ class TestCacheFreshness:
             # Set updated_at to 2 hours ago
             old_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
             cache_data = {
+                "schema_version": CACHE_SCHEMA_VERSION,
                 "environment_id": env_id,
                 "python_executable": sys.executable,
                 "updated_at": old_time,
