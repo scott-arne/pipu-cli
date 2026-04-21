@@ -2,6 +2,7 @@
 
 import json
 import sys
+import click
 import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, Mock
@@ -477,7 +478,7 @@ class TestGroupCommands:
 
     def test_group_add_default_python(self, runner):
         """group add without --python uses sys.executable."""
-        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+        with patch("pipu_cli.cli.validate_python_path", return_value=sys.executable), \
              patch("pipu_cli.cli.add_environment", return_value=True) as mock_add:
             result = runner.invoke(cli, ["group", "add", "mygroup"])
         assert result.exit_code == 0
@@ -485,7 +486,7 @@ class TestGroupCommands:
 
     def test_group_add_with_python_path(self, runner):
         """group add with --python uses specified path."""
-        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+        with patch("pipu_cli.cli.validate_python_path", return_value="/other/python"), \
              patch("pipu_cli.cli.add_environment", return_value=True) as mock_add:
             result = runner.invoke(cli, ["group", "add", "mygroup", "--python", "/other/python"])
         assert result.exit_code == 0
@@ -493,7 +494,10 @@ class TestGroupCommands:
 
     def test_group_add_validation_failure(self, runner):
         """group add fails when validation fails."""
-        with patch("pipu_cli.cli.validate_python_path", return_value=(False, "Not a Python interpreter")):
+        with patch(
+            "pipu_cli.cli.validate_python_path",
+            side_effect=click.ClickException("Not a Python interpreter"),
+        ):
             result = runner.invoke(cli, ["group", "add", "mygroup", "--python", "/not/python"])
         assert "Not a Python interpreter" in result.output
         assert result.exit_code == 1
@@ -507,7 +511,7 @@ class TestGroupCommands:
 
     def test_group_add_duplicate(self, runner):
         """group add with duplicate shows notice."""
-        with patch("pipu_cli.cli.validate_python_path", return_value=(True, None)), \
+        with patch("pipu_cli.cli.validate_python_path", return_value=sys.executable), \
              patch("pipu_cli.cli.add_environment", return_value=False):
             result = runner.invoke(cli, ["group", "add", "mygroup"])
         assert "already in group" in result.output.lower()

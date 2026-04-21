@@ -1,8 +1,10 @@
 """Tests for groups module."""
 
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 
 from pipu_cli.groups import (
@@ -13,6 +15,7 @@ from pipu_cli.groups import (
     delete_group,
     list_groups,
     get_group,
+    validate_group_name,
     validate_python_path,
 )
 
@@ -189,21 +192,59 @@ class TestValidatePythonPath:
     """Tests for Python path validation."""
 
     def test_validate_current_python(self):
-        """Current Python executable passes validation."""
-        is_valid, error = validate_python_path(sys.executable)
-        assert is_valid is True
-        assert error is None
+        """Current Python executable passes validation and returns resolved path."""
+        path = validate_python_path(sys.executable)
+        assert isinstance(path, str)
+        assert path == str(Path(sys.executable).resolve())
 
     def test_validate_nonexistent_path(self):
-        """Non-existent path fails validation."""
-        is_valid, error = validate_python_path("/nonexistent/python")
-        assert is_valid is False
-        assert "does not exist" in error  # pyright: ignore[reportOperatorIssue]
+        """Non-existent path raises ClickException."""
+        with pytest.raises(click.ClickException):
+            validate_python_path("/nonexistent/python")
 
-    def test_validate_non_python(self, tmp_path):
-        """A non-Python executable fails validation."""
-        fake = tmp_path / "not_python"
-        fake.write_text("#!/bin/bash\necho 'not python'")
-        fake.chmod(0o755)
-        is_valid, error = validate_python_path(str(fake))
-        assert is_valid is False
+    def test_validate_python_path_resolves_symlinks(self, tmp_path):
+        """Symlinks are resolved to their canonical target."""
+        real = tmp_path / "real_python"
+        real.write_text("#!/bin/sh\nexit 0\n")
+        real.chmod(0o755)
+        link = tmp_path / "link_python"
+        link.symlink_to(real)
+        resolved = validate_python_path(str(link))
+        assert Path(resolved) == real.resolve()
+
+    def test_validate_python_path_rejects_missing(self, tmp_path):
+        """Missing paths raise ClickException."""
+        with pytest.raises(click.ClickException):
+            validate_python_path(str(tmp_path / "does_not_exist"))
+
+    def test_validate_python_path_rejects_directory(self, tmp_path):
+        """Directories are rejected even though they are traversable (x bit)."""
+        with pytest.raises(click.ClickException, match="Not a file"):
+            validate_python_path(str(tmp_path))
+
+
+class TestValidateGroupName:
+    """Tests for validate_group_name."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "has space",
+            "slash/name",
+            "semi;colon",
+            "",
+            "weird*",
+            "data\nsci",  # guards against re.match (matches at start without $)
+            ".",
+            "-",
+        ],
+    )
+    def test_reject_invalid_group_name(self, bad):
+        """Invalid group names raise ClickException."""
+        with pytest.raises(click.ClickException):
+            validate_group_name(bad)
+
+    @pytest.mark.parametrize("good", ["data", "data-sci", "data_sci", "data.sci", "d1", "A-B.C_1"])
+    def test_accept_valid_group_name(self, good):
+        """Valid group names pass without raising."""
+        validate_group_name(good)  # no raise

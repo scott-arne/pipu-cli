@@ -1467,9 +1467,10 @@ def group_add(group_name: str, python_path: Optional[str], force: bool) -> None:
         python_path = sys.executable
 
     if not force:
-        is_valid, error = validate_python_path(python_path)
-        if not is_valid:
-            console.print(f"[red]Invalid Python path:[/red] {error}")
+        try:
+            python_path = validate_python_path(python_path)
+        except click.ClickException as e:
+            console.print(f"[red]Invalid Python path:[/red] {e.message}")
             sys.exit(1)
 
     added = add_environment(group_name, python_path)
