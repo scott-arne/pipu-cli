@@ -93,6 +93,29 @@ class TestDownloadPackages:
         result = download_packages(specs=[], dest_dir=tmp_path)
         assert result == []
 
+    def test_download_os_error_surfaces_reason(self, tmp_path):
+        """OSError from subprocess.run (e.g. missing interpreter) reaches the progress callback."""
+        failures = []
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "/nope/python")
+
+        def callback(spec, success, error_msg):
+            if not success:
+                failures.append((spec, error_msg))
+
+        with patch("pipu_cli.download.subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="Failed to download"):
+                download_packages(
+                    specs=["requests==2.31.0"],
+                    dest_dir=tmp_path,
+                    progress_callback=callback,
+                )
+
+        assert len(failures) == 1
+        assert failures[0][0] == "requests==2.31.0"
+        assert "No such file or directory" in failures[0][1] or "/nope/python" in failures[0][1]
+
 
 class TestInstallFromLocal:
     """Tests for install_from_local function."""

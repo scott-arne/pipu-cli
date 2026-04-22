@@ -34,7 +34,7 @@ from pipu_cli.package_management import (
     run_pip_uninstall,
 )
 from packaging.utils import canonicalize_name
-from packaging.version import Version
+from packaging.version import Version, InvalidVersion
 from pipu_cli.pretty import (
     print_upgradable_packages_table,
     print_upgrade_results,
@@ -434,7 +434,7 @@ def _step2_get_latest_versions(
                         if latest_ver > installed_pkg.version:
                             latest_pkg = Package(name=installed_pkg.name, version=latest_ver)
                             latest_versions[installed_pkg] = latest_pkg
-                    except Exception:
+                    except InvalidVersion:
                         pass
             cache_was_used = True
         else:
@@ -1325,19 +1325,33 @@ def rollback(list_states_flag: bool, dry_run: bool, yes: bool, state: Optional[s
     if output != "json":
         console.print("\n[bold]Rolling back packages...[/bold]\n")
 
-    rolled_back = rollback_to_state(state_data, dry_run=False)
+    result = rollback_to_state(state_data, dry_run=False)
 
     if output == "json":
-        print(json.dumps({"rolled_back": rolled_back or []}, indent=2))
+        print(json.dumps({
+            "rolled_back": [p.spec for p in result.succeeded],
+            "failed": [
+                {"spec": p.spec, "reason": p.reason}
+                for p in result.failed
+            ],
+        }, indent=2))
     else:
-        if rolled_back:
-            console.print(f"\n[bold green]Successfully rolled back {len(rolled_back)} package(s):[/bold green]")
-            for pkg in rolled_back:
-                console.print(f"  - {pkg}")
-        else:
+        if result.succeeded:
+            console.print(
+                f"\n[bold green]Successfully rolled back {len(result.succeeded)} package(s):[/bold green]"
+            )
+            for pkg in result.succeeded:
+                console.print(f"  - {pkg.spec}")
+        if result.failed:
+            console.print(
+                f"\n[bold red]Failed to roll back {len(result.failed)} package(s):[/bold red]"
+            )
+            for pkg in result.failed:
+                console.print(f"  - {pkg.spec}: {pkg.reason}")
+        if not result.succeeded and not result.failed:
             console.print("[yellow]No packages were rolled back.[/yellow]")
 
-    sys.exit(0)
+    sys.exit(0 if result.ok else 1)
 
 
 @cli.command()
@@ -1637,7 +1651,7 @@ def _run_group_upgrade(
                                 latest_ver = Version(cache_data.latest_versions[name_lower])
                                 if latest_ver > pkg.version:
                                     latest_versions[pkg] = Package(name=pkg.name, version=latest_ver)
-                            except Exception:
+                            except InvalidVersion:
                                 pass
                     cache_was_used = True
 

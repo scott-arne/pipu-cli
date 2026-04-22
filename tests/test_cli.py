@@ -10,6 +10,7 @@ from unittest.mock import patch, Mock
 from packaging.version import Version
 from pipu_cli.cli import cli
 from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo, InstalledResult
+from pipu_cli.rollback import PackageRollbackOutcome, RollbackResult
 
 
 @pytest.fixture
@@ -332,7 +333,10 @@ def test_rollback_with_yes_flag(runner):
             "description": "Pre-upgrade state",
             "packages": [{"name": "requests", "version": "2.28.0"}]
         }
-        mock_rollback.return_value = ["requests==2.28.0"]
+        mock_rollback.return_value = RollbackResult(
+            succeeded=[PackageRollbackOutcome(spec="requests==2.28.0")],
+            failed=[],
+        )
 
         result = runner.invoke(cli, ['rollback', '--yes'])
 

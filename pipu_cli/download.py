@@ -61,6 +61,12 @@ def _download_single(
     except subprocess.TimeoutExpired:
         logger.warning(f"Download timed out for {spec} after {timeout}s")
         return (spec, False, f"timed out after {timeout}s")
+    except OSError as e:
+        # e.g. missing interpreter (FileNotFoundError), permission denied.
+        # Surface via the result tuple so progress callbacks / trackers see it
+        # instead of a raw traceback killing the thread pool.
+        logger.warning(f"OS error downloading {spec}: {e}")
+        return (spec, False, f"OS error: {e}")
 
 
 def download_packages(

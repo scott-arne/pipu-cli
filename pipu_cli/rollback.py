@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,33 @@ from typing import Any, Dict, List, Optional
 
 
 ROLLBACK_DIR = Path.home() / ".pipu" / "rollback"
+
+
+@dataclass(frozen=True)
+class PackageRollbackOutcome:
+    """One package's rollback result.
+
+    :param spec: The ``name==version`` string that was attempted.
+    :param reason: ``None`` on success; a human-readable failure string otherwise.
+    """
+    spec: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class RollbackResult:
+    """Aggregate result from :func:`rollback_to_state`.
+
+    :param succeeded: Packages successfully reinstalled at the saved version.
+    :param failed: Packages whose ``pip install`` raised; the ``reason`` field
+        carries the stderr/returncode summary.
+    """
+    succeeded: List[PackageRollbackOutcome] = field(default_factory=list)
+    failed: List[PackageRollbackOutcome] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
 
 
 def save_state(packages: List[Dict[str, str]], description: str = "") -> Path:
@@ -53,35 +81,39 @@ def get_latest_state() -> Optional[Dict[str, Any]]:
         return json.load(f)
 
 
-def rollback_to_state(state: Dict[str, Any], dry_run: bool = False) -> List[str]:
+def rollback_to_state(state: Dict[str, Any], dry_run: bool = False) -> RollbackResult:
     """Rollback packages to a saved state.
 
-    :param state: State dictionary from get_latest_state()
-    :param dry_run: If True, only show what would be done
-    :returns: List of packages that were rolled back
+    :param state: State dictionary from :func:`get_latest_state`.
+    :param dry_run: If True, only report what would be done; never invoke pip.
+    :returns: :class:`RollbackResult` with per-package success / failure detail.
     """
-    packages = state.get("packages", [])
-    rolled_back = []
-
-    for pkg in packages:
+    result = RollbackResult()
+    for pkg in state.get("packages", []):
         name = pkg["name"]
         version = pkg["version"]
-
+        spec = f"{name}=={version}"
         if dry_run:
-            rolled_back.append(f"{name}=={version}")
+            result.succeeded.append(PackageRollbackOutcome(spec=spec))
             continue
-
         try:
             subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', f'{name}=={version}'],
+                [sys.executable, "-m", "pip", "install", spec],
                 check=True,
-                capture_output=True
+                capture_output=True,
             )
-            rolled_back.append(f"{name}=={version}")
-        except subprocess.CalledProcessError:
-            pass
-
-    return rolled_back
+            result.succeeded.append(PackageRollbackOutcome(spec=spec))
+        except subprocess.CalledProcessError as e:
+            if isinstance(e.stderr, (bytes, bytearray)):
+                stderr = e.stderr.decode(errors="replace").strip()
+            else:
+                stderr = (e.stderr or "").strip()
+            reason = (
+                f"pip exit code {e.returncode}: {stderr[:500]}"
+                if stderr else f"pip exit code {e.returncode}"
+            )
+            result.failed.append(PackageRollbackOutcome(spec=spec, reason=reason))
+    return result
 
 
 def list_states() -> List[Dict[str, Any]]:
@@ -103,7 +135,7 @@ def list_states() -> List[Dict[str, Any]]:
                 "description": state.get("description", ""),
                 "package_count": len(state.get("packages", []))
             })
-        except Exception:
+        except (json.JSONDecodeError, KeyError, TypeError, OSError):
             pass
 
     return states
