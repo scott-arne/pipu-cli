@@ -806,14 +806,3 @@ class TestDottedNameConstraintPropagation:
         assert "zope.interface==5.4.0" in install_specs, (
             f"Expected pinned spec in install specs, got {install_specs!r}"
         )
-
-
-def test_pipuu_forwards_to_upgrade(capsys, monkeypatch):
-    """pipuu is a pure alias -- --help shows upgrade help."""
-    from pipu_cli.cli import pipuu
-    import sys
-    monkeypatch.setattr(sys, "argv", ["pipuu", "--help"])
-    with pytest.raises(SystemExit):
-        pipuu()
-    out = capsys.readouterr().out
-    assert "upgrade" in out.lower() or "package" in out.lower()

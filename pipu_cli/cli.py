@@ -2627,13 +2627,5 @@ def _run_group_uninstall(
         sys.exit(130)
 
 
-def pipuu() -> None:
-    """Shorthand for ``pipu upgrade`` -- forwards all arguments to the upgrade subcommand.
-
-    :returns: ``None``. Exits via ``sys.exit`` through Click's standard_mode machinery.
-    """
-    cli.main(args=["upgrade", *sys.argv[1:]], standalone_mode=True)
-
-
 if __name__ == "__main__":
     cli()
