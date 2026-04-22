@@ -567,7 +567,7 @@ def _step3_resolve_packages(
     return can_upgrade, blocked_packages, package_constraints, step_time
 
 
-def _step5_install_packages(
+def _download_and_install_phase(
     console: Console, output: str,
     can_upgrade: list, package_constraints: dict,
     python_path: Optional[str] = None,
@@ -618,7 +618,7 @@ def _step5_install_packages(
                     if success:
                         tracker.complete(spec)
                     else:
-                        tracker.fail(spec, error_msg)
+                        tracker.fail(spec)
 
                 try:
                     download_packages(
@@ -956,8 +956,8 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                     console.print("[yellow]Upgrade cancelled.[/yellow]")
                     sys.exit(0)
 
-            # Step 5: Install packages
-            results, step5_time = _step5_install_packages(
+            # Download and install packages
+            results, install_time = _download_and_install_phase(
                 console, output, can_upgrade, package_constraints, ui=ui, debug=debug,
                 parallel=parallel,
             )
@@ -984,8 +984,8 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                 print_upgrade_results(results, console=console, verbose=debug)
 
                 if debug:
-                    console.print(f"\n[dim]Step 5 time: {step5_time:.2f}s[/dim]")
-                    total_time = step1_time + step2_time + step3_time + step5_time
+                    console.print(f"\n[dim]Install time: {install_time:.2f}s[/dim]")
+                    total_time = step1_time + step2_time + step3_time + install_time
                     console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
 
             # Exit with appropriate code
@@ -1788,7 +1788,7 @@ def _run_group_upgrade(
                         if success:
                             tracker.complete(spec)
                         else:
-                            tracker.fail(spec, error_msg)
+                            tracker.fail(spec)
                     try:
                         download_packages_for_group(
                             env_specs, dest_dir, pre=pre, max_workers=parallel,
@@ -2628,12 +2628,11 @@ def _run_group_uninstall(
 
 
 def pipuu() -> None:
-    """Shorthand CLI that runs ``pipu upgrade``."""
-    from rich.console import Console
-    console = Console(stderr=True)
-    console.print("[yellow]Warning: 'pipuu' is deprecated. Use 'pipu upgrade' (or just 'pipu') instead.[/yellow]\n")
-    sys.argv = ["pipu", "upgrade"] + sys.argv[1:]
-    cli()
+    """Shorthand for ``pipu upgrade`` -- forwards all arguments to the upgrade subcommand.
+
+    :returns: ``None``. Exits via ``sys.exit`` through Click's standard_mode machinery.
+    """
+    cli.main(args=["upgrade", *sys.argv[1:]], standalone_mode=True)
 
 
 if __name__ == "__main__":

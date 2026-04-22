@@ -70,11 +70,10 @@ class DownloadTracker:
             self._progress.update(self._task_id, completed=self._completed + self._failed)
             self._refresh()
 
-    def fail(self, spec: str, _reason: str = "") -> None:
+    def fail(self, spec: str) -> None:
         """Mark a package download as failed.
 
         :param spec: Package spec
-        :param _reason: Failure reason (unused, logged at download layer)
         """
         with self._lock:
             self._active.discard(spec)

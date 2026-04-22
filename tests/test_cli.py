@@ -793,7 +793,7 @@ class TestDottedNameConstraintPropagation:
         # Storage key is canonicalize_name("Zope.Interface") == "zope-interface".
         # Lookup key is canonicalize_name(pkg.name) == canonicalize_name("zope.interface")
         # == "zope-interface". The two must agree, otherwise the spec builder at
-        # cli._step5_install_packages falls through to "==latest" and the
+        # cli._download_and_install_phase falls through to "==latest" and the
         # user's constraint is silently dropped.
         mock_download.assert_called_once()
         download_specs = mock_download.call_args.kwargs["specs"]
@@ -806,3 +806,14 @@ class TestDottedNameConstraintPropagation:
         assert "zope.interface==5.4.0" in install_specs, (
             f"Expected pinned spec in install specs, got {install_specs!r}"
         )
+
+
+def test_pipuu_forwards_to_upgrade(capsys, monkeypatch):
+    """pipuu is a pure alias -- --help shows upgrade help."""
+    from pipu_cli.cli import pipuu
+    import sys
+    monkeypatch.setattr(sys, "argv", ["pipuu", "--help"])
+    with pytest.raises(SystemExit):
+        pipuu()
+    out = capsys.readouterr().out
+    assert "upgrade" in out.lower() or "package" in out.lower()

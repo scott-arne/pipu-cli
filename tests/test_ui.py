@@ -92,7 +92,7 @@ class TestDownloadTracker:
         console = Console(file=StringIO(), force_terminal=True)
         ui = UpgradeUI(console)
         tracker = ui.show_download_progress(["requests==2.31.0"])
-        tracker.fail("requests==2.31.0", "network error")
+        tracker.fail("requests==2.31.0")
         assert tracker._failed == 1
         assert tracker._completed == 0
         tracker.finish()
