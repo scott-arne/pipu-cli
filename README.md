@@ -62,6 +62,8 @@ pipu upgrade --parallel 10
 
 # Update requirements.txt after upgrade
 pipu upgrade --update-requirements requirements.txt
+# Comments, blank lines, -r / -e / --extra-index-url options, extras,
+# and PEP 508 environment markers are preserved; only matching pins change.
 
 # JSON output for scripting
 pipu upgrade -o json
@@ -119,6 +121,8 @@ pipu rollback --list
 pipu rollback --state state_20241205_143022.json
 ```
 
+If any package fails to reinstall, pipu prints the pip exit code and stderr for that package and exits non-zero. Successful packages are still rolled back.
+
 ### Caching
 
 pipu caches version information per-environment to speed up repeated runs. The cache is fresh for 1 hour by default.
@@ -175,7 +179,7 @@ pipu group delete data-science
 
 Group operations show a matrix table with packages as rows and environments as columns, making it easy to see what will change where before confirming.
 
-Groups are stored at `~/.config/pipu/groups.toml`.
+Groups are stored at `~/.config/pipu/groups.toml`. Group names must match `[A-Za-z0-9_.-]+` and contain at least one alphanumeric character. Interpreter paths are resolved through symlinks before being stored, so two entries pointing at the same Python via different paths collapse to one canonical entry.
 
 ## Configuration
 
