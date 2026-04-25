@@ -103,6 +103,37 @@ pipu uninstall requests -o json
 
 If a package is already not installed, pipu treats it as a success (the desired state is already achieved).
 
+### Inspect a package's dependencies
+
+```bash
+# Show direct required-by and requires for a package
+pipu deps requests
+
+# Recurse three hops on each side
+pipu deps requests --depth 3
+
+# Unlimited depth (cycles terminate safely)
+pipu deps requests --depth 0
+
+# Exit non-zero if any problem is found (useful in CI)
+pipu deps requests --check
+
+# Inspect the same package across every env in a group
+pipu deps requests -g prod
+
+# Machine-readable output
+pipu deps requests -o json
+```
+
+`pipu deps` renders a tree with two branches:
+
+- **Required by** — packages in the current environment that require `PACKAGE`.
+- **Requires** — packages `PACKAGE` depends on.
+
+If any dependency is missing, installed at a version that violates a
+constraint, or points at a broken editable path, the affected rows are
+marked and summarized in a `Problems` panel below the tree.
+
 ### Rollback
 
 pipu saves package state before each upgrade. If something goes wrong:
