@@ -1234,7 +1234,7 @@ def deps(ctx: click.Context, package: str, depth: int, check: bool,
         report = build_dep_report(package, depth=depth)
     except PackageNotInstalledError as e:
         if output == "json":
-            print(json.dumps({"error": "package-not-installed", "package": e.name}))
+            print(json.dumps({"error": "package-not-installed", "package": e.name}, indent=2))
         else:
             console.print(f"[red]{e}[/red]")
         sys.exit(1)
