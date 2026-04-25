@@ -8,7 +8,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import rich_click as click
 from click.core import ParameterSource
@@ -1249,8 +1249,73 @@ def deps(ctx: click.Context, package: str, depth: int, check: bool,
     sys.exit(0)
 
 
-def _run_group_deps(**kwargs) -> None:  # pragma: no cover -- filled in Task 9
-    raise NotImplementedError("group mode is implemented in Task 9")
+def _run_group_deps(
+    *,
+    group_name: str,
+    console: Console,
+    output: str,
+    package: str,
+    depth: int,
+    check: bool,
+) -> None:
+    """Execute ``pipu deps`` across every environment of a saved group.
+
+    Renders each environment's report sequentially (like
+    ``_run_group_outdated``) so per-env panels don't interleave. In JSON
+    mode, aggregates per-env results into the group schema.
+
+    :param group_name: Name of the group to iterate.
+    :param console: Rich console for human-mode output.
+    :param output: ``"human"`` or ``"json"``.
+    :param package: User-supplied package name (same in every env).
+    :param depth: Forwarded to :func:`build_dep_report` and the JSON payload.
+    :param check: If ``True``, exit ``1`` when any env has problems.
+    """
+    group_ctx = prepare_group(group_name, console=console, output=output)
+
+    any_problems = False
+    per_env_json_payloads: List[tuple] = []  # [(env_name, dict)]
+
+    for env_name, env_path in group_ctx.envs.items():
+        if output != "json":
+            console.print()
+            console.print(Panel(env_path, title=f"Environment: {env_name}",
+                                border_style="cyan", expand=False))
+            console.print()
+
+        try:
+            report = build_dep_report(package, depth=depth, python_path=env_path)
+        except PackageNotInstalledError as e:
+            any_problems = True  # treat not-installed as a problem in --check
+            if output == "json":
+                per_env_json_payloads.append((env_name, {
+                    "error": "package-not-installed", "package": e.name,
+                }))
+            else:
+                console.print(f"[red]{e}[/red]")
+            continue
+
+        if output == "json":
+            per_env_json_payloads.append((env_name, dep_report_to_json(report, depth=depth)))
+        else:
+            print_dep_report(console, report)
+
+        if report.problems:
+            any_problems = True
+
+    if output == "json":
+        payload = {
+            "group": group_name,
+            "environments": [
+                {"env": env, "report": report_dict}
+                for env, report_dict in per_env_json_payloads
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+
+    if check and any_problems:
+        sys.exit(1)
+    sys.exit(0)
 
 
 @cli.command()

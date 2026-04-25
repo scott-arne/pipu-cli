@@ -115,3 +115,77 @@ def test_deps_depth_unlimited(patch_inspect, make_installed_packages):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["requires"][0]["children"][0]["name"] == "c"
+
+
+def test_deps_group_mode_human(monkeypatch, make_installed_packages):
+    env_main = _clean_env(make_installed_packages)
+    env_tools = make_installed_packages(
+        ("requests", "2.31.0", {}),
+    )
+    calls = {}
+
+    def fake_inspect(*, python_path=None, **kw):
+        return env_main if "main" in (python_path or "") else env_tools
+
+    monkeypatch.setattr("pipu_cli.package_management.inspect_installed_packages", fake_inspect)
+    monkeypatch.setattr(
+        "pipu_cli.cli.prepare_group",
+        lambda name, **kw: _FakeGroupCtx(
+            name, {"main": "/envs/main/python", "tools": "/envs/tools/python"}
+        ),
+    )
+    result = CliRunner().invoke(cli, ["deps", "requests", "-g", "prod"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "main" in result.output
+    assert "tools" in result.output
+
+
+def test_deps_group_mode_json(monkeypatch, make_installed_packages):
+    env = _clean_env(make_installed_packages)
+    monkeypatch.setattr(
+        "pipu_cli.package_management.inspect_installed_packages",
+        lambda *a, **kw: env,
+    )
+    monkeypatch.setattr(
+        "pipu_cli.cli.prepare_group",
+        lambda name, **kw: _FakeGroupCtx(
+            name, {"main": "/envs/main/python", "tools": "/envs/tools/python"}
+        ),
+    )
+    result = CliRunner().invoke(
+        cli, ["deps", "requests", "-g", "prod", "-o", "json"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["group"] == "prod"
+    assert [e["env"] for e in payload["environments"]] == ["main", "tools"]
+
+
+def test_deps_group_check_nonzero_when_any_env_has_problems(monkeypatch, make_installed_packages):
+    healthy = _clean_env(make_installed_packages)
+    broken = make_installed_packages(
+        ("requests", "2.31.0", {"urllib3": "<2"}),
+        ("urllib3", "2.2.2", {}),
+    )
+
+    def fake_inspect(*, python_path=None, **kw):
+        return healthy if "main" in (python_path or "") else broken
+
+    monkeypatch.setattr("pipu_cli.package_management.inspect_installed_packages", fake_inspect)
+    monkeypatch.setattr(
+        "pipu_cli.cli.prepare_group",
+        lambda name, **kw: _FakeGroupCtx(
+            name, {"main": "/envs/main/python", "tools": "/envs/tools/python"}
+        ),
+    )
+    result = CliRunner().invoke(cli, ["deps", "requests", "-g", "prod", "--check"])
+    assert result.exit_code == 1
+    # Both envs rendered before exiting.
+    assert "main" in result.output
+    assert "tools" in result.output
+
+
+class _FakeGroupCtx:
+    def __init__(self, name, envs):
+        self.name = name
+        self.envs = envs
