@@ -4,12 +4,23 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Protocol, Tuple, TypeVar
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
+from rich.tree import Tree
 from rich.prompt import Confirm, Prompt
 
 from packaging.version import Version
 
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult, UninstalledResult
+from pipu_cli.package_management import (
+    UpgradePackageInfo,
+    UpgradedPackage,
+    BlockedPackageInfo,
+    InstalledResult,
+    UninstalledResult,
+    DepNode,
+    DepProblem,
+    DepReport,
+)
 from pipu_cli.ui import CHECKMARK, CROSS, STYLES
 
 
@@ -877,3 +888,89 @@ def print_group_uninstall_results_matrix(
     console.print(table)
 
     _print_error_details(console, failed_details)
+
+
+def _format_dep_node_label(node: DepNode, problem_targets: set) -> str:
+    """Render one tree-leaf label for the human view.
+
+    :param node: The node to render.
+    :param problem_targets: Set of canonical names that appear in some
+        :class:`DepProblem`; used to append the ``✗`` marker.
+    :returns: A Rich markup string.
+    """
+    edge = node.edge
+    name = edge.name
+    if node.is_cycle:
+        return f"[{_SUCCESS}]{name}[/{_SUCCESS}] (cycle)"
+    if edge.installed_version is None:
+        body = f"[{_FAILURE}]{name}[/{_FAILURE}] (not installed)"
+        if edge.specifier:
+            body += f"  [dim]{edge.specifier}[/dim]"
+        return body
+    style = _FAILURE if name in problem_targets else _SUCCESS
+    version_str = f"[{style}]{name}[/{style}] [dim]{edge.installed_version}[/dim]"
+    if edge.specifier:
+        version_str += f"  [dim]{edge.specifier}[/dim]"
+    if edge.is_editable and edge.editable_location:
+        version_str += "  [dim](editable)[/dim]"
+    if name in problem_targets:
+        version_str += f"  {_CROSS_MARKUP}"
+    return version_str
+
+
+def _attach_dep_children(rich_branch: Tree, nodes: List[DepNode], problem_targets: set) -> None:
+    """Recursively attach :class:`DepNode` children to a Rich Tree branch."""
+    for node in nodes:
+        child = rich_branch.add(_format_dep_node_label(node, problem_targets))
+        if node.children:
+            _attach_dep_children(child, node.children, problem_targets)
+
+
+def print_dep_report(console: Console, report: DepReport) -> None:
+    """Render a :class:`DepReport` to a Rich console.
+
+    Layout:
+
+    1. Header panel with ``name version`` (and editable path if applicable).
+    2. Rich ``Tree`` with two branches: ``Required by`` / ``Requires``.
+    3. Optional failure-styled panel listing problems.
+
+    :param console: Rich console to render into.
+    :param report: The report to render.
+    """
+    pkg = report.package
+
+    header_lines = [f"[bold cyan]{pkg.name}[/bold cyan] [dim]{pkg.version}[/dim]"]
+    if pkg.is_editable and pkg.editable_location:
+        style = _FAILURE if any(
+            p.kind == "broken-editable" and p.package == pkg.name for p in report.problems
+        ) else "dim"
+        header_lines.append(f"[{style}]editable: {pkg.editable_location}[/{style}]")
+    console.print(Panel("\n".join(header_lines), expand=False, border_style="cyan"))
+
+    problem_targets = {p.package for p in report.problems}
+
+    root = Tree(f"[bold]{pkg.name}[/bold] [dim]{pkg.version}[/dim]")
+    req_by_label = (
+        f"[bold]Required by[/bold]  ({len(report.required_by)})"
+        if report.required_by else "[bold]Required by[/bold]  (none)"
+    )
+    requires_label = (
+        f"[bold]Requires[/bold]  ({len(report.requires)})"
+        if report.requires else "[bold]Requires[/bold]  (none)"
+    )
+    req_by_branch = root.add(req_by_label)
+    _attach_dep_children(req_by_branch, report.required_by, problem_targets)
+    requires_branch = root.add(requires_label)
+    _attach_dep_children(requires_branch, report.requires, problem_targets)
+
+    console.print(root)
+
+    if report.problems:
+        lines = [f"{_CROSS_MARKUP} {p.detail}" for p in report.problems]
+        console.print(Panel(
+            "\n".join(lines),
+            title=f"[bold {_FAILURE}]Problems ({len(report.problems)})[/bold {_FAILURE}]",
+            border_style=_FAILURE,
+            expand=False,
+        ))
