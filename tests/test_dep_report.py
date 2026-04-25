@@ -12,6 +12,7 @@ from pipu_cli.package_management import (
     DepReport,
     InstalledPackage,
     PackageNotInstalledError,
+    build_dep_report,
 )
 
 
@@ -46,3 +47,49 @@ def test_package_not_installed_error_carries_name():
     err = PackageNotInstalledError("missingpkg")
     assert err.name == "missingpkg"
     assert "missingpkg" in str(err)
+
+
+def test_build_dep_report_raises_when_package_absent(make_installed_packages):
+    installed = make_installed_packages(("foo", "1.0.0", {}))
+    with pytest.raises(PackageNotInstalledError) as exc:
+        build_dep_report("missingpkg", installed=installed)
+    assert exc.value.name == "missingpkg"
+
+
+def test_build_dep_report_canonicalizes_name(make_installed_packages):
+    installed = make_installed_packages(("My-Pkg", "1.0.0", {}))
+    report = build_dep_report("my_pkg", installed=installed)  # fuzzy form
+    assert report.package.name == "my-pkg"
+
+
+def test_build_dep_report_depth1_both_branches(make_installed_packages):
+    installed = make_installed_packages(
+        ("requests", "2.31.0", {"urllib3": "<3,>=1.21", "idna": "<4,>=2.5"}),
+        ("urllib3", "2.2.2", {}),
+        ("idna", "3.7", {}),
+        ("httpx", "0.27.0", {"requests": ">=2.28"}),
+    )
+    report = build_dep_report("requests", installed=installed)
+    assert report.package.name == "requests"
+
+    req_by_names = [n.edge.name for n in report.required_by]
+    assert req_by_names == ["httpx"]
+    assert report.required_by[0].edge.specifier == ">=2.28"
+    assert report.required_by[0].edge.installed_version == Version("0.27.0")
+
+    req_names = sorted(n.edge.name for n in report.requires)
+    assert req_names == ["idna", "urllib3"]
+
+    # depth=1 -> no grandchildren
+    for n in report.required_by + report.requires:
+        assert n.children == []
+
+    assert report.problems == []
+
+
+def test_build_dep_report_empty_branches(make_installed_packages):
+    installed = make_installed_packages(("lonely", "1.0.0", {}))
+    report = build_dep_report("lonely", installed=installed)
+    assert report.required_by == []
+    assert report.requires == []
+    assert report.problems == []

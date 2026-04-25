@@ -1,6 +1,7 @@
 """Package management functions for pipu-cli."""
 
 import logging
+import os
 import os.path
 import re
 import subprocess
@@ -1661,3 +1662,180 @@ def run_pip_uninstall(
         logger.error(f"Error uninstalling packages: {e}")
 
         return _failed_results(f"Uninstallation failed: {e}")
+
+
+def _build_forward_reverse(
+    installed: List[InstalledPackage],
+) -> tuple[Dict[str, InstalledPackage], Dict[str, List[tuple[InstalledPackage, str]]]]:
+    """Build forward (name -> pkg) and reverse (name -> [(parent, spec)]) indices.
+
+    :param installed: All installed packages.
+    :returns: ``(forward, reverse)`` where names in both dicts are
+        canonicalized (PEP 503).
+    """
+    forward: Dict[str, InstalledPackage] = {canonicalize_name(p.name): p for p in installed}
+    reverse: Dict[str, List[tuple[InstalledPackage, str]]] = {}
+    for parent in installed:
+        for dep_name, spec in parent.constrained_dependencies.items():
+            reverse.setdefault(canonicalize_name(dep_name), []).append((parent, spec))
+    return forward, reverse
+
+
+def build_dep_report(
+    package_name: str,
+    *,
+    depth: int = 1,
+    installed: Optional[List[InstalledPackage]] = None,
+    python_path: Optional[str] = None,
+    editable_exists: Callable[[str], bool] = os.path.exists,
+) -> "DepReport":
+    """Inspect PACKAGE's neighborhood and return a :class:`DepReport`.
+
+    Pure function. No network. When ``installed`` is omitted, falls back
+    to :func:`inspect_installed_packages`. ``editable_exists`` is injected
+    so tests can simulate missing paths without touching the filesystem.
+
+    :param package_name: User-supplied package name (will be canonicalized).
+    :param depth: Recursion depth on both branches. ``1`` = direct only.
+        ``0`` = unlimited (cycles still terminate).
+    :param installed: Pre-built list; default: call
+        :func:`inspect_installed_packages`.
+    :param python_path: Forwarded to ``inspect_installed_packages`` when
+        ``installed`` is not provided.
+    :param editable_exists: Predicate used to test whether an editable
+        install path exists on disk. Defaults to :func:`os.path.exists`.
+    :returns: A fully populated :class:`DepReport`.
+    :raises PackageNotInstalledError: If ``package_name`` (after
+        canonicalization) is not in the installed set.
+    """
+    if depth < 0:
+        raise ValueError("depth must be >= 0")
+
+    pkgs = installed if installed is not None else inspect_installed_packages(python_path=python_path)
+    canonical = canonicalize_name(package_name)
+    forward, reverse = _build_forward_reverse(pkgs)
+
+    if canonical not in forward:
+        raise PackageNotInstalledError(canonical)
+
+    subject = forward[canonical]
+
+    required_by = _walk_required_by(canonical, forward, reverse, depth=depth, visited=frozenset({canonical}))
+    requires = _walk_requires(canonical, forward, depth=depth, visited=frozenset({canonical}))
+    problems = _collect_problems(subject, required_by, requires, forward, editable_exists)
+
+    return DepReport(
+        package=subject,
+        required_by=required_by,
+        requires=requires,
+        problems=problems,
+    )
+
+
+def _walk_required_by(
+    current: str,
+    forward: Dict[str, InstalledPackage],
+    reverse: Dict[str, List[tuple[InstalledPackage, str]]],
+    *,
+    depth: int,
+    visited: frozenset,
+) -> List["DepNode"]:
+    """Walk the required-by branch from ``current`` up to ``depth`` hops.
+
+    :param current: Canonical name of the node whose parents to enumerate.
+    :param forward: Canonical name -> InstalledPackage.
+    :param reverse: Canonical name -> list of (parent pkg, specifier).
+    :param depth: Remaining hops. ``0`` means unlimited (bounded by visited).
+    :param visited: Canonical names already on the current path; prevents
+        cycles.
+    :returns: Immediate DepNode parents, each with their own recursed children.
+    """
+    nodes: List[DepNode] = []
+    parents = reverse.get(current, [])
+    for parent_pkg, spec in sorted(parents, key=lambda ps: ps[0].name):
+        parent_name = canonicalize_name(parent_pkg.name)
+        edge = DepEdge(
+            name=parent_name,
+            installed_version=parent_pkg.version,
+            specifier=spec,
+            is_editable=parent_pkg.is_editable,
+            editable_location=parent_pkg.editable_location,
+        )
+        if parent_name in visited:
+            nodes.append(DepNode(edge=edge, children=[], is_cycle=True))
+            continue
+        next_depth = depth - 1 if depth > 0 else 0
+        recurse = depth == 0 or next_depth > 0
+        if recurse:
+            children = _walk_required_by(
+                parent_name, forward, reverse,
+                depth=next_depth,
+                visited=visited | {parent_name},
+            )
+        else:
+            children = []
+        nodes.append(DepNode(edge=edge, children=children, is_cycle=False))
+    return nodes
+
+
+def _walk_requires(
+    current: str,
+    forward: Dict[str, InstalledPackage],
+    *,
+    depth: int,
+    visited: frozenset,
+) -> List["DepNode"]:
+    """Walk the requires branch from ``current`` up to ``depth`` hops.
+
+    :param current: Canonical name whose children to enumerate.
+    :param forward: Canonical name -> InstalledPackage.
+    :param depth: Remaining hops. ``0`` means unlimited.
+    :param visited: Canonical names already on the current path.
+    :returns: Immediate DepNode children, each recursed.
+    """
+    nodes: List[DepNode] = []
+    pkg = forward.get(current)
+    if pkg is None:
+        return nodes
+    for dep_name, spec in sorted(pkg.constrained_dependencies.items()):
+        canonical_dep = canonicalize_name(dep_name)
+        dep_pkg = forward.get(canonical_dep)
+        if dep_pkg is not None:
+            edge = DepEdge(
+                name=canonical_dep,
+                installed_version=dep_pkg.version,
+                specifier=spec,
+                is_editable=dep_pkg.is_editable,
+                editable_location=dep_pkg.editable_location,
+            )
+        else:
+            edge = DepEdge(name=canonical_dep, installed_version=None, specifier=spec)
+        if canonical_dep in visited:
+            nodes.append(DepNode(edge=edge, children=[], is_cycle=True))
+            continue
+        next_depth = depth - 1 if depth > 0 else 0
+        recurse = depth == 0 or next_depth > 0
+        if recurse and dep_pkg is not None:
+            children = _walk_requires(
+                canonical_dep, forward,
+                depth=next_depth,
+                visited=visited | {canonical_dep},
+            )
+        else:
+            children = []
+        nodes.append(DepNode(edge=edge, children=children, is_cycle=False))
+    return nodes
+
+
+def _collect_problems(
+    subject: InstalledPackage,
+    required_by: List["DepNode"],
+    requires: List["DepNode"],
+    forward: Dict[str, InstalledPackage],
+    editable_exists: Callable[[str], bool],
+) -> List["DepProblem"]:
+    """Scan the visible tree for correctness problems and return a sorted list.
+
+    Stub for Task 4; returns ``[]`` for now so the happy-path tests pass.
+    """
+    return []
