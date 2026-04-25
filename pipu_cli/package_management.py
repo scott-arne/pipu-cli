@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, Callable, runtime_checkable
+from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, runtime_checkable
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version, InvalidVersion
@@ -2118,31 +2118,62 @@ def _safe_specifier_set(spec: str) -> Optional[SpecifierSet]:
         return None
 
 
-def _collect_problems(
-    subject: InstalledPackage,
-    required_by: List["DepNode"],
-    requires: List["DepNode"],
-    forward: Dict[str, InstalledPackage],
+@dataclass(frozen=True)
+class _ProblemEdge:
+    """Normalized edge record fed to :func:`_collect_problems_over_edges`.
+
+    :param owner_name: Canonical name of the package whose version is
+        being constrained by this edge (on the requires branch, this is
+        the edge's own name; on the required-by branch, this is the
+        *parent* node's name).
+    :param owner_version: Installed version of ``owner_name``, or
+        ``None`` when not installed (requires-branch only).
+    :param owner_is_editable: Whether ``owner_name`` is editable.
+    :param owner_editable_location: Editable install path, if any.
+    :param constraint_source: Canonical name of the package imposing
+        the constraint (on the requires branch, this is the parent
+        node; on the required-by branch, this is the edge's own name).
+    :param specifier: PEP 440 specifier string; empty if unconstrained.
+    :param branch: ``"requires"`` or ``"required_by"`` — only controls
+        how ``missing`` is emitted (only the requires branch can emit
+        missing, since a parent can't be "missing" in our model).
+    """
+
+    owner_name: str
+    owner_version: Optional[Version]
+    owner_is_editable: bool
+    owner_editable_location: Optional[str]
+    constraint_source: str
+    specifier: str
+    branch: str
+
+
+def _collect_problems_over_edges(
+    edges: Iterable["_ProblemEdge"],
+    *,
     duplicates: Dict[str, List[InstalledPackage]],
     orphan_metadata: Dict[str, List[Dict[str, str]]],
     editable_exists: Callable[[str], bool],
+    problem_target_names: Optional[set[str]] = None,
+    subject_editable: Optional[InstalledPackage] = None,
 ) -> List["DepProblem"]:
-    """Scan the visible tree and return a deduped, sorted list of problems.
+    """Scan a flat edge stream for problems. Pure, no tree knowledge.
 
-    Checks:
-
-    - ``missing``: a requires-edge points at a name not installed.
-    - ``violates``: the relevant installed version fails the edge's
-      specifier. On the requires branch this is the edge's own version;
-      on the required-by branch this is the *parent* node's version
-      (the target of the requirer's constraint).
-    - ``broken-editable``: an editable node's ``editable_location`` does
-      not exist on disk. Also checked on the subject itself.
-    - ``duplicate-install``: the subject or a visible neighbor has two
-      or more installed distributions under the same canonical name.
-    - ``stale-metadata``: ``.dist-info`` or ``.egg-info`` directories
-      exist on disk that pip no longer counts. Invisible to ``pip list``
-      but confuses any tool that uses ``importlib.metadata`` directly.
+    :param edges: Iterable of :class:`_ProblemEdge` records.
+    :param duplicates: Canonical-name -> list of duplicate installs.
+    :param orphan_metadata: Canonical-name -> list of
+        ``{"version", "path"}`` orphan metadata entries.
+    :param editable_exists: Injected ``os.path.exists`` for testability.
+    :param problem_target_names: If given, ``duplicate-install`` and
+        ``stale-metadata`` problems are only emitted for names in this
+        set. Used by :func:`build_dep_report` to scope its problem panel
+        to the visible tree; omit or pass ``None`` to report all
+        duplicates and orphans (:func:`build_env_report` uses this).
+    :param subject_editable: An optional subject :class:`InstalledPackage`
+        whose broken-editable state should be emitted even if it doesn't
+        appear as an edge. Used by :func:`build_dep_report` (subject
+        view). Omit for env-wide scans.
+    :returns: Deduped, sorted list of :class:`DepProblem`.
     """
     seen: set[tuple] = set()
     problems: List[DepProblem] = []
@@ -2154,21 +2185,45 @@ def _collect_problems(
         seen.add(key)
         problems.append(problem)
 
-    subject_name = canonicalize_name(subject.name)
-
-    # 1) Subject's own editable path, if broken.
-    if subject.is_editable and subject.editable_location and not editable_exists(subject.editable_location):
+    # 1) Subject's own broken-editable (deps-only path).
+    if subject_editable is not None and subject_editable.is_editable and subject_editable.editable_location \
+            and not editable_exists(subject_editable.editable_location):
         emit(DepProblem(
             kind="broken-editable",
-            package=subject_name,
-            detail=f"{subject.name} editable path missing: {subject.editable_location}",
+            package=canonicalize_name(subject_editable.name),
+            detail=f"{subject_editable.name} editable path missing: {subject_editable.editable_location}",
         ))
 
-    # 2) Duplicate installations visible in the tree (or the subject itself).
-    def emit_duplicate(name: str) -> None:
-        variants = duplicates.get(name)
-        if not variants:
-            return
+    # 2) Per-edge scans.
+    for e in edges:
+        if e.branch == "requires" and e.owner_version is None:
+            emit(DepProblem(
+                kind="missing",
+                package=e.owner_name,
+                detail=f"{e.owner_name} is required by {e.constraint_source} but is not installed",
+            ))
+        elif e.specifier and e.owner_version is not None:
+            spec_set = _safe_specifier_set(e.specifier)
+            if spec_set is not None and not spec_set.contains(e.owner_version, prereleases=True):
+                emit(DepProblem(
+                    kind="violates",
+                    package=e.owner_name,
+                    detail=f"{e.owner_name} {e.owner_version} violates {e.constraint_source}{e.specifier}",
+                    required_by=e.constraint_source,
+                    specifier=e.specifier,
+                    installed_version=e.owner_version,
+                ))
+        if e.owner_is_editable and e.owner_editable_location and not editable_exists(e.owner_editable_location):
+            emit(DepProblem(
+                kind="broken-editable",
+                package=e.owner_name,
+                detail=f"{e.owner_name} editable path missing: {e.owner_editable_location}",
+            ))
+
+    # 3) Duplicate installs (scoped or env-wide).
+    for name, variants in duplicates.items():
+        if problem_target_names is not None and name not in problem_target_names:
+            continue
         versions = ", ".join(sorted({str(p.version) for p in variants}))
         emit(DepProblem(
             kind="duplicate-install",
@@ -2176,100 +2231,16 @@ def _collect_problems(
             detail=f"{name} has {len(variants)} installed distributions ({versions})",
         ))
 
-    emit_duplicate(subject_name)
-
-    # 3) Stale-metadata: .dist-info / .egg-info directories the env still
-    #    contains but pip no longer counts. Only emit for names visible in
-    #    the current tree to stay scoped to the subject's neighborhood.
-    def emit_stale(name: str) -> None:
-        entries = orphan_metadata.get(name)
-        if not entries:
-            return
+    # 4) Orphaned metadata (scoped or env-wide).
+    for name, entries in orphan_metadata.items():
+        if problem_target_names is not None and name not in problem_target_names:
+            continue
         paths = ", ".join(entry.get("path", "?") for entry in entries)
         emit(DepProblem(
             kind="stale-metadata",
             package=name,
             detail=f"{name} has orphaned metadata: {paths}",
         ))
-
-    emit_stale(subject_name)
-
-    def walk_edge_names(nodes: List[DepNode]) -> None:
-        for node in nodes:
-            emit_duplicate(node.edge.name)
-            emit_stale(node.edge.name)
-            if not node.is_cycle and node.children:
-                walk_edge_names(node.children)
-
-    walk_edge_names(required_by)
-    walk_edge_names(requires)
-
-    # 2) Required-by branch: edge.specifier constrains parent_name (the
-    #    node closer to the subject). Check parent_version against it.
-    def walk_required_by(
-        nodes: List[DepNode], *, parent_version: Optional[Version], parent_name: str,
-    ) -> None:
-        for node in nodes:
-            edge = node.edge
-            if edge.specifier and parent_version is not None:
-                spec_set = _safe_specifier_set(edge.specifier)
-                if spec_set is not None and not spec_set.contains(parent_version, prereleases=True):
-                    emit(DepProblem(
-                        kind="violates",
-                        package=parent_name,
-                        detail=f"{parent_name} {parent_version} violates {edge.name}{edge.specifier}",
-                        required_by=edge.name,
-                        specifier=edge.specifier,
-                        installed_version=parent_version,
-                    ))
-            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
-                emit(DepProblem(
-                    kind="broken-editable",
-                    package=edge.name,
-                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
-                ))
-            if not node.is_cycle and node.children:
-                walk_required_by(
-                    node.children,
-                    parent_version=edge.installed_version,
-                    parent_name=edge.name,
-                )
-
-    # 3) Requires branch: edge.specifier is parent_name's constraint on
-    #    edge.name. Check edge.installed_version against it.
-    def walk_requires(
-        nodes: List[DepNode], *, parent_name: str,
-    ) -> None:
-        for node in nodes:
-            edge = node.edge
-            if edge.installed_version is None:
-                emit(DepProblem(
-                    kind="missing",
-                    package=edge.name,
-                    detail=f"{edge.name} is required by {parent_name} but is not installed",
-                ))
-            elif edge.specifier:
-                spec_set = _safe_specifier_set(edge.specifier)
-                if spec_set is not None and not spec_set.contains(edge.installed_version, prereleases=True):
-                    emit(DepProblem(
-                        kind="violates",
-                        package=edge.name,
-                        detail=f"{edge.name} {edge.installed_version} violates {parent_name}{edge.specifier}",
-                        required_by=parent_name,
-                        specifier=edge.specifier,
-                        installed_version=edge.installed_version,
-                    ))
-            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
-                emit(DepProblem(
-                    kind="broken-editable",
-                    package=edge.name,
-                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
-                ))
-            if not node.is_cycle and node.children:
-                walk_requires(node.children, parent_name=edge.name)
-
-    walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name)
-    walk_requires(requires, parent_name=subject_name)
 
     kind_order = {
         "missing": 0,
@@ -2280,3 +2251,88 @@ def _collect_problems(
     }
     problems.sort(key=lambda p: (kind_order.get(p.kind, 99), p.package, p.required_by or ""))
     return problems
+
+
+def _collect_problems(
+    subject: InstalledPackage,
+    required_by: List["DepNode"],
+    requires: List["DepNode"],
+    forward: Dict[str, InstalledPackage],
+    duplicates: Dict[str, List[InstalledPackage]],
+    orphan_metadata: Dict[str, List[Dict[str, str]]],
+    editable_exists: Callable[[str], bool],
+) -> List["DepProblem"]:
+    """Subject-scoped problem scan for :func:`build_dep_report`.
+
+    Flattens the two visible tree branches into a :class:`_ProblemEdge`
+    stream and delegates to :func:`_collect_problems_over_edges`. The
+    problem panel is scoped to names appearing in the visible tree (plus
+    the subject itself), matching the existing deps behavior.
+    """
+    subject_name = canonicalize_name(subject.name)
+    visible_names: set[str] = {subject_name}
+
+    def walk_required_by(
+        nodes: List[DepNode], *,
+        parent_version: Optional[Version],
+        parent_name: str,
+    ) -> List[_ProblemEdge]:
+        out: List[_ProblemEdge] = []
+        for node in nodes:
+            visible_names.add(node.edge.name)
+            out.append(_ProblemEdge(
+                owner_name=parent_name,
+                owner_version=parent_version,
+                owner_is_editable=False,
+                owner_editable_location=None,
+                constraint_source=node.edge.name,
+                specifier=node.edge.specifier,
+                branch="required_by",
+            ))
+            # Edge-level broken-editable for the edge's own package.
+            out.append(_ProblemEdge(
+                owner_name=node.edge.name,
+                owner_version=node.edge.installed_version,
+                owner_is_editable=node.edge.is_editable,
+                owner_editable_location=node.edge.editable_location,
+                constraint_source=parent_name,
+                specifier="",  # suppress violates on this synthetic edge
+                branch="required_by",
+            ))
+            if not node.is_cycle and node.children:
+                out.extend(walk_required_by(
+                    node.children,
+                    parent_version=node.edge.installed_version,
+                    parent_name=node.edge.name,
+                ))
+        return out
+
+    def walk_requires(nodes: List[DepNode], *, parent_name: str) -> List[_ProblemEdge]:
+        out: List[_ProblemEdge] = []
+        for node in nodes:
+            visible_names.add(node.edge.name)
+            out.append(_ProblemEdge(
+                owner_name=node.edge.name,
+                owner_version=node.edge.installed_version,
+                owner_is_editable=node.edge.is_editable,
+                owner_editable_location=node.edge.editable_location,
+                constraint_source=parent_name,
+                specifier=node.edge.specifier,
+                branch="requires",
+            ))
+            if not node.is_cycle and node.children:
+                out.extend(walk_requires(node.children, parent_name=node.edge.name))
+        return out
+
+    edges: List[_ProblemEdge] = []
+    edges.extend(walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name))
+    edges.extend(walk_requires(requires, parent_name=subject_name))
+
+    return _collect_problems_over_edges(
+        edges,
+        duplicates=duplicates,
+        orphan_metadata=orphan_metadata,
+        editable_exists=editable_exists,
+        problem_target_names=visible_names,
+        subject_editable=subject,
+    )
