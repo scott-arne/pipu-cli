@@ -2,7 +2,17 @@
 
 import json
 from typing import List, Optional, Any, Dict
-from pipu_cli.package_management import UpgradePackageInfo, UpgradedPackage, BlockedPackageInfo, InstalledResult, UninstalledResult
+from pipu_cli.package_management import (
+    UpgradePackageInfo,
+    UpgradedPackage,
+    BlockedPackageInfo,
+    InstalledResult,
+    UninstalledResult,
+    DepEdge,
+    DepNode,
+    DepProblem,
+    DepReport,
+)
 
 
 class OutputFormatter:
@@ -172,3 +182,80 @@ class JsonOutputFormatter(OutputFormatter):
         :returns: JSON string.
         """
         return json.dumps(env_results, indent=2)
+
+
+def _edge_to_dict(edge: DepEdge) -> Dict[str, Any]:
+    return {
+        "name": edge.name,
+        "installed_version": str(edge.installed_version) if edge.installed_version is not None else None,
+        "specifier": edge.specifier,
+        "is_editable": edge.is_editable,
+        "editable_location": edge.editable_location,
+    }
+
+
+def _node_to_dict(node: DepNode) -> Dict[str, Any]:
+    data = _edge_to_dict(node.edge)
+    data["children"] = [_node_to_dict(c) for c in node.children]
+    if node.is_cycle:
+        data["cycle"] = True
+    return data
+
+
+def _problem_to_dict(problem: DepProblem) -> Dict[str, Any]:
+    return {
+        "kind": problem.kind,
+        "package": problem.package,
+        "detail": problem.detail,
+        "required_by": problem.required_by,
+        "specifier": problem.specifier,
+        "installed_version": (
+            str(problem.installed_version) if problem.installed_version is not None else None
+        ),
+    }
+
+
+def dep_report_to_json(report: DepReport, *, depth: int) -> Dict[str, Any]:
+    """Serialize a :class:`DepReport` to a JSON-ready ``dict``.
+
+    :param report: The report to serialize.
+    :param depth: The ``--depth`` value the command was invoked with; it
+        is not derivable from ``report``.
+    :returns: A dict suitable for :func:`json.dumps`.
+    """
+    pkg = report.package
+    return {
+        "package": {
+            "name": pkg.name,
+            "version": str(pkg.version),
+            "is_editable": pkg.is_editable,
+            "editable_location": pkg.editable_location,
+        },
+        "depth": depth,
+        "required_by": [_node_to_dict(n) for n in report.required_by],
+        "requires": [_node_to_dict(n) for n in report.requires],
+        "problems": [_problem_to_dict(p) for p in report.problems],
+    }
+
+
+def dep_report_group_to_json(
+    *,
+    group_name: str,
+    per_env: List[tuple],
+    depth: int,
+) -> Dict[str, Any]:
+    """Wrap per-env reports into the group-mode JSON shape.
+
+    :param group_name: Group name for the ``"group"`` key.
+    :param per_env: List of ``(env_name, DepReport)`` tuples. Order is
+        preserved.
+    :param depth: Forwarded into each per-env report.
+    :returns: ``{"group": ..., "environments": [{"env": ..., "report": ...}]}``.
+    """
+    return {
+        "group": group_name,
+        "environments": [
+            {"env": env, "report": dep_report_to_json(report, depth=depth)}
+            for env, report in per_env
+        ],
+    }

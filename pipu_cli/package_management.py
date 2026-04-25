@@ -1,6 +1,7 @@
 """Package management functions for pipu-cli."""
 
 import logging
+import os
 import os.path
 import re
 import subprocess
@@ -109,6 +110,87 @@ class UninstalledResult:
 
 
 @dataclass(frozen=True)
+class DepEdge:
+    """A single dependency relationship seen from the subject package.
+
+    :param name: Canonical (PEP 503) name of the *other* package in the edge.
+    :param installed_version: Installed version of the other package, or
+        ``None`` if it is not installed.
+    :param specifier: PEP 440 specifier string imposed on this edge
+        (e.g. ``">=2.28"``). Empty string if unconstrained.
+    :param is_editable: Whether the other package is installed editable.
+    :param editable_location: Editable install path, if any.
+    """
+
+    name: str
+    installed_version: Optional[Version]
+    specifier: str
+    is_editable: bool = False
+    editable_location: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DepNode:
+    """A node in either branch of the dep tree.
+
+    :param edge: The edge that reaches this node.
+    :param children: Child nodes (further hops). Empty at ``depth == 1``
+        or when the node terminates a cycle.
+    :param is_cycle: ``True`` if this node terminates a cycle and has no
+        children by construction.
+    """
+
+    edge: "DepEdge"
+    children: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    is_cycle: bool = False
+
+
+@dataclass(frozen=True)
+class DepProblem:
+    """A correctness problem to surface in the error panel.
+
+    :param kind: One of ``"missing"``, ``"violates"``, ``"broken-editable"``.
+    :param package: Package the problem attaches to.
+    :param detail: Human-readable one-line summary.
+    :param required_by: For ``"violates"``, the package imposing the
+        constraint.
+    :param specifier: For ``"violates"``, the violated specifier.
+    :param installed_version: For ``"violates"``, the installed version.
+    """
+
+    kind: str
+    package: str
+    detail: str
+    required_by: Optional[str] = None
+    specifier: Optional[str] = None
+    installed_version: Optional[Version] = None
+
+
+@dataclass(frozen=True)
+class DepReport:
+    """Full inspection result for one PACKAGE in one environment.
+
+    :param package: The subject :class:`InstalledPackage`.
+    :param required_by: Tree branch of packages that require the subject.
+    :param requires: Tree branch of packages the subject requires.
+    :param problems: Deduped, sorted list of :class:`DepProblem` entries.
+    """
+
+    package: "InstalledPackage"
+    required_by: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    requires: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    problems: List["DepProblem"] = field(default_factory=list, hash=False, compare=False)
+
+
+class PackageNotInstalledError(Exception):
+    """Raised when the requested PACKAGE is not installed in the target env."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name} is not installed in this environment")
+        self.name = name
+
+
+@dataclass(frozen=True)
 class ParsedSpec:
     """Result of parsing a user-facing package spec.
 
@@ -211,6 +293,15 @@ def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = N
     """
     if python_path is not None:
         return _inspect_remote_packages(timeout, python_path)
+
+    # Populate the local-env orphan cache before the main walk so that
+    # later build_dep_report calls can surface stale .egg-info / .dist-info
+    # directories even though pip hides them.
+    try:
+        _ORPHAN_METADATA_CACHE[""] = _detect_local_orphan_metadata()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"Local orphan metadata scan failed: {e}")
+        _ORPHAN_METADATA_CACHE[""] = {}
 
     try:
         # Get editable packages first
@@ -325,6 +416,212 @@ def _get_editable_packages(timeout: int, python_path: Optional[str] = None) -> D
     return editable_packages
 
 
+_REMOTE_CONSTRAINT_SCRIPT = r"""
+import json, os, sys
+try:
+    from packaging.requirements import Requirement, InvalidRequirement
+    from packaging.utils import canonicalize_name
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+# Authoritative view: pip's own environment. Drives the installed set
+# (deduped the way `pip list` / `pip show` see it).
+from pip._internal.metadata import get_default_environment
+
+# Raw view: importlib.metadata. Any path here that doesn't fall inside
+# a pip-reported location is orphaned metadata (stale .egg-info from a
+# deleted editable install, leftover .dist-info, etc.) — worth flagging
+# because it breaks tools that use importlib.metadata directly.
+try:
+    from importlib.metadata import distributions as _im_distributions
+except ImportError:
+    from importlib_metadata import distributions as _im_distributions  # type: ignore[no-redef]
+
+
+def _inside(path, parent):
+    if not path or not parent:
+        return False
+    try:
+        path = os.path.realpath(path)
+        parent = os.path.realpath(parent)
+    except Exception:
+        return False
+    return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+packages = []
+pip_locations = {}
+env = get_default_environment()
+for dist in env.iter_all_distributions():
+    try:
+        name = dist.metadata["Name"]
+    except Exception:
+        name = None
+    if not name:
+        continue
+    try:
+        version = str(dist.version)
+    except Exception:
+        continue
+    constraints = {}
+    try:
+        requires = dist.metadata.get_all("Requires-Dist") or []
+    except Exception:
+        requires = []
+    for req_string in requires:
+        try:
+            req = Requirement(req_string)
+        except InvalidRequirement:
+            continue
+        if req.marker is not None:
+            marker_str = str(req.marker)
+            if "extra" in marker_str:
+                continue
+            try:
+                if not req.marker.evaluate():
+                    continue
+            except Exception:
+                continue
+        if req.specifier:
+            constraints[canonicalize_name(req.name)] = str(req.specifier)
+    packages.append({"name": name, "version": version, "constraints": constraints})
+    canonical = canonicalize_name(name)
+    pip_locations.setdefault(canonical, []).append(str(getattr(dist, "location", "") or ""))
+
+orphans = {}
+for dist in _im_distributions():
+    try:
+        name = dist.metadata["Name"]
+    except Exception:
+        name = None
+    if not name:
+        continue
+    canonical = canonicalize_name(name)
+    path = str(getattr(dist, "_path", "") or "")
+    if not path:
+        continue
+    locs = pip_locations.get(canonical, [])
+    if any(_inside(path, loc) for loc in locs):
+        continue
+    try:
+        version = str(dist.version)
+    except Exception:
+        version = ""
+    orphans.setdefault(canonical, []).append({"version": version, "path": path})
+
+json.dump({"packages": packages, "orphans": orphans}, sys.stdout)
+"""
+
+
+def _get_remote_packages(timeout: int, python_path: str) -> Dict[str, Any]:
+    """Run the remote-introspection script and return the parsed payload.
+
+    :param timeout: Subprocess timeout in seconds.
+    :param python_path: Python interpreter to invoke.
+    :returns: Dict with ``packages`` (list of ``{"name","version","constraints"}``)
+        and ``orphans`` (dict of canonical name -> list of
+        ``{"version","path"}`` entries for metadata directories pip doesn't see).
+    :raises RuntimeError: On subprocess failure or unparseable output.
+    """
+    import json as json_module
+
+    try:
+        result = subprocess.run(
+            [python_path, "-c", _REMOTE_CONSTRAINT_SCRIPT],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Remote package inspection failed: {e}") from e
+    try:
+        return json_module.loads(result.stdout)
+    except json_module.JSONDecodeError as e:
+        raise RuntimeError(f"Could not parse remote package data: {e}") from e
+
+
+# Per-environment orphan metadata cache, populated by inspect_installed_packages
+# and consumed by build_dep_report. Keyed by python_path (or "" for local env).
+# Value shape: { canonical_name: [ { "version": str, "path": str }, ... ] }.
+_ORPHAN_METADATA_CACHE: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+
+
+def _detect_local_orphan_metadata() -> Dict[str, List[Dict[str, str]]]:
+    """Return canonical-name -> list of orphan ``.dist-info``/``.egg-info`` paths.
+
+    A path is orphaned if it is not inside any location pip's own environment
+    reports for that package. This catches stale ``.egg-info`` directories
+    left behind in source checkouts and rogue ``.dist-info`` dirs that
+    ``pip list`` hides but ``importlib.metadata`` still sees.
+
+    :returns: Dict of canonical package name -> list of
+        ``{"version": ..., "path": ...}`` entries.
+    """
+    try:
+        from importlib.metadata import distributions as _im_distributions
+    except ImportError:  # pragma: no cover - Python <3.10 fallback
+        return {}
+
+    pip_locations: Dict[str, List[str]] = {}
+    try:
+        env = get_default_environment()
+        for dist in env.iter_all_distributions():
+            try:
+                name = dist.metadata["Name"]
+            except Exception:
+                continue
+            if not name:
+                continue
+            canonical = canonicalize_name(name)
+            loc = str(getattr(dist, "location", "") or "")
+            pip_locations.setdefault(canonical, []).append(loc)
+    except Exception as e:
+        logger.debug(f"Could not enumerate pip environment for orphan check: {e}")
+        return {}
+
+    orphans: Dict[str, List[Dict[str, str]]] = {}
+    for im_dist in _im_distributions():
+        try:
+            name = im_dist.metadata["Name"]
+        except Exception:
+            continue
+        if not name:
+            continue
+        canonical = canonicalize_name(name)
+        path = str(getattr(im_dist, "_path", "") or "")
+        if not path:
+            continue
+        locs = pip_locations.get(canonical, [])
+        if any(_path_inside(path, loc) for loc in locs):
+            continue
+        try:
+            version = str(im_dist.version)
+        except Exception:
+            version = ""
+        orphans.setdefault(canonical, []).append({"version": version, "path": path})
+    return orphans
+
+
+def _path_inside(path: str, parent: str) -> bool:
+    """Return True if ``path`` is equal to or a descendant of ``parent``.
+
+    Both arguments are resolved through ``os.path.realpath`` so symlinks
+    don't produce false negatives. Empty arguments return ``False``.
+    """
+    if not path or not parent:
+        return False
+    try:
+        resolved_path = os.path.realpath(path)
+        resolved_parent = os.path.realpath(parent)
+    except Exception:
+        return False
+    if resolved_path == resolved_parent:
+        return True
+    return resolved_path.startswith(resolved_parent.rstrip(os.sep) + os.sep)
+
+
 def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPackage]:
     """Inspect packages in a remote Python environment via subprocess.
 
@@ -333,24 +630,22 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
     :returns: List of InstalledPackage objects
     :raises RuntimeError: If unable to inspect remote packages
     """
-    import json as json_module
-
     try:
-        # Get editable packages first
         editable_packages = _get_editable_packages(timeout, python_path=python_path)
+        payload = _get_remote_packages(timeout, python_path)
 
-        # Get all installed packages via pip list --format=json
-        result = subprocess.run(
-            [python_path, '-m', 'pip', 'list', '--format=json'],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout
-        )
+        # Payload is either the new {"packages": [...], "orphans": {...}} shape
+        # or the legacy list-of-dicts (kept for cache back-compat if any exists).
+        if isinstance(payload, dict):
+            pip_packages = payload.get("packages", [])
+            orphans = payload.get("orphans", {}) or {}
+        else:
+            pip_packages = payload
+            orphans = {}
 
-        pip_packages = json_module.loads(result.stdout)
-        packages = []
+        _ORPHAN_METADATA_CACHE[python_path] = orphans
 
+        packages: List[InstalledPackage] = []
         for pkg_data in pip_packages:
             try:
                 package_name = pkg_data["name"]
@@ -365,15 +660,13 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
                 is_editable = canonical_name in editable_packages
                 editable_location = editable_packages.get(canonical_name) if is_editable else None
 
-                package_info = InstalledPackage(
+                packages.append(InstalledPackage(
                     name=package_name,
                     version=package_version,
                     is_editable=is_editable,
                     editable_location=editable_location,
-                    # Skip constraint extraction for remote environments
-                    constrained_dependencies={},
-                )
-                packages.append(package_info)
+                    constrained_dependencies=dict(pkg_data.get("constraints", {})),
+                ))
             except Exception as e:
                 logger.warning(f"Error processing remote package {pkg_data.get('name', 'unknown')}: {e}")
                 continue
@@ -383,6 +676,19 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
 
     except Exception as e:
         raise RuntimeError(f"Failed to inspect remote packages at {python_path}: {e}") from e
+
+
+def get_orphan_metadata(python_path: Optional[str] = None) -> Dict[str, List[Dict[str, str]]]:
+    """Return any orphaned metadata directories observed for an environment.
+
+    Must be called after :func:`inspect_installed_packages` has populated
+    the cache for the target environment (either local or remote). Returns
+    an empty dict if nothing has been cached.
+
+    :param python_path: Target env path, or ``None`` for local.
+    :returns: Dict of canonical name -> list of ``{"version", "path"}``.
+    """
+    return _ORPHAN_METADATA_CACHE.get(python_path or "", {})
 
 
 def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
@@ -1580,3 +1886,380 @@ def run_pip_uninstall(
         logger.error(f"Error uninstalling packages: {e}")
 
         return _failed_results(f"Uninstallation failed: {e}")
+
+
+def _build_forward_reverse(
+    installed: List[InstalledPackage],
+) -> tuple[
+    Dict[str, InstalledPackage],
+    Dict[str, List[tuple[InstalledPackage, str]]],
+    Dict[str, List[InstalledPackage]],
+]:
+    """Build forward, reverse, and duplicate-install indices.
+
+    Duplicates arise when ``installed`` contains two or more distributions
+    sharing a canonical name (e.g. the same package found under multiple
+    site-packages directories). The forward index keeps the highest-version
+    representative; the returned ``duplicates`` map contains every
+    canonical name with count >= 2 along with all contributing
+    distributions. Duplicates are a correctness concern the caller should
+    surface, not something to silently hide.
+
+    The reverse index dedupes on ``(parent canonical name, parent version,
+    specifier, editable_location)`` so duplicate distributions don't
+    create literally identical tree rows, while genuinely distinct
+    versions remain as separate edges.
+
+    :param installed: All installed packages (may contain duplicates).
+    :returns: ``(forward, reverse, duplicates)``.
+    """
+    by_name: Dict[str, List[InstalledPackage]] = {}
+    for pkg in installed:
+        by_name.setdefault(canonicalize_name(pkg.name), []).append(pkg)
+
+    forward: Dict[str, InstalledPackage] = {
+        name: max(pkgs, key=lambda p: p.version)
+        for name, pkgs in by_name.items()
+    }
+    duplicates: Dict[str, List[InstalledPackage]] = {
+        name: pkgs for name, pkgs in by_name.items() if len(pkgs) > 1
+    }
+
+    reverse: Dict[str, List[tuple[InstalledPackage, str]]] = {}
+    seen_per_dep: Dict[str, set] = {}
+    for parent in installed:
+        for dep_name, spec in parent.constrained_dependencies.items():
+            dep_canonical = canonicalize_name(dep_name)
+            seen = seen_per_dep.setdefault(dep_canonical, set())
+            key = (
+                canonicalize_name(parent.name),
+                str(parent.version),
+                spec,
+                parent.editable_location,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            reverse.setdefault(dep_canonical, []).append((parent, spec))
+    return forward, reverse, duplicates
+
+
+def build_dep_report(
+    package_name: str,
+    *,
+    depth: int = 1,
+    installed: Optional[List[InstalledPackage]] = None,
+    python_path: Optional[str] = None,
+    editable_exists: Callable[[str], bool] = os.path.exists,
+) -> "DepReport":
+    """Inspect PACKAGE's neighborhood and return a :class:`DepReport`.
+
+    Pure function. No network. When ``installed`` is omitted, falls back
+    to :func:`inspect_installed_packages`. ``editable_exists`` is injected
+    so tests can simulate missing paths without touching the filesystem.
+
+    :param package_name: User-supplied package name (will be canonicalized).
+    :param depth: Recursion depth on both branches. ``1`` = direct only.
+        ``0`` = unlimited (cycles still terminate).
+    :param installed: Pre-built list; default: call
+        :func:`inspect_installed_packages`.
+    :param python_path: Forwarded to ``inspect_installed_packages`` when
+        ``installed`` is not provided.
+    :param editable_exists: Predicate used to test whether an editable
+        install path exists on disk. Defaults to :func:`os.path.exists`.
+    :returns: A fully populated :class:`DepReport`.
+    :raises PackageNotInstalledError: If ``package_name`` (after
+        canonicalization) is not in the installed set.
+    """
+    if depth < 0:
+        raise ValueError("depth must be >= 0")
+
+    pkgs = installed if installed is not None else inspect_installed_packages(python_path=python_path)
+    canonical = canonicalize_name(package_name)
+    forward, reverse, duplicates = _build_forward_reverse(pkgs)
+
+    if canonical not in forward:
+        raise PackageNotInstalledError(canonical)
+
+    subject = forward[canonical]
+    orphan_metadata = get_orphan_metadata(python_path)
+
+    required_by = _walk_required_by(canonical, forward, reverse, depth=depth, visited=frozenset({canonical}))
+    requires = _walk_requires(canonical, forward, depth=depth, visited=frozenset({canonical}))
+    problems = _collect_problems(
+        subject, required_by, requires, forward, duplicates, orphan_metadata, editable_exists,
+    )
+
+    return DepReport(
+        package=subject,
+        required_by=required_by,
+        requires=requires,
+        problems=problems,
+    )
+
+
+def _walk_required_by(
+    current: str,
+    forward: Dict[str, InstalledPackage],
+    reverse: Dict[str, List[tuple[InstalledPackage, str]]],
+    *,
+    depth: int,
+    visited: frozenset,
+) -> List["DepNode"]:
+    """Walk the required-by branch from ``current`` up to ``depth`` hops.
+
+    :param current: Canonical name of the node whose parents to enumerate.
+    :param forward: Canonical name -> InstalledPackage.
+    :param reverse: Canonical name -> list of (parent pkg, specifier).
+    :param depth: Remaining hops. ``0`` means unlimited (bounded by visited).
+    :param visited: Canonical names already on the current path; prevents
+        cycles.
+    :returns: Immediate DepNode parents, each with their own recursed children.
+    """
+    nodes: List[DepNode] = []
+    parents = reverse.get(current, [])
+    for parent_pkg, spec in sorted(parents, key=lambda ps: ps[0].name):
+        parent_name = canonicalize_name(parent_pkg.name)
+        edge = DepEdge(
+            name=parent_name,
+            installed_version=parent_pkg.version,
+            specifier=spec,
+            is_editable=parent_pkg.is_editable,
+            editable_location=parent_pkg.editable_location,
+        )
+        if parent_name in visited:
+            nodes.append(DepNode(edge=edge, children=[], is_cycle=True))
+            continue
+        next_depth = depth - 1 if depth > 0 else 0
+        recurse = depth == 0 or next_depth > 0
+        if recurse:
+            children = _walk_required_by(
+                parent_name, forward, reverse,
+                depth=next_depth,
+                visited=visited | {parent_name},
+            )
+        else:
+            children = []
+        nodes.append(DepNode(edge=edge, children=children, is_cycle=False))
+    return nodes
+
+
+def _walk_requires(
+    current: str,
+    forward: Dict[str, InstalledPackage],
+    *,
+    depth: int,
+    visited: frozenset,
+) -> List["DepNode"]:
+    """Walk the requires branch from ``current`` up to ``depth`` hops.
+
+    :param current: Canonical name whose children to enumerate.
+    :param forward: Canonical name -> InstalledPackage.
+    :param depth: Remaining hops. ``0`` means unlimited.
+    :param visited: Canonical names already on the current path.
+    :returns: Immediate DepNode children, each recursed.
+    """
+    nodes: List[DepNode] = []
+    pkg = forward.get(current)
+    if pkg is None:
+        return nodes
+    for dep_name, spec in sorted(pkg.constrained_dependencies.items()):
+        canonical_dep = canonicalize_name(dep_name)
+        dep_pkg = forward.get(canonical_dep)
+        if dep_pkg is not None:
+            edge = DepEdge(
+                name=canonical_dep,
+                installed_version=dep_pkg.version,
+                specifier=spec,
+                is_editable=dep_pkg.is_editable,
+                editable_location=dep_pkg.editable_location,
+            )
+        else:
+            edge = DepEdge(name=canonical_dep, installed_version=None, specifier=spec)
+        if canonical_dep in visited:
+            nodes.append(DepNode(edge=edge, children=[], is_cycle=True))
+            continue
+        next_depth = depth - 1 if depth > 0 else 0
+        recurse = depth == 0 or next_depth > 0
+        if recurse and dep_pkg is not None:
+            children = _walk_requires(
+                canonical_dep, forward,
+                depth=next_depth,
+                visited=visited | {canonical_dep},
+            )
+        else:
+            children = []
+        nodes.append(DepNode(edge=edge, children=children, is_cycle=False))
+    return nodes
+
+
+def _safe_specifier_set(spec: str) -> Optional[SpecifierSet]:
+    """Parse a specifier string, returning ``None`` if it's not valid PEP 440."""
+    try:
+        return SpecifierSet(spec)
+    except InvalidSpecifier:
+        return None
+
+
+def _collect_problems(
+    subject: InstalledPackage,
+    required_by: List["DepNode"],
+    requires: List["DepNode"],
+    forward: Dict[str, InstalledPackage],
+    duplicates: Dict[str, List[InstalledPackage]],
+    orphan_metadata: Dict[str, List[Dict[str, str]]],
+    editable_exists: Callable[[str], bool],
+) -> List["DepProblem"]:
+    """Scan the visible tree and return a deduped, sorted list of problems.
+
+    Checks:
+
+    - ``missing``: a requires-edge points at a name not installed.
+    - ``violates``: the relevant installed version fails the edge's
+      specifier. On the requires branch this is the edge's own version;
+      on the required-by branch this is the *parent* node's version
+      (the target of the requirer's constraint).
+    - ``broken-editable``: an editable node's ``editable_location`` does
+      not exist on disk. Also checked on the subject itself.
+    - ``duplicate-install``: the subject or a visible neighbor has two
+      or more installed distributions under the same canonical name.
+    - ``stale-metadata``: ``.dist-info`` or ``.egg-info`` directories
+      exist on disk that pip no longer counts. Invisible to ``pip list``
+      but confuses any tool that uses ``importlib.metadata`` directly.
+    """
+    seen: set[tuple] = set()
+    problems: List[DepProblem] = []
+
+    def emit(problem: DepProblem) -> None:
+        key = (problem.kind, problem.package, problem.required_by, problem.specifier)
+        if key in seen:
+            return
+        seen.add(key)
+        problems.append(problem)
+
+    subject_name = canonicalize_name(subject.name)
+
+    # 1) Subject's own editable path, if broken.
+    if subject.is_editable and subject.editable_location and not editable_exists(subject.editable_location):
+        emit(DepProblem(
+            kind="broken-editable",
+            package=subject_name,
+            detail=f"{subject.name} editable path missing: {subject.editable_location}",
+        ))
+
+    # 2) Duplicate installations visible in the tree (or the subject itself).
+    def emit_duplicate(name: str) -> None:
+        variants = duplicates.get(name)
+        if not variants:
+            return
+        versions = ", ".join(sorted({str(p.version) for p in variants}))
+        emit(DepProblem(
+            kind="duplicate-install",
+            package=name,
+            detail=f"{name} has {len(variants)} installed distributions ({versions})",
+        ))
+
+    emit_duplicate(subject_name)
+
+    # 3) Stale-metadata: .dist-info / .egg-info directories the env still
+    #    contains but pip no longer counts. Only emit for names visible in
+    #    the current tree to stay scoped to the subject's neighborhood.
+    def emit_stale(name: str) -> None:
+        entries = orphan_metadata.get(name)
+        if not entries:
+            return
+        paths = ", ".join(entry.get("path", "?") for entry in entries)
+        emit(DepProblem(
+            kind="stale-metadata",
+            package=name,
+            detail=f"{name} has orphaned metadata: {paths}",
+        ))
+
+    emit_stale(subject_name)
+
+    def walk_edge_names(nodes: List[DepNode]) -> None:
+        for node in nodes:
+            emit_duplicate(node.edge.name)
+            emit_stale(node.edge.name)
+            if not node.is_cycle and node.children:
+                walk_edge_names(node.children)
+
+    walk_edge_names(required_by)
+    walk_edge_names(requires)
+
+    # 2) Required-by branch: edge.specifier constrains parent_name (the
+    #    node closer to the subject). Check parent_version against it.
+    def walk_required_by(
+        nodes: List[DepNode], *, parent_version: Optional[Version], parent_name: str,
+    ) -> None:
+        for node in nodes:
+            edge = node.edge
+            if edge.specifier and parent_version is not None:
+                spec_set = _safe_specifier_set(edge.specifier)
+                if spec_set is not None and not spec_set.contains(parent_version, prereleases=True):
+                    emit(DepProblem(
+                        kind="violates",
+                        package=parent_name,
+                        detail=f"{parent_name} {parent_version} violates {edge.name}{edge.specifier}",
+                        required_by=edge.name,
+                        specifier=edge.specifier,
+                        installed_version=parent_version,
+                    ))
+            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
+                emit(DepProblem(
+                    kind="broken-editable",
+                    package=edge.name,
+                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
+                ))
+            if not node.is_cycle and node.children:
+                walk_required_by(
+                    node.children,
+                    parent_version=edge.installed_version,
+                    parent_name=edge.name,
+                )
+
+    # 3) Requires branch: edge.specifier is parent_name's constraint on
+    #    edge.name. Check edge.installed_version against it.
+    def walk_requires(
+        nodes: List[DepNode], *, parent_name: str,
+    ) -> None:
+        for node in nodes:
+            edge = node.edge
+            if edge.installed_version is None:
+                emit(DepProblem(
+                    kind="missing",
+                    package=edge.name,
+                    detail=f"{edge.name} is required by {parent_name} but is not installed",
+                ))
+            elif edge.specifier:
+                spec_set = _safe_specifier_set(edge.specifier)
+                if spec_set is not None and not spec_set.contains(edge.installed_version, prereleases=True):
+                    emit(DepProblem(
+                        kind="violates",
+                        package=edge.name,
+                        detail=f"{edge.name} {edge.installed_version} violates {parent_name}{edge.specifier}",
+                        required_by=parent_name,
+                        specifier=edge.specifier,
+                        installed_version=edge.installed_version,
+                    ))
+            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
+                emit(DepProblem(
+                    kind="broken-editable",
+                    package=edge.name,
+                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
+                ))
+            if not node.is_cycle and node.children:
+                walk_requires(node.children, parent_name=edge.name)
+
+    walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name)
+    walk_requires(requires, parent_name=subject_name)
+
+    kind_order = {
+        "missing": 0,
+        "violates": 1,
+        "broken-editable": 2,
+        "duplicate-install": 3,
+        "stale-metadata": 4,
+    }
+    problems.sort(key=lambda p: (kind_order.get(p.kind, 99), p.package, p.required_by or ""))
+    return problems

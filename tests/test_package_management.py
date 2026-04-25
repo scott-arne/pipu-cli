@@ -2815,9 +2815,18 @@ class TestPythonPathInspection:
         assert calls[0][0][0][0] == "/other/python"
 
     def test_inspect_without_python_path_uses_pip_internals(self):
-        """When python_path is None, use get_default_environment (existing behavior)."""
+        """When python_path is None, use get_default_environment (existing behavior).
+
+        The orphan-metadata scan also calls ``get_default_environment`` once
+        to enumerate locations pip knows about. Both call sites together
+        account for ``call_count == 2``.
+        """
         with patch("pipu_cli.package_management.get_default_environment") as mock_env, \
-             patch("pipu_cli.package_management._get_editable_packages", return_value={}):
+             patch("pipu_cli.package_management._get_editable_packages", return_value={}), \
+             patch(
+                 "pipu_cli.package_management._detect_local_orphan_metadata",
+                 return_value={},
+             ):
             mock_dist = MagicMock()
             mock_dist.metadata = {"name": "requests"}
             mock_dist.version = "2.31.0"
@@ -2843,24 +2852,71 @@ class TestPythonPathInspection:
         assert "my-pkg" in result
         assert mock_run.call_args[0][0][0] == "/other/python"
 
-    def test_inspect_remote_skips_constraint_extraction(self):
-        """Remote inspection skips dependency constraint extraction."""
-        pip_list_output = json.dumps([
-            {"name": "requests", "version": "2.31.0"},
-        ])
+    def test_inspect_remote_extracts_constraints(self):
+        """Remote inspection parses Requires-Dist constraints from the probe script.
+
+        The remote probe returns ``{"packages": [...], "orphans": {...}}``
+        where each package entry carries ``constraints`` gathered in the
+        target env (so ``extra``/marker handling runs against the right
+        interpreter). Those constraints must land on the resulting
+        ``InstalledPackage`` so :func:`build_dep_report` can walk them.
+        """
+        probe_output = json.dumps({
+            "packages": [{
+                "name": "requests",
+                "version": "2.31.0",
+                "constraints": {
+                    "urllib3": "<3,>=1.21",
+                    "idna": "<4,>=2.5",
+                },
+            }],
+            "orphans": {},
+        })
         editable_output = ""
 
         with patch("pipu_cli.package_management.subprocess.run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(stdout=editable_output, returncode=0),
-                MagicMock(stdout=pip_list_output, returncode=0),
+                MagicMock(stdout=probe_output, returncode=0),
             ]
             packages = inspect_installed_packages(
                 timeout=10, python_path="/other/python"
             )
 
-        # Constraints should be empty for remote inspection
-        assert packages[0].constrained_dependencies == {}
+        assert packages[0].constrained_dependencies == {
+            "urllib3": "<3,>=1.21",
+            "idna": "<4,>=2.5",
+        }
+
+    def test_inspect_remote_captures_orphan_metadata(self):
+        """The remote probe's ``orphans`` payload must populate the cache.
+
+        After ``inspect_installed_packages`` returns for a given
+        ``python_path``, :func:`get_orphan_metadata` for that path should
+        reflect exactly what the probe reported.
+        """
+        from pipu_cli.package_management import get_orphan_metadata
+
+        probe_output = json.dumps({
+            "packages": [
+                {"name": "requests", "version": "2.31.0", "constraints": {}},
+            ],
+            "orphans": {
+                "requests": [{"version": "2.28.0", "path": "/old/requests.egg-info"}],
+            },
+        })
+        editable_output = ""
+
+        with patch("pipu_cli.package_management.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(stdout=editable_output, returncode=0),
+                MagicMock(stdout=probe_output, returncode=0),
+            ]
+            inspect_installed_packages(timeout=10, python_path="/other/python")
+
+        assert get_orphan_metadata("/other/python") == {
+            "requests": [{"version": "2.28.0", "path": "/old/requests.egg-info"}],
+        }
 
 
 class TestPythonPathInstallation:

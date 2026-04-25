@@ -8,7 +8,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import rich_click as click
 from click.core import ParameterSource
@@ -23,10 +23,12 @@ from pipu_cli._subprocess import InterruptToken
 from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
+    build_dep_report,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
     parse_package_spec,
+    PackageNotInstalledError,
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
     reinstall_editable_packages,
@@ -36,6 +38,7 @@ from pipu_cli.package_management import (
 from packaging.utils import canonicalize_name
 from packaging.version import Version, InvalidVersion
 from pipu_cli.pretty import (
+    print_dep_report,
     print_upgradable_packages_table,
     print_upgrade_results,
     print_install_results,
@@ -44,7 +47,7 @@ from pipu_cli.pretty import (
     ConsoleStream,
     select_packages_interactively,
 )
-from pipu_cli.output import JsonOutputFormatter
+from pipu_cli.output import JsonOutputFormatter, dep_report_to_json
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
 from pipu_cli.config_file import load_config, get_config_value
@@ -1167,6 +1170,152 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         else:
             console.print(f"\n[bold red]Error:[/bold red] {e}")
         sys.exit(1)
+
+
+@cli.command()
+@click.pass_context
+@click.argument("package", nargs=1)
+@click.option("--depth", type=click.IntRange(min=0), default=1,
+              help="Recursion depth (default 1; 0 = unlimited)")
+@click.option("--check", is_flag=True,
+              help="Exit non-zero if any problems are found")
+@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
+              help="Output format (human-readable or json)")
+@click.option("--debug", is_flag=True, help="Enable debug logging")
+@click.option("--group", "-g", "group_name", default=None,
+              help="Inspect PACKAGE in every environment of a named group")
+def deps(ctx: click.Context, package: str, depth: int, check: bool,
+         output: str, debug: bool, group_name: Optional[str]) -> None:
+    """
+    Inspect a package's required-by and requires relationships.
+
+    Shows, for [cyan]PACKAGE[/cyan] installed in the current environment,
+    the installed packages that [bold]require[/bold] it and the packages
+    it [bold]requires[/bold], rendered as a tree. Missing dependencies,
+    constraint violations, and broken editable installs are listed in a
+    Problems panel.
+
+    \b
+    Examples:
+      pipu deps requests              Direct required-by and requires
+      pipu deps requests --depth 3    Recurse three hops on each side
+      pipu deps requests --depth 0    Unlimited (with cycle detection)
+      pipu deps requests --check      Exit non-zero if any problem found
+      pipu deps requests -o json      Machine-readable output
+    """
+    console = Console()
+
+    config = load_config()
+    resolved = _apply_config_defaults(
+        ctx,
+        config,
+        {
+            "depth": 1,
+            "check": False,
+            "output": "human",
+            "debug": False,
+        },
+    )
+    depth = resolved["depth"]
+    check = resolved["check"]
+    output = resolved["output"]
+    debug = resolved["debug"]
+
+    _configure_debug_logging(console, debug, output)
+
+    if group_name is not None:
+        _run_group_deps(
+            group_name=group_name, console=console, output=output,
+            package=package, depth=depth, check=check,
+        )
+        return
+
+    try:
+        report = build_dep_report(package, depth=depth)
+    except PackageNotInstalledError as e:
+        if output == "json":
+            print(json.dumps({"error": "package-not-installed", "package": e.name}, indent=2))
+        else:
+            console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    if output == "json":
+        print(json.dumps(dep_report_to_json(report, depth=depth), indent=2))
+    else:
+        print_dep_report(console, report)
+
+    if check and report.problems:
+        sys.exit(1)
+    sys.exit(0)
+
+
+def _run_group_deps(
+    *,
+    group_name: str,
+    console: Console,
+    output: str,
+    package: str,
+    depth: int,
+    check: bool,
+) -> None:
+    """Execute ``pipu deps`` across every environment of a saved group.
+
+    Renders each environment's report sequentially (like
+    ``_run_group_outdated``) so per-env panels don't interleave. In JSON
+    mode, aggregates per-env results into the group schema.
+
+    :param group_name: Name of the group to iterate.
+    :param console: Rich console for human-mode output.
+    :param output: ``"human"`` or ``"json"``.
+    :param package: User-supplied package name (same in every env).
+    :param depth: Forwarded to :func:`build_dep_report` and the JSON payload.
+    :param check: If ``True``, exit ``1`` when any env has problems.
+    """
+    group_ctx = prepare_group(group_name, console=console, output=output)
+
+    any_problems = False
+    per_env_json_payloads: List[tuple] = []  # [(env_name, dict)]
+
+    for env_name, env_path in group_ctx.envs.items():
+        if output != "json":
+            console.print()
+            console.print(Panel(env_path, title=f"Environment: {env_name}",
+                                border_style="cyan", expand=False))
+            console.print()
+
+        try:
+            report = build_dep_report(package, depth=depth, python_path=env_path)
+        except PackageNotInstalledError as e:
+            any_problems = True  # treat not-installed as a problem in --check
+            if output == "json":
+                per_env_json_payloads.append((env_name, {
+                    "error": "package-not-installed", "package": e.name,
+                }))
+            else:
+                console.print(f"[red]{e}[/red]")
+            continue
+
+        if output == "json":
+            per_env_json_payloads.append((env_name, dep_report_to_json(report, depth=depth)))
+        else:
+            print_dep_report(console, report)
+
+        if report.problems:
+            any_problems = True
+
+    if output == "json":
+        payload = {
+            "group": group_name,
+            "environments": [
+                {"env": env, "report": report_dict}
+                for env, report_dict in per_env_json_payloads
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+
+    if check and any_problems:
+        sys.exit(1)
+    sys.exit(0)
 
 
 @cli.command()

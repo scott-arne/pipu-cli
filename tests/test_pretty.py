@@ -107,7 +107,9 @@ class TestParseSelection:
 
 def test_print_upgrade_results_shows_failure_reason():
     """Test that failure reason is shown instead of hardcoded message."""
-    console = Console(file=StringIO(), force_terminal=True)
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True)
     results = [
         UpgradedPackage(
             name="numpy",
@@ -118,14 +120,16 @@ def test_print_upgrade_results_shows_failure_reason():
         )
     ]
     print_upgrade_results(results, console=console)
-    output = console.file.getvalue()  # pyright: ignore[reportAttributeAccessIssue]
+    output = buf.getvalue()
     assert "Version unchanged" in output
     assert "Blocked by runtime constraints" not in output
 
 
 def test_print_upgrade_results_fallback_when_no_reason():
     """Test fallback message when failure_reason is None."""
-    console = Console(file=StringIO(), force_terminal=True)
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True)
     results = [
         UpgradedPackage(
             name="numpy",
@@ -135,13 +139,15 @@ def test_print_upgrade_results_fallback_when_no_reason():
         )
     ]
     print_upgrade_results(results, console=console)
-    output = console.file.getvalue()  # pyright: ignore[reportAttributeAccessIssue]
+    output = buf.getvalue()
     assert "failed" in output
 
 
 def test_print_blocked_packages_shows_all_reasons():
     """Test that all blocked reasons are shown (no truncation)."""
-    console = Console(file=StringIO(), force_terminal=True)
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True)
     packages = [
         BlockedPackageInfo(
             name="numpy",
@@ -155,7 +161,7 @@ def test_print_blocked_packages_shows_all_reasons():
         )
     ]
     print_blocked_packages_table(packages, console=console)
-    output = console.file.getvalue()  # pyright: ignore[reportAttributeAccessIssue]
+    output = buf.getvalue()
     assert "scipy" in output
     assert "pandas" in output
     assert "matplotlib" in output
@@ -198,10 +204,13 @@ class TestPrintEnvLegend:
         from io import StringIO
         from rich.console import Console
 
-        console = Console(file=StringIO(), force_terminal=True)
+        buf = StringIO()
+
+
+        console = Console(file=buf, force_terminal=True)
         env_names = {"main": "/path/to/envs/main/bin/python", "ml": "/path/to/envs/ml/bin/python"}
         print_env_legend(env_names, console=console)
-        output = console.file.getvalue()
+        output = buf.getvalue()
         # Strip ANSI color codes for assertion
         clean_output = re.sub(r'\x1b\[[0-9;]+m', '', output)
         assert "main" in clean_output
@@ -215,7 +224,10 @@ class TestGroupUpgradeMatrix:
         from io import StringIO
         from rich.console import Console
 
-        console = Console(file=StringIO(), force_terminal=True, width=120)
+        buf = StringIO()
+
+
+        console = Console(file=buf, force_terminal=True, width=120)
 
         env_upgrades = {
             "main": [
@@ -228,7 +240,7 @@ class TestGroupUpgradeMatrix:
         env_names = {"main": "/path/main/bin/python", "ml": "/path/ml/bin/python"}
 
         print_group_upgrade_matrix(env_upgrades, env_names, console=console)
-        output = console.file.getvalue()
+        output = buf.getvalue()
         assert "requests" in output
         assert "main" in output
         assert "ml" in output
@@ -237,7 +249,10 @@ class TestGroupUpgradeMatrix:
         from io import StringIO
         from rich.console import Console
 
-        console = Console(file=StringIO(), force_terminal=True, width=120)
+        buf = StringIO()
+
+
+        console = Console(file=buf, force_terminal=True, width=120)
 
         env_upgrades = {
             "main": [
@@ -248,7 +263,7 @@ class TestGroupUpgradeMatrix:
         env_names = {"main": "/path/main/bin/python", "web": "/path/web/bin/python"}
 
         print_group_upgrade_matrix(env_upgrades, env_names, console=console)
-        output = console.file.getvalue()
+        output = buf.getvalue()
         assert "-" in output
 
 
@@ -259,13 +274,16 @@ class TestGroupBlockedTable:
         from io import StringIO
         from rich.console import Console
 
-        console = Console(file=StringIO(), force_terminal=True, width=120)
+        buf = StringIO()
+
+
+        console = Console(file=buf, force_terminal=True, width=120)
 
         blocked = [
             ("ml", BlockedPackageInfo(name="scipy", version=Version("1.10.0"), latest_version=Version("1.12.0"), blocked_by=["numpy<1.25 (scikit-learn 1.3.0)"])),
         ]
         print_group_blocked_table(blocked, console=console)
-        output = console.file.getvalue()
+        output = buf.getvalue()
         assert "scipy" in output
         assert "ml" in output
         assert "numpy" in output
