@@ -2172,7 +2172,7 @@ def _collect_problems(
         emit(DepProblem(
             kind="stale-metadata",
             package=name,
-            detail=f"{name} has leftover metadata pip doesn't track: {paths}",
+            detail=f"{name} has orphaned metadata: {paths}",
         ))
 
     emit_stale(subject_name)
