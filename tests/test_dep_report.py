@@ -195,3 +195,63 @@ def test_problems_sort_order(make_installed_packages):
     # missing first, violates next, broken-editable last
     assert kinds.index("missing") < kinds.index("violates")
     assert kinds.index("violates") < kinds.index("broken-editable")
+
+
+def test_depth_2_recurses_one_more_hop(make_installed_packages):
+    installed = make_installed_packages(
+        ("a", "1.0", {"b": ">=1"}),
+        ("b", "1.0", {"c": ">=1"}),
+        ("c", "1.0", {}),
+    )
+    report = build_dep_report("a", installed=installed, depth=2)
+    # requires: a -> b -> c
+    assert len(report.requires) == 1
+    b_node = report.requires[0]
+    assert b_node.edge.name == "b"
+    assert [n.edge.name for n in b_node.children] == ["c"]
+
+
+def test_depth_3_three_hops(make_installed_packages):
+    installed = make_installed_packages(
+        ("a", "1.0", {"b": ">=1"}),
+        ("b", "1.0", {"c": ">=1"}),
+        ("c", "1.0", {"d": ">=1"}),
+        ("d", "1.0", {}),
+    )
+    report = build_dep_report("a", installed=installed, depth=3)
+    b = report.requires[0]
+    c = b.children[0]
+    d = c.children[0]
+    assert d.edge.name == "d"
+    assert d.children == []
+
+
+def test_depth_0_unlimited(make_installed_packages):
+    installed = make_installed_packages(
+        ("a", "1.0", {"b": ">=1"}),
+        ("b", "1.0", {"c": ">=1"}),
+        ("c", "1.0", {}),
+    )
+    report = build_dep_report("a", installed=installed, depth=0)
+    assert report.requires[0].children[0].edge.name == "c"
+
+
+def test_cycle_terminates_cleanly(make_installed_packages):
+    installed = make_installed_packages(
+        ("a", "1.0", {"b": ">=1"}),
+        ("b", "1.0", {"a": ">=1"}),  # cycle
+    )
+    report = build_dep_report("a", installed=installed, depth=0)
+    b = report.requires[0]
+    assert b.edge.name == "b"
+    assert len(b.children) == 1
+    cycle_node = b.children[0]
+    assert cycle_node.edge.name == "a"
+    assert cycle_node.is_cycle is True
+    assert cycle_node.children == []
+
+
+def test_negative_depth_raises(make_installed_packages):
+    installed = make_installed_packages(("a", "1.0", {}))
+    with pytest.raises(ValueError):
+        build_dep_report("a", installed=installed, depth=-1)
