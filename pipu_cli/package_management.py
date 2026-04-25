@@ -294,6 +294,15 @@ def inspect_installed_packages(timeout: int = 10, python_path: Optional[str] = N
     if python_path is not None:
         return _inspect_remote_packages(timeout, python_path)
 
+    # Populate the local-env orphan cache before the main walk so that
+    # later build_dep_report calls can surface stale .egg-info / .dist-info
+    # directories even though pip hides them.
+    try:
+        _ORPHAN_METADATA_CACHE[""] = _detect_local_orphan_metadata()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"Local orphan metadata scan failed: {e}")
+        _ORPHAN_METADATA_CACHE[""] = {}
+
     try:
         # Get editable packages first
         editable_packages = _get_editable_packages(timeout)
@@ -408,7 +417,7 @@ def _get_editable_packages(timeout: int, python_path: Optional[str] = None) -> D
 
 
 _REMOTE_CONSTRAINT_SCRIPT = r"""
-import json, sys
+import json, os, sys
 try:
     from packaging.requirements import Requirement, InvalidRequirement
     from packaging.utils import canonicalize_name
@@ -416,12 +425,33 @@ except ImportError:
     from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
     from pip._vendor.packaging.utils import canonicalize_name
 
-# Use pip's own environment so duplicates are resolved the same way
-# `pip list` and `pip show` resolve them (e.g. preferring a site-packages
-# .dist-info over a stale .egg-info in a source checkout).
+# Authoritative view: pip's own environment. Drives the installed set
+# (deduped the way `pip list` / `pip show` see it).
 from pip._internal.metadata import get_default_environment
 
-result = []
+# Raw view: importlib.metadata. Any path here that doesn't fall inside
+# a pip-reported location is orphaned metadata (stale .egg-info from a
+# deleted editable install, leftover .dist-info, etc.) — worth flagging
+# because it breaks tools that use importlib.metadata directly.
+try:
+    from importlib.metadata import distributions as _im_distributions
+except ImportError:
+    from importlib_metadata import distributions as _im_distributions  # type: ignore[no-redef]
+
+
+def _inside(path, parent):
+    if not path or not parent:
+        return False
+    try:
+        path = os.path.realpath(path)
+        parent = os.path.realpath(parent)
+    except Exception:
+        return False
+    return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+packages = []
+pip_locations = {}
 env = get_default_environment()
 for dist in env.iter_all_distributions():
     try:
@@ -455,17 +485,43 @@ for dist in env.iter_all_distributions():
                 continue
         if req.specifier:
             constraints[canonicalize_name(req.name)] = str(req.specifier)
-    result.append({"name": name, "version": version, "constraints": constraints})
-json.dump(result, sys.stdout)
+    packages.append({"name": name, "version": version, "constraints": constraints})
+    canonical = canonicalize_name(name)
+    pip_locations.setdefault(canonical, []).append(str(getattr(dist, "location", "") or ""))
+
+orphans = {}
+for dist in _im_distributions():
+    try:
+        name = dist.metadata["Name"]
+    except Exception:
+        name = None
+    if not name:
+        continue
+    canonical = canonicalize_name(name)
+    path = str(getattr(dist, "_path", "") or "")
+    if not path:
+        continue
+    locs = pip_locations.get(canonical, [])
+    if any(_inside(path, loc) for loc in locs):
+        continue
+    try:
+        version = str(dist.version)
+    except Exception:
+        version = ""
+    orphans.setdefault(canonical, []).append({"version": version, "path": path})
+
+json.dump({"packages": packages, "orphans": orphans}, sys.stdout)
 """
 
 
-def _get_remote_packages(timeout: int, python_path: str) -> List[Dict[str, Any]]:
-    """Run the remote-introspection script and return parsed records.
+def _get_remote_packages(timeout: int, python_path: str) -> Dict[str, Any]:
+    """Run the remote-introspection script and return the parsed payload.
 
     :param timeout: Subprocess timeout in seconds.
     :param python_path: Python interpreter to invoke.
-    :returns: List of ``{"name", "version", "constraints"}`` dicts.
+    :returns: Dict with ``packages`` (list of ``{"name","version","constraints"}``)
+        and ``orphans`` (dict of canonical name -> list of
+        ``{"version","path"}`` entries for metadata directories pip doesn't see).
     :raises RuntimeError: On subprocess failure or unparseable output.
     """
     import json as json_module
@@ -486,6 +542,86 @@ def _get_remote_packages(timeout: int, python_path: str) -> List[Dict[str, Any]]
         raise RuntimeError(f"Could not parse remote package data: {e}") from e
 
 
+# Per-environment orphan metadata cache, populated by inspect_installed_packages
+# and consumed by build_dep_report. Keyed by python_path (or "" for local env).
+# Value shape: { canonical_name: [ { "version": str, "path": str }, ... ] }.
+_ORPHAN_METADATA_CACHE: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+
+
+def _detect_local_orphan_metadata() -> Dict[str, List[Dict[str, str]]]:
+    """Return canonical-name -> list of orphan ``.dist-info``/``.egg-info`` paths.
+
+    A path is orphaned if it is not inside any location pip's own environment
+    reports for that package. This catches stale ``.egg-info`` directories
+    left behind in source checkouts and rogue ``.dist-info`` dirs that
+    ``pip list`` hides but ``importlib.metadata`` still sees.
+
+    :returns: Dict of canonical package name -> list of
+        ``{"version": ..., "path": ...}`` entries.
+    """
+    try:
+        from importlib.metadata import distributions as _im_distributions
+    except ImportError:  # pragma: no cover - Python <3.10 fallback
+        return {}
+
+    pip_locations: Dict[str, List[str]] = {}
+    try:
+        env = get_default_environment()
+        for dist in env.iter_all_distributions():
+            try:
+                name = dist.metadata["Name"]
+            except Exception:
+                continue
+            if not name:
+                continue
+            canonical = canonicalize_name(name)
+            loc = str(getattr(dist, "location", "") or "")
+            pip_locations.setdefault(canonical, []).append(loc)
+    except Exception as e:
+        logger.debug(f"Could not enumerate pip environment for orphan check: {e}")
+        return {}
+
+    orphans: Dict[str, List[Dict[str, str]]] = {}
+    for dist in _im_distributions():
+        try:
+            name = dist.metadata["Name"]
+        except Exception:
+            continue
+        if not name:
+            continue
+        canonical = canonicalize_name(name)
+        path = str(getattr(dist, "_path", "") or "")
+        if not path:
+            continue
+        locs = pip_locations.get(canonical, [])
+        if any(_path_inside(path, loc) for loc in locs):
+            continue
+        try:
+            version = str(dist.version)
+        except Exception:
+            version = ""
+        orphans.setdefault(canonical, []).append({"version": version, "path": path})
+    return orphans
+
+
+def _path_inside(path: str, parent: str) -> bool:
+    """Return True if ``path`` is equal to or a descendant of ``parent``.
+
+    Both arguments are resolved through ``os.path.realpath`` so symlinks
+    don't produce false negatives. Empty arguments return ``False``.
+    """
+    if not path or not parent:
+        return False
+    try:
+        resolved_path = os.path.realpath(path)
+        resolved_parent = os.path.realpath(parent)
+    except Exception:
+        return False
+    if resolved_path == resolved_parent:
+        return True
+    return resolved_path.startswith(resolved_parent.rstrip(os.sep) + os.sep)
+
+
 def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPackage]:
     """Inspect packages in a remote Python environment via subprocess.
 
@@ -496,7 +632,18 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
     """
     try:
         editable_packages = _get_editable_packages(timeout, python_path=python_path)
-        pip_packages = _get_remote_packages(timeout, python_path)
+        payload = _get_remote_packages(timeout, python_path)
+
+        # Payload is either the new {"packages": [...], "orphans": {...}} shape
+        # or the legacy list-of-dicts (kept for cache back-compat if any exists).
+        if isinstance(payload, dict):
+            pip_packages = payload.get("packages", [])
+            orphans = payload.get("orphans", {}) or {}
+        else:
+            pip_packages = payload
+            orphans = {}
+
+        _ORPHAN_METADATA_CACHE[python_path] = orphans
 
         packages: List[InstalledPackage] = []
         for pkg_data in pip_packages:
@@ -529,6 +676,19 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
 
     except Exception as e:
         raise RuntimeError(f"Failed to inspect remote packages at {python_path}: {e}") from e
+
+
+def get_orphan_metadata(python_path: Optional[str] = None) -> Dict[str, List[Dict[str, str]]]:
+    """Return any orphaned metadata directories observed for an environment.
+
+    Must be called after :func:`inspect_installed_packages` has populated
+    the cache for the target environment (either local or remote). Returns
+    an empty dict if nothing has been cached.
+
+    :param python_path: Target env path, or ``None`` for local.
+    :returns: Dict of canonical name -> list of ``{"version", "path"}``.
+    """
+    return _ORPHAN_METADATA_CACHE.get(python_path or "", {})
 
 
 def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
@@ -1822,10 +1982,13 @@ def build_dep_report(
         raise PackageNotInstalledError(canonical)
 
     subject = forward[canonical]
+    orphan_metadata = get_orphan_metadata(python_path)
 
     required_by = _walk_required_by(canonical, forward, reverse, depth=depth, visited=frozenset({canonical}))
     requires = _walk_requires(canonical, forward, depth=depth, visited=frozenset({canonical}))
-    problems = _collect_problems(subject, required_by, requires, forward, duplicates, editable_exists)
+    problems = _collect_problems(
+        subject, required_by, requires, forward, duplicates, orphan_metadata, editable_exists,
+    )
 
     return DepReport(
         package=subject,
@@ -1944,6 +2107,7 @@ def _collect_problems(
     requires: List["DepNode"],
     forward: Dict[str, InstalledPackage],
     duplicates: Dict[str, List[InstalledPackage]],
+    orphan_metadata: Dict[str, List[Dict[str, str]]],
     editable_exists: Callable[[str], bool],
 ) -> List["DepProblem"]:
     """Scan the visible tree and return a deduped, sorted list of problems.
@@ -1959,6 +2123,9 @@ def _collect_problems(
       not exist on disk. Also checked on the subject itself.
     - ``duplicate-install``: the subject or a visible neighbor has two
       or more installed distributions under the same canonical name.
+    - ``stale-metadata``: ``.dist-info`` or ``.egg-info`` directories
+      exist on disk that pip no longer counts. Invisible to ``pip list``
+      but confuses any tool that uses ``importlib.metadata`` directly.
     """
     seen: set[tuple] = set()
     problems: List[DepProblem] = []
@@ -1994,9 +2161,26 @@ def _collect_problems(
 
     emit_duplicate(subject_name)
 
+    # 3) Stale-metadata: .dist-info / .egg-info directories the env still
+    #    contains but pip no longer counts. Only emit for names visible in
+    #    the current tree to stay scoped to the subject's neighborhood.
+    def emit_stale(name: str) -> None:
+        entries = orphan_metadata.get(name)
+        if not entries:
+            return
+        paths = ", ".join(entry.get("path", "?") for entry in entries)
+        emit(DepProblem(
+            kind="stale-metadata",
+            package=name,
+            detail=f"{name} has leftover metadata pip doesn't track: {paths}",
+        ))
+
+    emit_stale(subject_name)
+
     def walk_edge_names(nodes: List[DepNode]) -> None:
         for node in nodes:
             emit_duplicate(node.edge.name)
+            emit_stale(node.edge.name)
             if not node.is_cycle and node.children:
                 walk_edge_names(node.children)
 
@@ -2070,6 +2254,12 @@ def _collect_problems(
     walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name)
     walk_requires(requires, parent_name=subject_name)
 
-    kind_order = {"missing": 0, "violates": 1, "broken-editable": 2, "duplicate-install": 3}
+    kind_order = {
+        "missing": 0,
+        "violates": 1,
+        "broken-editable": 2,
+        "duplicate-install": 3,
+        "stale-metadata": 4,
+    }
     problems.sort(key=lambda p: (kind_order.get(p.kind, 99), p.package, p.required_by or ""))
     return problems

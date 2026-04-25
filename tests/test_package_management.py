@@ -2815,9 +2815,18 @@ class TestPythonPathInspection:
         assert calls[0][0][0][0] == "/other/python"
 
     def test_inspect_without_python_path_uses_pip_internals(self):
-        """When python_path is None, use get_default_environment (existing behavior)."""
+        """When python_path is None, use get_default_environment (existing behavior).
+
+        The orphan-metadata scan also calls ``get_default_environment`` once
+        to enumerate locations pip knows about. Both call sites together
+        account for ``call_count == 2``.
+        """
         with patch("pipu_cli.package_management.get_default_environment") as mock_env, \
-             patch("pipu_cli.package_management._get_editable_packages", return_value={}):
+             patch("pipu_cli.package_management._get_editable_packages", return_value={}), \
+             patch(
+                 "pipu_cli.package_management._detect_local_orphan_metadata",
+                 return_value={},
+             ):
             mock_dist = MagicMock()
             mock_dist.metadata = {"name": "requests"}
             mock_dist.version = "2.31.0"

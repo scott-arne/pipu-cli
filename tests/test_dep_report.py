@@ -295,3 +295,37 @@ def test_build_dep_report_dedupes_reverse_edges_for_identical_parents(make_insta
     # But the duplicate is flagged.
     assert any(p.kind == "duplicate-install" and p.package == "parent"
                for p in report.problems)
+
+
+def test_problems_stale_metadata_on_subject(make_installed_packages, monkeypatch):
+    from pipu_cli import package_management as pm
+    installed = make_installed_packages(("foo", "1.0.0", {}))
+    monkeypatch.setitem(
+        pm._ORPHAN_METADATA_CACHE, "",
+        {"foo": [{"version": "1.0.0", "path": "/old/foo.egg-info"}]},
+    )
+    report = build_dep_report("foo", installed=installed)
+    stale = [p for p in report.problems if p.kind == "stale-metadata"]
+    assert len(stale) == 1
+    assert stale[0].package == "foo"
+    assert "/old/foo.egg-info" in stale[0].detail
+
+
+def test_problems_stale_metadata_scoped_to_visible_tree(make_installed_packages, monkeypatch):
+    from pipu_cli import package_management as pm
+    installed = make_installed_packages(
+        ("subj", "1.0.0", {"dep": ">=1"}),
+        ("dep", "1.0.0", {}),
+        ("unrelated", "1.0.0", {}),
+    )
+    monkeypatch.setitem(
+        pm._ORPHAN_METADATA_CACHE, "",
+        {
+            "dep": [{"version": "1.0.0", "path": "/old/dep.egg-info"}],
+            "unrelated": [{"version": "1.0.0", "path": "/old/unrelated.egg-info"}],
+        },
+    )
+    report = build_dep_report("subj", installed=installed)
+    stale_names = {p.package for p in report.problems if p.kind == "stale-metadata"}
+    # Only the visible neighbor is flagged.
+    assert stale_names == {"dep"}
