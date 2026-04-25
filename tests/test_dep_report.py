@@ -255,3 +255,43 @@ def test_negative_depth_raises(make_installed_packages):
     installed = make_installed_packages(("a", "1.0", {}))
     with pytest.raises(ValueError):
         build_dep_report("a", installed=installed, depth=-1)
+
+
+def test_problems_duplicate_install_on_subject(make_installed_packages):
+    installed = make_installed_packages(
+        ("foo", "1.0.0", {}),
+        ("foo", "1.0.1", {}),
+    )
+    report = build_dep_report("foo", installed=installed)
+    dupes = [p for p in report.problems if p.kind == "duplicate-install"]
+    assert len(dupes) == 1
+    assert dupes[0].package == "foo"
+    assert "2 installed distributions" in dupes[0].detail
+    assert "1.0.0" in dupes[0].detail and "1.0.1" in dupes[0].detail
+
+
+def test_problems_duplicate_install_on_neighbor(make_installed_packages):
+    installed = make_installed_packages(
+        ("subj", "1.0.0", {"dup": ">=1"}),
+        ("dup", "1.0.0", {}),
+        ("dup", "1.0.1", {}),
+    )
+    report = build_dep_report("subj", installed=installed)
+    dupes = [p for p in report.problems if p.kind == "duplicate-install"]
+    assert len(dupes) == 1
+    assert dupes[0].package == "dup"
+
+
+def test_build_dep_report_dedupes_reverse_edges_for_identical_parents(make_installed_packages):
+    installed = make_installed_packages(
+        ("child", "1.0", {}),
+        ("parent", "1.0", {"child": ">=1"}),
+        ("parent", "1.0", {"child": ">=1"}),
+    )
+    report = build_dep_report("child", installed=installed)
+    # Only one edge row for parent despite duplicate installation.
+    assert len(report.required_by) == 1
+    assert report.required_by[0].edge.name == "parent"
+    # But the duplicate is flagged.
+    assert any(p.kind == "duplicate-install" and p.package == "parent"
+               for p in report.problems)

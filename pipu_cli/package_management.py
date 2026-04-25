@@ -407,6 +407,83 @@ def _get_editable_packages(timeout: int, python_path: Optional[str] = None) -> D
     return editable_packages
 
 
+_REMOTE_CONSTRAINT_SCRIPT = r"""
+import json, sys
+try:
+    from packaging.requirements import Requirement, InvalidRequirement
+    from packaging.utils import canonicalize_name
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
+    from pip._vendor.packaging.utils import canonicalize_name
+try:
+    from importlib.metadata import distributions
+except ImportError:
+    from importlib_metadata import distributions  # type: ignore[no-redef]
+
+result = []
+for dist in distributions():
+    try:
+        name = dist.metadata["Name"]
+    except Exception:
+        name = None
+    if not name:
+        continue
+    try:
+        version = dist.version
+    except Exception:
+        continue
+    constraints = {}
+    try:
+        requires = dist.metadata.get_all("Requires-Dist") or []
+    except Exception:
+        requires = []
+    for req_string in requires:
+        try:
+            req = Requirement(req_string)
+        except InvalidRequirement:
+            continue
+        if req.marker is not None:
+            marker_str = str(req.marker)
+            if "extra" in marker_str:
+                continue
+            try:
+                if not req.marker.evaluate():
+                    continue
+            except Exception:
+                continue
+        if req.specifier:
+            constraints[canonicalize_name(req.name)] = str(req.specifier)
+    result.append({"name": name, "version": version, "constraints": constraints})
+json.dump(result, sys.stdout)
+"""
+
+
+def _get_remote_packages(timeout: int, python_path: str) -> List[Dict[str, Any]]:
+    """Run the remote-introspection script and return parsed records.
+
+    :param timeout: Subprocess timeout in seconds.
+    :param python_path: Python interpreter to invoke.
+    :returns: List of ``{"name", "version", "constraints"}`` dicts.
+    :raises RuntimeError: On subprocess failure or unparseable output.
+    """
+    import json as json_module
+
+    try:
+        result = subprocess.run(
+            [python_path, "-c", _REMOTE_CONSTRAINT_SCRIPT],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Remote package inspection failed: {e}") from e
+    try:
+        return json_module.loads(result.stdout)
+    except json_module.JSONDecodeError as e:
+        raise RuntimeError(f"Could not parse remote package data: {e}") from e
+
+
 def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPackage]:
     """Inspect packages in a remote Python environment via subprocess.
 
@@ -415,24 +492,11 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
     :returns: List of InstalledPackage objects
     :raises RuntimeError: If unable to inspect remote packages
     """
-    import json as json_module
-
     try:
-        # Get editable packages first
         editable_packages = _get_editable_packages(timeout, python_path=python_path)
+        pip_packages = _get_remote_packages(timeout, python_path)
 
-        # Get all installed packages via pip list --format=json
-        result = subprocess.run(
-            [python_path, '-m', 'pip', 'list', '--format=json'],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout
-        )
-
-        pip_packages = json_module.loads(result.stdout)
-        packages = []
-
+        packages: List[InstalledPackage] = []
         for pkg_data in pip_packages:
             try:
                 package_name = pkg_data["name"]
@@ -447,15 +511,13 @@ def _inspect_remote_packages(timeout: int, python_path: str) -> List[InstalledPa
                 is_editable = canonical_name in editable_packages
                 editable_location = editable_packages.get(canonical_name) if is_editable else None
 
-                package_info = InstalledPackage(
+                packages.append(InstalledPackage(
                     name=package_name,
                     version=package_version,
                     is_editable=is_editable,
                     editable_location=editable_location,
-                    # Skip constraint extraction for remote environments
-                    constrained_dependencies={},
-                )
-                packages.append(package_info)
+                    constrained_dependencies=dict(pkg_data.get("constraints", {})),
+                ))
             except Exception as e:
                 logger.warning(f"Error processing remote package {pkg_data.get('name', 'unknown')}: {e}")
                 continue
@@ -1666,19 +1728,58 @@ def run_pip_uninstall(
 
 def _build_forward_reverse(
     installed: List[InstalledPackage],
-) -> tuple[Dict[str, InstalledPackage], Dict[str, List[tuple[InstalledPackage, str]]]]:
-    """Build forward (name -> pkg) and reverse (name -> [(parent, spec)]) indices.
+) -> tuple[
+    Dict[str, InstalledPackage],
+    Dict[str, List[tuple[InstalledPackage, str]]],
+    Dict[str, List[InstalledPackage]],
+]:
+    """Build forward, reverse, and duplicate-install indices.
 
-    :param installed: All installed packages.
-    :returns: ``(forward, reverse)`` where names in both dicts are
-        canonicalized (PEP 503).
+    Duplicates arise when ``installed`` contains two or more distributions
+    sharing a canonical name (e.g. the same package found under multiple
+    site-packages directories). The forward index keeps the highest-version
+    representative; the returned ``duplicates`` map contains every
+    canonical name with count >= 2 along with all contributing
+    distributions. Duplicates are a correctness concern the caller should
+    surface, not something to silently hide.
+
+    The reverse index dedupes on ``(parent canonical name, parent version,
+    specifier, editable_location)`` so duplicate distributions don't
+    create literally identical tree rows, while genuinely distinct
+    versions remain as separate edges.
+
+    :param installed: All installed packages (may contain duplicates).
+    :returns: ``(forward, reverse, duplicates)``.
     """
-    forward: Dict[str, InstalledPackage] = {canonicalize_name(p.name): p for p in installed}
+    by_name: Dict[str, List[InstalledPackage]] = {}
+    for pkg in installed:
+        by_name.setdefault(canonicalize_name(pkg.name), []).append(pkg)
+
+    forward: Dict[str, InstalledPackage] = {
+        name: max(pkgs, key=lambda p: p.version)
+        for name, pkgs in by_name.items()
+    }
+    duplicates: Dict[str, List[InstalledPackage]] = {
+        name: pkgs for name, pkgs in by_name.items() if len(pkgs) > 1
+    }
+
     reverse: Dict[str, List[tuple[InstalledPackage, str]]] = {}
+    seen_per_dep: Dict[str, set] = {}
     for parent in installed:
         for dep_name, spec in parent.constrained_dependencies.items():
-            reverse.setdefault(canonicalize_name(dep_name), []).append((parent, spec))
-    return forward, reverse
+            dep_canonical = canonicalize_name(dep_name)
+            seen = seen_per_dep.setdefault(dep_canonical, set())
+            key = (
+                canonicalize_name(parent.name),
+                str(parent.version),
+                spec,
+                parent.editable_location,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            reverse.setdefault(dep_canonical, []).append((parent, spec))
+    return forward, reverse, duplicates
 
 
 def build_dep_report(
@@ -1713,7 +1814,7 @@ def build_dep_report(
 
     pkgs = installed if installed is not None else inspect_installed_packages(python_path=python_path)
     canonical = canonicalize_name(package_name)
-    forward, reverse = _build_forward_reverse(pkgs)
+    forward, reverse, duplicates = _build_forward_reverse(pkgs)
 
     if canonical not in forward:
         raise PackageNotInstalledError(canonical)
@@ -1722,7 +1823,7 @@ def build_dep_report(
 
     required_by = _walk_required_by(canonical, forward, reverse, depth=depth, visited=frozenset({canonical}))
     requires = _walk_requires(canonical, forward, depth=depth, visited=frozenset({canonical}))
-    problems = _collect_problems(subject, required_by, requires, forward, editable_exists)
+    problems = _collect_problems(subject, required_by, requires, forward, duplicates, editable_exists)
 
     return DepReport(
         package=subject,
@@ -1840,6 +1941,7 @@ def _collect_problems(
     required_by: List["DepNode"],
     requires: List["DepNode"],
     forward: Dict[str, InstalledPackage],
+    duplicates: Dict[str, List[InstalledPackage]],
     editable_exists: Callable[[str], bool],
 ) -> List["DepProblem"]:
     """Scan the visible tree and return a deduped, sorted list of problems.
@@ -1853,6 +1955,8 @@ def _collect_problems(
       (the target of the requirer's constraint).
     - ``broken-editable``: an editable node's ``editable_location`` does
       not exist on disk. Also checked on the subject itself.
+    - ``duplicate-install``: the subject or a visible neighbor has two
+      or more installed distributions under the same canonical name.
     """
     seen: set[tuple] = set()
     problems: List[DepProblem] = []
@@ -1873,6 +1977,29 @@ def _collect_problems(
             package=subject_name,
             detail=f"{subject.name} editable path missing: {subject.editable_location}",
         ))
+
+    # 2) Duplicate installations visible in the tree (or the subject itself).
+    def emit_duplicate(name: str) -> None:
+        variants = duplicates.get(name)
+        if not variants:
+            return
+        versions = ", ".join(sorted({str(p.version) for p in variants}))
+        emit(DepProblem(
+            kind="duplicate-install",
+            package=name,
+            detail=f"{name} has {len(variants)} installed distributions ({versions})",
+        ))
+
+    emit_duplicate(subject_name)
+
+    def walk_edge_names(nodes: List[DepNode]) -> None:
+        for node in nodes:
+            emit_duplicate(node.edge.name)
+            if not node.is_cycle and node.children:
+                walk_edge_names(node.children)
+
+    walk_edge_names(required_by)
+    walk_edge_names(requires)
 
     # 2) Required-by branch: edge.specifier constrains parent_name (the
     #    node closer to the subject). Check parent_version against it.
@@ -1941,6 +2068,6 @@ def _collect_problems(
     walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name)
     walk_requires(requires, parent_name=subject_name)
 
-    kind_order = {"missing": 0, "violates": 1, "broken-editable": 2}
+    kind_order = {"missing": 0, "violates": 1, "broken-editable": 2, "duplicate-install": 3}
     problems.sort(key=lambda p: (kind_order.get(p.kind, 99), p.package, p.required_by or ""))
     return problems
