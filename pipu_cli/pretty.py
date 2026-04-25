@@ -18,7 +18,6 @@ from pipu_cli.package_management import (
     InstalledResult,
     UninstalledResult,
     DepNode,
-    DepProblem,
     DepReport,
 )
 from pipu_cli.ui import CHECKMARK, CROSS, STYLES

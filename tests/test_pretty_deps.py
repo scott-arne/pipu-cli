@@ -2,7 +2,6 @@
 
 from io import StringIO
 
-import pytest
 from packaging.version import Version
 from rich.console import Console
 
@@ -16,14 +15,18 @@ from pipu_cli.package_management import (
 from pipu_cli.pretty import print_dep_report
 
 
-def _console() -> Console:
-    return Console(file=StringIO(), force_terminal=False, width=120, color_system=None)
+def _console_with_buf() -> tuple[Console, StringIO]:
+    buf = StringIO()
+    return (
+        Console(file=buf, force_terminal=False, width=120, color_system=None),
+        buf,
+    )
 
 
 def _render(report: DepReport) -> str:
-    console = _console()
+    console, buf = _console_with_buf()
     print_dep_report(console, report)
-    return console.file.getvalue()
+    return buf.getvalue()
 
 
 def _subject(name="requests", version="2.31.0", **kwargs) -> InstalledPackage:

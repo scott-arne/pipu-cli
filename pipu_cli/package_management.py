@@ -582,22 +582,22 @@ def _detect_local_orphan_metadata() -> Dict[str, List[Dict[str, str]]]:
         return {}
 
     orphans: Dict[str, List[Dict[str, str]]] = {}
-    for dist in _im_distributions():
+    for im_dist in _im_distributions():
         try:
-            name = dist.metadata["Name"]
+            name = im_dist.metadata["Name"]
         except Exception:
             continue
         if not name:
             continue
         canonical = canonicalize_name(name)
-        path = str(getattr(dist, "_path", "") or "")
+        path = str(getattr(im_dist, "_path", "") or "")
         if not path:
             continue
         locs = pip_locations.get(canonical, [])
         if any(_path_inside(path, loc) for loc in locs):
             continue
         try:
-            version = str(dist.version)
+            version = str(im_dist.version)
         except Exception:
             version = ""
         orphans.setdefault(canonical, []).append({"version": version, "path": path})

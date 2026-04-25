@@ -1,6 +1,5 @@
 """Tests for build_dep_report and its data model."""
 
-from typing import List
 
 import pytest
 from packaging.version import Version
@@ -9,8 +8,6 @@ from pipu_cli.package_management import (
     DepEdge,
     DepNode,
     DepProblem,
-    DepReport,
-    InstalledPackage,
     PackageNotInstalledError,
     build_dep_report,
 )
@@ -164,7 +161,7 @@ def test_problems_dedup_same_constraint_across_parents(make_installed_packages):
     # Each parent imposes the same constraint but with distinct required_by;
     # we want one per (kind, package, required_by, specifier) tuple, so 3.
     assert len(violates) == 3
-    assert sorted(p.required_by for p in violates) == ["a", "b", "c"]
+    assert sorted(p.required_by or "" for p in violates) == ["a", "b", "c"]
 
 
 def test_problems_dedup_exact_duplicate(make_installed_packages):

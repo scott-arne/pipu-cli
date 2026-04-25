@@ -60,4 +60,5 @@ def test_rollback_to_state_surfaces_pip_failures(monkeypatch):
     assert [p.spec for p in result.succeeded] == ["requests==2.30.0"]
     assert len(result.failed) == 1
     assert result.failed[0].spec == "broken-pkg==9.9.9"
-    assert "no such distribution" in result.failed[0].reason or "pip exit code 1" in result.failed[0].reason
+    reason = result.failed[0].reason or ""
+    assert "no such distribution" in reason or "pip exit code 1" in reason

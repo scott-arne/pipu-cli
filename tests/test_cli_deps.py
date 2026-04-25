@@ -1,14 +1,11 @@
 """End-to-end CLI tests for pipu deps."""
 
 import json
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
-from packaging.version import Version
 
 from pipu_cli.cli import cli
-from pipu_cli.package_management import InstalledPackage
 
 
 @pytest.fixture
@@ -122,7 +119,6 @@ def test_deps_group_mode_human(monkeypatch, make_installed_packages):
     env_tools = make_installed_packages(
         ("requests", "2.31.0", {}),
     )
-    calls = {}
 
     def fake_inspect(*, python_path=None, **kw):
         return env_main if "main" in (python_path or "") else env_tools

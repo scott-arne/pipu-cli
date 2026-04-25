@@ -47,7 +47,7 @@ from pipu_cli.pretty import (
     ConsoleStream,
     select_packages_interactively,
 )
-from pipu_cli.output import JsonOutputFormatter, dep_report_to_json, dep_report_group_to_json
+from pipu_cli.output import JsonOutputFormatter, dep_report_to_json
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
 from pipu_cli.config_file import load_config, get_config_value
