@@ -93,3 +93,105 @@ def test_build_dep_report_empty_branches(make_installed_packages):
     assert report.required_by == []
     assert report.requires == []
     assert report.problems == []
+
+
+def test_problems_missing_dependency(make_installed_packages):
+    installed = make_installed_packages(
+        ("requests", "2.31.0", {"urllib3": "<3,>=1.21"}),
+        # urllib3 intentionally absent
+    )
+    report = build_dep_report("requests", installed=installed)
+    assert len(report.problems) == 1
+    p = report.problems[0]
+    assert p.kind == "missing"
+    assert p.package == "urllib3"
+    assert "urllib3" in p.detail
+    assert "requests" in p.detail
+
+
+def test_problems_version_violates_constraint(make_installed_packages):
+    installed = make_installed_packages(
+        ("requests", "2.31.0", {"urllib3": "<2"}),
+        ("urllib3", "2.2.2", {}),
+    )
+    report = build_dep_report("requests", installed=installed)
+    assert len(report.problems) == 1
+    p = report.problems[0]
+    assert p.kind == "violates"
+    assert p.package == "urllib3"
+    assert p.required_by == "requests"
+    assert p.specifier == "<2"
+    assert p.installed_version == Version("2.2.2")
+    assert "urllib3" in p.detail
+    assert "<2" in p.detail
+
+
+def test_problems_violates_on_required_by_side(make_installed_packages):
+    """A parent that imposes a constraint PACKAGE fails to satisfy is also caught."""
+    installed = make_installed_packages(
+        ("requests", "2.31.0", {}),
+        ("httpx", "0.27.0", {"requests": ">=3.0"}),  # violated
+    )
+    report = build_dep_report("requests", installed=installed)
+    assert any(
+        p.kind == "violates" and p.package == "requests" and p.required_by == "httpx"
+        for p in report.problems
+    )
+
+
+def test_problems_broken_editable(make_installed_packages):
+    installed = make_installed_packages(
+        ("mylib", "0.1.0", {}, {"is_editable": True, "editable_location": "/nope"}),
+    )
+    report = build_dep_report(
+        "mylib", installed=installed,
+        editable_exists=lambda p: False,
+    )
+    assert any(
+        p.kind == "broken-editable" and p.package == "mylib" for p in report.problems
+    )
+
+
+def test_problems_dedup_same_constraint_across_parents(make_installed_packages):
+    installed = make_installed_packages(
+        ("urllib3", "2.2.2", {}),
+        ("a", "1.0", {"urllib3": "<2"}),
+        ("b", "1.0", {"urllib3": "<2"}),
+        ("c", "1.0", {"urllib3": "<2"}),
+    )
+    report = build_dep_report("urllib3", installed=installed)
+    violates = [p for p in report.problems if p.kind == "violates"]
+    # Each parent imposes the same constraint but with distinct required_by;
+    # we want one per (kind, package, required_by, specifier) tuple, so 3.
+    assert len(violates) == 3
+    assert sorted(p.required_by for p in violates) == ["a", "b", "c"]
+
+
+def test_problems_dedup_exact_duplicate(make_installed_packages):
+    """A constraint appearing twice (e.g. reachable via two tree paths) dedups."""
+    installed = make_installed_packages(
+        ("urllib3", "2.2.2", {}),
+        ("a", "1.0", {"urllib3": "<2"}),
+    )
+    report = build_dep_report("urllib3", installed=installed, depth=0)
+    violates = [p for p in report.problems if p.kind == "violates" and p.required_by == "a"]
+    assert len(violates) == 1
+
+
+def test_problems_sort_order(make_installed_packages):
+    installed = make_installed_packages(
+        (
+            "subj", "1.0.0",
+            {"absent-dep": ">=1", "bad-ver": "<1"},
+            {"is_editable": True, "editable_location": "/nope"},
+        ),
+        ("bad-ver", "2.0.0", {}),
+    )
+    report = build_dep_report(
+        "subj", installed=installed,
+        editable_exists=lambda p: False,
+    )
+    kinds = [p.kind for p in report.problems]
+    # missing first, violates next, broken-editable last
+    assert kinds.index("missing") < kinds.index("violates")
+    assert kinds.index("violates") < kinds.index("broken-editable")

@@ -1827,6 +1827,14 @@ def _walk_requires(
     return nodes
 
 
+def _safe_specifier_set(spec: str) -> Optional[SpecifierSet]:
+    """Parse a specifier string, returning ``None`` if it's not valid PEP 440."""
+    try:
+        return SpecifierSet(spec)
+    except InvalidSpecifier:
+        return None
+
+
 def _collect_problems(
     subject: InstalledPackage,
     required_by: List["DepNode"],
@@ -1834,8 +1842,105 @@ def _collect_problems(
     forward: Dict[str, InstalledPackage],
     editable_exists: Callable[[str], bool],
 ) -> List["DepProblem"]:
-    """Scan the visible tree for correctness problems and return a sorted list.
+    """Scan the visible tree and return a deduped, sorted list of problems.
 
-    Stub for Task 4; returns ``[]`` for now so the happy-path tests pass.
+    Checks:
+
+    - ``missing``: a requires-edge points at a name not installed.
+    - ``violates``: the relevant installed version fails the edge's
+      specifier. On the requires branch this is the edge's own version;
+      on the required-by branch this is the *parent* node's version
+      (the target of the requirer's constraint).
+    - ``broken-editable``: an editable node's ``editable_location`` does
+      not exist on disk. Also checked on the subject itself.
     """
-    return []
+    seen: set[tuple] = set()
+    problems: List[DepProblem] = []
+
+    def emit(problem: DepProblem) -> None:
+        key = (problem.kind, problem.package, problem.required_by, problem.specifier)
+        if key in seen:
+            return
+        seen.add(key)
+        problems.append(problem)
+
+    subject_name = canonicalize_name(subject.name)
+
+    # 1) Subject's own editable path, if broken.
+    if subject.is_editable and subject.editable_location and not editable_exists(subject.editable_location):
+        emit(DepProblem(
+            kind="broken-editable",
+            package=subject_name,
+            detail=f"{subject.name} editable path missing: {subject.editable_location}",
+        ))
+
+    # 2) Required-by branch: edge.specifier constrains parent_name (the
+    #    node closer to the subject). Check parent_version against it.
+    def walk_required_by(
+        nodes: List[DepNode], *, parent_version: Optional[Version], parent_name: str,
+    ) -> None:
+        for node in nodes:
+            edge = node.edge
+            if edge.specifier and parent_version is not None:
+                spec_set = _safe_specifier_set(edge.specifier)
+                if spec_set is not None and not spec_set.contains(parent_version, prereleases=True):
+                    emit(DepProblem(
+                        kind="violates",
+                        package=parent_name,
+                        detail=f"{parent_name} {parent_version} violates {edge.name}{edge.specifier}",
+                        required_by=edge.name,
+                        specifier=edge.specifier,
+                        installed_version=parent_version,
+                    ))
+            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
+                emit(DepProblem(
+                    kind="broken-editable",
+                    package=edge.name,
+                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
+                ))
+            if not node.is_cycle and node.children:
+                walk_required_by(
+                    node.children,
+                    parent_version=edge.installed_version,
+                    parent_name=edge.name,
+                )
+
+    # 3) Requires branch: edge.specifier is parent_name's constraint on
+    #    edge.name. Check edge.installed_version against it.
+    def walk_requires(
+        nodes: List[DepNode], *, parent_name: str,
+    ) -> None:
+        for node in nodes:
+            edge = node.edge
+            if edge.installed_version is None:
+                emit(DepProblem(
+                    kind="missing",
+                    package=edge.name,
+                    detail=f"{edge.name} is required by {parent_name} but is not installed",
+                ))
+            elif edge.specifier:
+                spec_set = _safe_specifier_set(edge.specifier)
+                if spec_set is not None and not spec_set.contains(edge.installed_version, prereleases=True):
+                    emit(DepProblem(
+                        kind="violates",
+                        package=edge.name,
+                        detail=f"{edge.name} {edge.installed_version} violates {parent_name}{edge.specifier}",
+                        required_by=parent_name,
+                        specifier=edge.specifier,
+                        installed_version=edge.installed_version,
+                    ))
+            if edge.is_editable and edge.editable_location and not editable_exists(edge.editable_location):
+                emit(DepProblem(
+                    kind="broken-editable",
+                    package=edge.name,
+                    detail=f"{edge.name} editable path missing: {edge.editable_location}",
+                ))
+            if not node.is_cycle and node.children:
+                walk_requires(node.children, parent_name=edge.name)
+
+    walk_required_by(required_by, parent_version=subject.version, parent_name=subject_name)
+    walk_requires(requires, parent_name=subject_name)
+
+    kind_order = {"missing": 0, "violates": 1, "broken-editable": 2}
+    problems.sort(key=lambda p: (kind_order.get(p.kind, 99), p.package, p.required_by or ""))
+    return problems
