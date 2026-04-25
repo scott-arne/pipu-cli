@@ -182,6 +182,23 @@ class DepReport:
     problems: List["DepProblem"] = field(default_factory=list, hash=False, compare=False)
 
 
+@dataclass(frozen=True)
+class EnvReport:
+    """Full consistency-check result for one environment.
+
+    :param python_path: Python interpreter path, or ``None`` for the
+        local env.
+    :param package_count: Total installed distributions scanned
+        (duplicates count separately).
+    :param problems: Deduped, sorted list of :class:`DepProblem` entries.
+        Same kinds / dedup / sort order as :class:`DepReport.problems`.
+    """
+
+    python_path: Optional[str]
+    package_count: int
+    problems: List["DepProblem"] = field(default_factory=list, hash=False, compare=False)
+
+
 class PackageNotInstalledError(Exception):
     """Raised when the requested PACKAGE is not installed in the target env."""
 
