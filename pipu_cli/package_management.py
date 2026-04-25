@@ -415,13 +415,15 @@ try:
 except ImportError:
     from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
     from pip._vendor.packaging.utils import canonicalize_name
-try:
-    from importlib.metadata import distributions
-except ImportError:
-    from importlib_metadata import distributions  # type: ignore[no-redef]
+
+# Use pip's own environment so duplicates are resolved the same way
+# `pip list` and `pip show` resolve them (e.g. preferring a site-packages
+# .dist-info over a stale .egg-info in a source checkout).
+from pip._internal.metadata import get_default_environment
 
 result = []
-for dist in distributions():
+env = get_default_environment()
+for dist in env.iter_all_distributions():
     try:
         name = dist.metadata["Name"]
     except Exception:
@@ -429,7 +431,7 @@ for dist in distributions():
     if not name:
         continue
     try:
-        version = dist.version
+        version = str(dist.version)
     except Exception:
         continue
     constraints = {}
