@@ -12,6 +12,7 @@ from pipu_cli.package_management import (
     DepNode,
     DepProblem,
     DepReport,
+    EnvReport,
 )
 
 
@@ -256,6 +257,52 @@ def dep_report_group_to_json(
         "group": group_name,
         "environments": [
             {"env": env, "report": dep_report_to_json(report, depth=depth)}
+            for env, report in per_env
+        ],
+    }
+
+
+def env_report_to_json(report: EnvReport) -> Dict[str, Any]:
+    """Serialize an :class:`EnvReport` to a JSON-ready ``dict``.
+
+    :param report: The report to serialize.
+    :returns: A dict suitable for :func:`json.dumps`.
+    """
+    summary = {
+        "missing": 0,
+        "violates": 0,
+        "broken-editable": 0,
+        "duplicate-install": 0,
+        "stale-metadata": 0,
+        "total": len(report.problems),
+    }
+    for problem in report.problems:
+        if problem.kind in summary:
+            summary[problem.kind] += 1
+    return {
+        "environment": report.python_path,
+        "package_count": report.package_count,
+        "problems": [_problem_to_dict(p) for p in report.problems],
+        "summary": summary,
+    }
+
+
+def env_report_group_to_json(
+    *,
+    group_name: str,
+    per_env: List[tuple],
+) -> Dict[str, Any]:
+    """Wrap per-env :class:`EnvReport` values into the group schema.
+
+    :param group_name: Group name for the ``"group"`` key.
+    :param per_env: List of ``(env_name, EnvReport)`` tuples. Order
+        is preserved.
+    :returns: ``{"group": ..., "environments": [{"env": ..., "report": ...}]}``.
+    """
+    return {
+        "group": group_name,
+        "environments": [
+            {"env": env, "report": env_report_to_json(report)}
             for env, report in per_env
         ],
     }
