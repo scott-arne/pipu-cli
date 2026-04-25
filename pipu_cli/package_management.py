@@ -2336,3 +2336,95 @@ def _collect_problems(
         problem_target_names=visible_names,
         subject_editable=subject,
     )
+
+
+def _collect_env_problems(
+    installed: List[InstalledPackage],
+    *,
+    duplicates: Dict[str, List[InstalledPackage]],
+    orphan_metadata: Dict[str, List[Dict[str, str]]],
+    editable_exists: Callable[[str], bool],
+) -> List["DepProblem"]:
+    """Env-wide problem scan.
+
+    Walks every installed package's ``constrained_dependencies`` as the
+    edge stream and emits broken-editable for every editable package.
+    Duplicates and orphan metadata are emitted env-wide (no
+    ``problem_target_names`` filter).
+
+    :param installed: All installed packages (may contain duplicates).
+    :param duplicates: From :func:`_build_forward_reverse`.
+    :param orphan_metadata: From :func:`get_orphan_metadata`.
+    :param editable_exists: Injected ``os.path.exists`` for testability.
+    :returns: Deduped, sorted list of :class:`DepProblem`.
+    """
+    forward: Dict[str, InstalledPackage] = {canonicalize_name(p.name): p for p in installed}
+
+    edges: List[_ProblemEdge] = []
+    for pkg in installed:
+        pkg_canonical = canonicalize_name(pkg.name)
+        # Edge for the editable status of the package itself.
+        edges.append(_ProblemEdge(
+            owner_name=pkg_canonical,
+            owner_version=pkg.version,
+            owner_is_editable=pkg.is_editable,
+            owner_editable_location=pkg.editable_location,
+            constraint_source=pkg_canonical,
+            specifier="",
+            branch="requires",
+        ))
+        for dep_name, spec in pkg.constrained_dependencies.items():
+            dep_canonical = canonicalize_name(dep_name)
+            dep_pkg = forward.get(dep_canonical)
+            edges.append(_ProblemEdge(
+                owner_name=dep_canonical,
+                owner_version=dep_pkg.version if dep_pkg is not None else None,
+                owner_is_editable=dep_pkg.is_editable if dep_pkg is not None else False,
+                owner_editable_location=dep_pkg.editable_location if dep_pkg is not None else None,
+                constraint_source=pkg_canonical,
+                specifier=spec,
+                branch="requires",
+            ))
+
+    return _collect_problems_over_edges(
+        edges,
+        duplicates=duplicates,
+        orphan_metadata=orphan_metadata,
+        editable_exists=editable_exists,
+        problem_target_names=None,  # env-wide
+        subject_editable=None,
+    )
+
+
+def build_env_report(
+    *,
+    installed: Optional[List[InstalledPackage]] = None,
+    python_path: Optional[str] = None,
+    editable_exists: Callable[[str], bool] = os.path.exists,
+) -> "EnvReport":
+    """Inspect an environment and return an :class:`EnvReport`.
+
+    Pure function. Mirrors :func:`build_dep_report` shape but returns a
+    whole-env snapshot.
+
+    :param installed: Pre-built list; default: call
+        :func:`inspect_installed_packages(python_path=python_path)`.
+    :param python_path: Forwarded to ``inspect_installed_packages`` when
+        ``installed`` is not provided; also recorded on the result.
+    :param editable_exists: Injected for testability.
+    :returns: An :class:`EnvReport`.
+    """
+    pkgs = installed if installed is not None else inspect_installed_packages(python_path=python_path)
+    _forward, _reverse, duplicates = _build_forward_reverse(pkgs)
+    orphan_metadata = get_orphan_metadata(python_path)
+    problems = _collect_env_problems(
+        pkgs,
+        duplicates=duplicates,
+        orphan_metadata=orphan_metadata,
+        editable_exists=editable_exists,
+    )
+    return EnvReport(
+        python_path=python_path,
+        package_count=len(pkgs),
+        problems=problems,
+    )
