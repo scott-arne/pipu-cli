@@ -109,6 +109,87 @@ class UninstalledResult:
 
 
 @dataclass(frozen=True)
+class DepEdge:
+    """A single dependency relationship seen from the subject package.
+
+    :param name: Canonical (PEP 503) name of the *other* package in the edge.
+    :param installed_version: Installed version of the other package, or
+        ``None`` if it is not installed.
+    :param specifier: PEP 440 specifier string imposed on this edge
+        (e.g. ``">=2.28"``). Empty string if unconstrained.
+    :param is_editable: Whether the other package is installed editable.
+    :param editable_location: Editable install path, if any.
+    """
+
+    name: str
+    installed_version: Optional[Version]
+    specifier: str
+    is_editable: bool = False
+    editable_location: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DepNode:
+    """A node in either branch of the dep tree.
+
+    :param edge: The edge that reaches this node.
+    :param children: Child nodes (further hops). Empty at ``depth == 1``
+        or when the node terminates a cycle.
+    :param is_cycle: ``True`` if this node terminates a cycle and has no
+        children by construction.
+    """
+
+    edge: "DepEdge"
+    children: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    is_cycle: bool = False
+
+
+@dataclass(frozen=True)
+class DepProblem:
+    """A correctness problem to surface in the error panel.
+
+    :param kind: One of ``"missing"``, ``"violates"``, ``"broken-editable"``.
+    :param package: Package the problem attaches to.
+    :param detail: Human-readable one-line summary.
+    :param required_by: For ``"violates"``, the package imposing the
+        constraint.
+    :param specifier: For ``"violates"``, the violated specifier.
+    :param installed_version: For ``"violates"``, the installed version.
+    """
+
+    kind: str
+    package: str
+    detail: str
+    required_by: Optional[str] = None
+    specifier: Optional[str] = None
+    installed_version: Optional[Version] = None
+
+
+@dataclass(frozen=True)
+class DepReport:
+    """Full inspection result for one PACKAGE in one environment.
+
+    :param package: The subject :class:`InstalledPackage`.
+    :param required_by: Tree branch of packages that require the subject.
+    :param requires: Tree branch of packages the subject requires.
+    :param problems: Deduped, sorted list of :class:`DepProblem` entries.
+    """
+
+    package: "InstalledPackage"
+    required_by: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    requires: List["DepNode"] = field(default_factory=list, hash=False, compare=False)
+    problems: List["DepProblem"] = field(default_factory=list, hash=False, compare=False)
+
+
+class PackageNotInstalledError(Exception):
+    """Raised when the requested PACKAGE is not installed in the target env."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name} is not installed in this environment")
+        self.name = name
+
+
+@dataclass(frozen=True)
 class ParsedSpec:
     """Result of parsing a user-facing package spec.
 
