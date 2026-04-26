@@ -54,7 +54,6 @@ from pipu_cli.output import (
     build_uninstall_payload,
     build_upgrade_payload,
     dep_report_to_json,
-    env_report_group_to_json,
     env_report_to_json,
     package_to_dict,
 )
@@ -1459,6 +1458,7 @@ def check(ctx: click.Context, by: str, output: str, debug: bool,
         _run_group_check(
             group_name=group_name, console=console,
             output=output, group_by=by,
+            fix=fix, interactive=interactive,
         )
         return
 
@@ -1493,22 +1493,30 @@ def _run_group_check(
     console: Console,
     output: str,
     group_by: str,
+    fix: bool = False,
+    interactive: bool = False,
 ) -> None:
     """Execute ``pipu check`` across every env of a saved group.
 
     Iterates envs sequentially so per-env panels don't interleave. In
-    JSON mode, aggregates per-env reports into the group schema.
+    JSON mode, aggregates per-env reports (and fix results, when
+    ``--fix`` is set) into the group schema.
 
     :param group_name: Name of the group to iterate.
     :param console: Rich console for human-mode output.
     :param output: ``"human"`` or ``"json"``.
-    :param group_by: Forwarded to :func:`print_env_report` in human mode
-        (one of ``"problem"`` or ``"package"``).
+    :param group_by: Forwarded to :func:`print_env_report` in human mode.
+    :param fix: Enable fix mode per env.
+    :param interactive: Prompt per action per env (human only; incompatible
+        with ``output == "json"``, but the caller has already rejected
+        that combination).
     """
     group_ctx = prepare_group(group_name, console=console, output=output)
 
-    per_env_reports: List[tuple] = []  # [(env_name, EnvReport)]
+    per_env_reports: List[tuple] = []
+    per_env_fixes: Dict[str, List[Any]] = {}
     any_problems = False
+    any_fix_failure = False
 
     for env_name, env_path in group_ctx.envs.items():
         if output != "json":
@@ -1525,12 +1533,31 @@ def _run_group_check(
         if output != "json":
             print_env_report(console, report, group_by=group_by)
 
-    if output == "json":
-        print(json.dumps(env_report_group_to_json(
-            group_name=group_name, per_env=per_env_reports,
-        ), indent=2))
+        if fix:
+            from pipu_cli._fix_cli import run_fix
+            fixes, env_exit = run_fix(
+                report=report, console=console, output=output,
+                interactive=interactive,
+            )
+            per_env_fixes[env_name] = fixes
+            if env_exit != 0:
+                any_fix_failure = True
 
-    sys.exit(1 if any_problems else 0)
+    if output == "json":
+        envs_json: List[Dict[str, Any]] = []
+        for env_name, report in per_env_reports:
+            fixes_for_env = per_env_fixes.get(env_name) if fix else None
+            envs_json.append({
+                "env": env_name,
+                "report": env_report_to_json(report, fixes=fixes_for_env),
+            })
+        print(json.dumps(
+            {"group": group_name, "environments": envs_json}, indent=2,
+        ))
+
+    sys.exit(
+        1 if any_fix_failure or (not fix and any_problems) else 0,
+    )
 
 
 @cli.command()

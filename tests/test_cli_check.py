@@ -185,3 +185,64 @@ def test_check_without_fix_is_read_only(patch_inspect, make_installed_packages, 
     assert result.exit_code == 1
     assert "Fix summary" not in result.output
     assert "Fixing" not in result.output
+
+
+def test_check_fix_group_runs_per_env(monkeypatch, make_installed_packages):
+    """Each env's fixes apply independently; exit 1 if ANY env had a failure."""
+    import pipu_cli.package_management as pm
+
+    env_main = make_installed_packages(("foo", "1.0.0", {}))
+    env_tools = make_installed_packages(("bar", "1.0.0", {}))
+
+    def fake_inspect(*, python_path=None, **kw):
+        return env_main if "main" in (python_path or "") else env_tools
+
+    monkeypatch.setattr(
+        "pipu_cli.package_management.inspect_installed_packages", fake_inspect,
+    )
+    monkeypatch.setattr(
+        "pipu_cli.cli.prepare_group",
+        lambda name, **kw: type("FG", (), {
+            "name": name,
+            "envs": {"main": "/envs/main/python", "tools": "/envs/tools/python"},
+        })(),
+    )
+    pm._ORPHAN_METADATA_CACHE["/envs/main/python"] = {
+        "foo": [{"version": "1.0.0", "path": "/main/foo.egg-info"}],
+    }
+    pm._ORPHAN_METADATA_CACHE["/envs/tools/python"] = {}
+
+    removed = []
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree",
+                        lambda p: removed.append(p))
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state", lambda *a, **kw: None)
+
+    result = CliRunner().invoke(cli, ["check", "--fix", "-g", "prod"])
+    assert result.exit_code == 0
+    assert removed == ["/main/foo.egg-info"]
+    assert "main" in result.output
+    assert "tools" in result.output
+
+
+def test_check_fix_group_json(monkeypatch, make_installed_packages):
+    pkgs = make_installed_packages(("foo", "1.0.0", {}))
+    monkeypatch.setattr(
+        "pipu_cli.package_management.inspect_installed_packages",
+        lambda *a, **kw: pkgs,
+    )
+    monkeypatch.setattr(
+        "pipu_cli.cli.prepare_group",
+        lambda name, **kw: type("FG", (), {
+            "name": name,
+            "envs": {"main": "/envs/main/python"},
+        })(),
+    )
+    result = CliRunner().invoke(
+        cli, ["check", "--fix", "-g", "prod", "-o", "json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert "environments" in payload
+    env0 = payload["environments"][0]
+    assert "fix_summary" in env0["report"]
