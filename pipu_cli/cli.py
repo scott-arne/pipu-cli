@@ -8,7 +8,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import rich_click as click
 from click.core import ParameterSource
@@ -158,6 +158,42 @@ def _configure_debug_logging(console: Console, debug: bool, output: str) -> None
     logging.getLogger('pip._internal').setLevel(logging.WARNING)
     logging.getLogger('pip._vendor').setLevel(logging.WARNING)
     console.print("[dim]Debug mode enabled[/dim]\n")
+
+
+def _maybe_run_auto_check(
+    *,
+    console: Console,
+    output: str,
+    python_path: Optional[str],
+    check_after_changes: bool,
+    no_check: bool,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Optionally run a whole-env check after a mutating command.
+
+    :param console: Rich console for human-mode output.
+    :param output: ``"human"`` or ``"json"``.
+    :param python_path: Env to check; ``None`` for local.
+    :param check_after_changes: Config-derived default for the flag.
+    :param no_check: ``True`` if ``--no-check`` was passed on this
+        invocation; always wins over ``check_after_changes``.
+    :param result: The command's result payload. In JSON mode the
+        post-check report is inserted under ``result["post_check"]``
+        and the same dict is returned for ``json.dumps``.
+    :returns: The (possibly mutated) ``result`` dict.
+    """
+    if no_check or not check_after_changes:
+        return result
+
+    report = build_env_report(python_path=python_path)
+
+    if output == "json":
+        result["post_check"] = env_report_to_json(report)
+    else:
+        console.print()
+        print_env_report(console, report, group_by="problem")
+
+    return result
 
 
 def _print_cache_diagnostics(

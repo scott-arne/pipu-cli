@@ -42,3 +42,14 @@ try:
 except AttributeError:
     LOG_LEVEL = logging.WARNING
 
+# ============================================================================
+# Auto-check Configuration
+# ============================================================================
+
+# Whether `pipu upgrade` / `install` / `uninstall` automatically run
+# `pipu check` after completing. Honored unless the user passes
+# `--no-check` on the specific invocation.
+DEFAULT_CHECK_AFTER_CHANGES = os.environ.get(
+    'PIPU_CHECK_AFTER_CHANGES', 'true',
+).lower() in ('true', '1', 'yes')
+
