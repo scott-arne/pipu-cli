@@ -2,8 +2,8 @@
 
 from packaging.version import Version
 
-from pipu_cli.fixer import FixResult, apply_stale_metadata_fix, build_fix_plan
-from pipu_cli.package_management import DepProblem, EnvReport
+from pipu_cli.fixer import FixResult, apply_stale_metadata_fix, apply_violates_fix, build_fix_plan
+from pipu_cli.package_management import DepProblem, EnvReport, InstalledResult
 
 
 def test_fix_result_is_frozen():
@@ -127,3 +127,124 @@ def test_apply_stale_metadata_fix_fails_when_remover_raises():
     )
     assert result.status == "failed"
     assert "denied" in (result.detail or "")
+
+
+def _violates_problem(package="urllib3", spec="<2", installed="2.2.2",
+                      required_by="httpx") -> DepProblem:
+    return DepProblem(
+        kind="violates", package=package,
+        detail=f"{package} {installed} violates {required_by}{spec}",
+        required_by=required_by, specifier=spec,
+        installed_version=Version(installed),
+    )
+
+
+def test_apply_violates_fix_single_problem_succeeds():
+    seen_calls = []
+
+    def installer(*, package_specs, **kw):
+        seen_calls.append((package_specs, kw))
+        return [
+            InstalledResult(
+                name="urllib3", version=Version("1.26.20"),
+                installed=True, previous_version=Version("2.2.2"),
+                failure_reason=None,
+            ),
+        ]
+
+    results = apply_violates_fix(
+        [_violates_problem()],
+        python_path=None, installer=installer,
+    )
+    assert len(results) == 1
+    assert results[0].status == "succeeded"
+    assert results[0].action == "install"
+    assert results[0].target == "urllib3<2"
+    assert seen_calls[0][0] == ["urllib3<2"]
+
+
+def test_apply_violates_fix_merges_multiple_problems_on_one_package():
+    seen_calls = []
+
+    def installer(*, package_specs, **kw):
+        seen_calls.append(package_specs)
+        return [
+            InstalledResult(
+                name="urllib3", version=Version("1.26.20"),
+                installed=True, previous_version=Version("2.2.2"),
+                failure_reason=None,
+            ),
+        ]
+
+    problems = [
+        _violates_problem(spec="<2", required_by="httpx"),
+        _violates_problem(spec="<3", required_by="requests"),
+    ]
+    results = apply_violates_fix(
+        problems, python_path=None, installer=installer,
+    )
+    assert len(seen_calls) == 1
+    assert seen_calls[0] == ["urllib3<2,<3"]
+    assert len(results) == 2
+    assert all(r.status == "succeeded" for r in results)
+
+
+def test_apply_violates_fix_failed_install_marks_all_problems_failed():
+    def installer(*, package_specs, **kw):
+        return [
+            InstalledResult(
+                name="urllib3", version=Version("2.2.2"),
+                installed=False, previous_version=Version("2.2.2"),
+                failure_reason="ResolutionImpossible: conflicts with scipy",
+            ),
+        ]
+
+    problems = [
+        _violates_problem(spec="<2", required_by="httpx"),
+        _violates_problem(spec="<3", required_by="requests"),
+    ]
+    results = apply_violates_fix(
+        problems, python_path=None, installer=installer,
+    )
+    assert len(results) == 2
+    assert all(r.status == "failed" for r in results)
+    assert all("ResolutionImpossible" in (r.detail or "") for r in results)
+
+
+def test_apply_violates_fix_installer_raises_marks_failed():
+    def installer(*, package_specs, **kw):
+        raise RuntimeError("pip exploded")
+
+    results = apply_violates_fix(
+        [_violates_problem()], python_path=None, installer=installer,
+    )
+    assert len(results) == 1
+    assert results[0].status == "failed"
+    assert "pip exploded" in (results[0].detail or "")
+
+
+def test_apply_violates_fix_handles_multiple_packages_independently():
+    calls = []
+
+    def installer(*, package_specs, **kw):
+        calls.append(package_specs)
+        name = package_specs[0].split("<")[0].split(">")[0].split("=")[0]
+        succeeded = name != "broken"
+        return [
+            InstalledResult(
+                name=name, version=Version("1.0"),
+                installed=succeeded, previous_version=Version("2.0"),
+                failure_reason=None if succeeded else "no such distribution",
+            ),
+        ]
+
+    problems = [
+        _violates_problem(package="alpha", spec="<2"),
+        _violates_problem(package="broken", spec="<2"),
+    ]
+    results = apply_violates_fix(
+        problems, python_path=None, installer=installer,
+    )
+    assert len(calls) == 2
+    statuses = {r.problem.package: r.status for r in results}
+    assert statuses == {"alpha": "succeeded", "broken": "failed"}

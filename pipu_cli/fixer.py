@@ -5,10 +5,13 @@ writes) are injected by callers so the logic can be unit-tested
 without I/O.
 """
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
-from pipu_cli.package_management import DepProblem, EnvReport
+from packaging.utils import NormalizedName, canonicalize_name
+
+from pipu_cli.package_management import DepProblem, EnvReport, InstalledResult
 
 
 FIXABLE_KINDS = ("stale-metadata", "violates")
@@ -157,3 +160,80 @@ def apply_stale_metadata_fix(
         problem=problem, action="delete", target=path,
         status="succeeded", detail=None,
     )
+
+
+def apply_violates_fix(
+    problems: List[DepProblem],
+    *,
+    python_path: Optional[str],
+    installer: Callable[..., List[InstalledResult]],
+) -> List[FixResult]:
+    """Resolve a batch of ``violates`` problems with one pip install per package.
+
+    Problems that target the same canonical package are merged into a
+    single spec (comma-joined specifiers) and one ``installer`` call.
+    Each input problem yields its own :class:`FixResult`; problems
+    sharing a package share the same ``status`` / ``detail`` / ``target``
+    derived from the pip outcome for that package.
+
+    :param problems: Problems with ``kind == "violates"``.
+    :param python_path: Env identity; forwarded to ``installer``.
+    :param installer: Callable matching
+        :func:`pipu_cli.package_management.run_pip_install`. Called as
+        ``installer(package_specs=..., upgrade=True, timeout=300,
+        python_path=...)``.
+    :returns: One :class:`FixResult` per input problem, in the input
+        order.
+    """
+    if not problems:
+        return []
+
+    groups: Dict[NormalizedName, List[DepProblem]] = defaultdict(list)
+    order: List[NormalizedName] = []
+    for p in problems:
+        key = canonicalize_name(p.package)
+        if key not in groups:
+            order.append(key)
+        groups[key].append(p)
+
+    outcomes: Dict[NormalizedName, FixResult] = {}
+    for key in order:
+        group = groups[key]
+        merged_spec = (
+            f"{group[0].package}"
+            f"{','.join(p.specifier or '' for p in group)}"
+        )
+        try:
+            results = installer(
+                package_specs=[merged_spec],
+                upgrade=True, timeout=300, python_path=python_path,
+            )
+        except Exception as exc:
+            outcomes[key] = FixResult(
+                problem=group[0], action="install", target=merged_spec,
+                status="failed", detail=str(exc),
+            )
+            continue
+
+        if results and results[0].installed:
+            outcomes[key] = FixResult(
+                problem=group[0], action="install", target=merged_spec,
+                status="succeeded", detail=None,
+            )
+        else:
+            reason = results[0].failure_reason if results else "no result returned"
+            outcomes[key] = FixResult(
+                problem=group[0], action="install", target=merged_spec,
+                status="failed", detail=reason,
+            )
+
+    return [
+        FixResult(
+            problem=p,
+            action=outcomes[canonicalize_name(p.package)].action,
+            target=outcomes[canonicalize_name(p.package)].target,
+            status=outcomes[canonicalize_name(p.package)].status,
+            detail=outcomes[canonicalize_name(p.package)].detail,
+        )
+        for p in problems
+    ]
