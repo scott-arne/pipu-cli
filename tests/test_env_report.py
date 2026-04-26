@@ -1,14 +1,10 @@
 """Tests for EnvReport and build_env_report."""
 
-from typing import List
-
 import pytest
-from packaging.version import Version
 
 from pipu_cli.package_management import (
     DepProblem,
     EnvReport,
-    InstalledPackage,
 )
 
 
