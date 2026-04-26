@@ -2824,13 +2824,18 @@ def _run_group_install(
     help="Output format (human-readable or json)"
 )
 @click.option(
+    "--no-check",
+    is_flag=True,
+    help="Skip the post-uninstall consistency check"
+)
+@click.option(
     "--group", "-g",
     "group_name",
     default=None,
     help="Uninstall across all environments in a named group"
 )
 def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
-              yes: bool, debug: bool, output: str,
+              yes: bool, debug: bool, output: str, no_check: bool,
               group_name: Optional[str] = None) -> None:
     """Uninstall packages using pip.
 
@@ -2851,12 +2856,14 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
             'yes': False,
             'debug': False,
             'output': 'human',
+            'check_after_changes': DEFAULT_CHECK_AFTER_CHANGES,
         },
     )
     timeout = resolved['timeout']
     yes = resolved['yes']
     debug = resolved['debug']
     output = resolved['output']
+    check_after_changes = resolved['check_after_changes']
 
     json_formatter = JsonOutputFormatter() if output == "json" else None
 
@@ -2865,6 +2872,7 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
             group_name=group_name, console=console, output=output,
             packages=packages, timeout=timeout,
             yes=yes, json_formatter=json_formatter,
+            check_after_changes=check_after_changes, no_check=no_check,
         )
         return
 
@@ -2881,6 +2889,10 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
             confirm = click.confirm("Do you want to proceed?", default=True)
             if not confirm:
                 console.print("[yellow]Uninstallation cancelled.[/yellow]")
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check, result={},
+                )
                 sys.exit(0)
 
         if output != "json":
@@ -2895,9 +2907,18 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
 
         if output == "json":
             assert json_formatter is not None
-            print(json_formatter.format_uninstall_results(results))
+            payload = json.loads(json_formatter.format_uninstall_results(results))
+            payload = _maybe_run_auto_check(
+                console=console, output=output, python_path=None,
+                check_after_changes=check_after_changes, no_check=no_check, result=payload,
+            )
+            print(json.dumps(payload, indent=2))
         else:
             print_uninstall_results(results, console=console)
+            _maybe_run_auto_check(
+                console=console, output=output, python_path=None,
+                check_after_changes=check_after_changes, no_check=no_check, result={},
+            )
 
         failed = [r for r in results if not r.uninstalled]
         sys.exit(1 if failed else 0)
@@ -2959,6 +2980,9 @@ def _run_group_uninstall(
     packages: tuple, timeout: int,
     yes: bool,
     json_formatter: Optional[JsonOutputFormatter],
+    *,
+    check_after_changes: bool,
+    no_check: bool,
 ) -> None:
     """Execute uninstall across all environments in a group."""
     from pipu_cli.pretty import (
@@ -3011,6 +3035,16 @@ def _run_group_uninstall(
                     )
                     if not confirm:
                         console.print("[yellow]Uninstallation cancelled.[/yellow]")
+                        if check_after_changes and not no_check:
+                            for env_name, env_path in env_name_map.items():
+                                if output != "json":
+                                    console.print()
+                                    from rich.panel import Panel
+                                    console.print(Panel(f"[bold]Environment:[/bold] {env_name}", expand=False))
+                                _maybe_run_auto_check(
+                                    console=console, output=output, python_path=env_path,
+                                    check_after_changes=check_after_changes, no_check=no_check, result={},
+                                )
                         sys.exit(0)
 
             # Phase 3: Parallel uninstall across environments via shared runner
@@ -3043,7 +3077,7 @@ def _run_group_uninstall(
                     results = env_results.get(env_name, [])
                     uninstalled = len([r for r in results if r.uninstalled])
                     failed = len([r for r in results if not r.uninstalled])
-                    group_results.append({
+                    env_dict = {
                         "environment": env_path,
                         "results": [{
                             "name": r.name,
@@ -3057,11 +3091,27 @@ def _run_group_uninstall(
                             "uninstalled": uninstalled,
                             "failed": failed,
                         },
-                    })
+                    }
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=env_path,
+                        check_after_changes=check_after_changes, no_check=no_check, result=env_dict,
+                    )
+                    group_results.append(env_dict)
                 print(json_formatter.format_group_uninstall_results(group_results))
             else:
                 console.print()
                 print_group_uninstall_results_matrix(env_results, env_name_map, console=console)
+                if check_after_changes and not no_check:
+                    for env_name in env_order:
+                        env_path = env_name_map[env_name]
+                        console.print()
+                        from rich.panel import Panel
+                        console.print(Panel(f"[bold]Environment:[/bold] {env_name}", expand=False))
+                        _maybe_run_auto_check(
+                            console=console, output=output, python_path=env_path,
+                            check_after_changes=check_after_changes, no_check=no_check, result={},
+                        )
+
 
             total_failed = sum(
                 len([r for r in env_results.get(n, []) if not r.uninstalled])
