@@ -5,9 +5,9 @@ from io import StringIO
 from packaging.version import Version
 from rich.console import Console
 
-from pipu_cli._fix_cli import Prompter, render_fix_line, render_fix_summary
+from pipu_cli._fix_cli import Prompter, render_fix_line, render_fix_summary, run_fix
 from pipu_cli.fixer import FixResult
-from pipu_cli.package_management import DepProblem
+from pipu_cli.package_management import DepProblem, EnvReport, InstalledResult
 
 
 def _console_with_buf():
@@ -157,3 +157,157 @@ def test_prompter_invalid_reprompts():
     answers = iter(["maybe", "x", "y"])
     p = Prompter(interactive=True, prompt_fn=lambda msg: next(answers))
     assert p.should_apply(kind="stale-metadata", message="fix?") is True
+
+
+def _env_report_with(*problems) -> EnvReport:
+    return EnvReport(python_path=None, package_count=len(problems),
+                     problems=list(problems))
+
+
+def test_run_fix_auto_mode_all_succeed(monkeypatch):
+    removed_calls = []
+    installer_calls = []
+    save_state_calls = []
+
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.get_orphan_metadata",
+        lambda pp: {"foo": [{"path": "/x.egg-info", "version": "0.1"}]},
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.shutil.rmtree",
+        lambda p: removed_calls.append(p),
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.run_pip_install",
+        lambda **kw: (
+            installer_calls.append(kw),
+            [InstalledResult(
+                name="urllib3", version=Version("1.26.20"),
+                installed=True, previous_version=Version("2.2.2"),
+                failure_reason=None,
+            )],
+        )[1],
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.save_state",
+        lambda pkgs, desc: save_state_calls.append((pkgs, desc)),
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.inspect_installed_packages",
+        lambda **kw: [],
+    )
+
+    report = _env_report_with(
+        DepProblem(kind="stale-metadata", package="foo",
+                   detail="foo has orphaned metadata: /x.egg-info"),
+        DepProblem(kind="violates", package="urllib3",
+                   detail="urllib3 2.2.2 violates httpx<2",
+                   required_by="httpx", specifier="<2",
+                   installed_version=Version("2.2.2")),
+    )
+
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=False,
+    )
+
+    assert exit_code == 0
+    assert [f.status for f in fixes] == ["succeeded", "succeeded"]
+    assert removed_calls == ["/x.egg-info"]
+    assert len(installer_calls) == 1
+    # Rollback saved once because plan contained violates.
+    assert len(save_state_calls) == 1
+
+
+def test_run_fix_skips_rollback_when_only_stale(monkeypatch):
+    save_state_calls = []
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.get_orphan_metadata",
+        lambda pp: {"foo": [{"path": "/x.egg-info", "version": "0.1"}]},
+    )
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree", lambda p: None)
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.save_state",
+        lambda pkgs, desc: save_state_calls.append(1),
+    )
+
+    report = _env_report_with(
+        DepProblem(kind="stale-metadata", package="foo",
+                   detail="foo has orphaned metadata: /x.egg-info"),
+    )
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=False,
+    )
+    assert exit_code == 0
+    assert len(save_state_calls) == 0
+
+
+def test_run_fix_failed_install_sets_exit_1(monkeypatch):
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.inspect_installed_packages",
+        lambda **kw: [],
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.run_pip_install",
+        lambda **kw: [InstalledResult(
+            name="urllib3", version=Version("2.2.2"),
+            installed=False, previous_version=Version("2.2.2"),
+            failure_reason="ResolutionImpossible",
+        )],
+    )
+
+    report = _env_report_with(
+        DepProblem(kind="violates", package="urllib3",
+                   detail="urllib3 2.2.2 violates httpx<2",
+                   required_by="httpx", specifier="<2",
+                   installed_version=Version("2.2.2")),
+    )
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=False,
+    )
+    assert exit_code == 1
+    assert fixes[0].status == "failed"
+
+
+def test_run_fix_unfixable_does_not_change_exit(monkeypatch):
+    report = _env_report_with(
+        DepProblem(kind="missing", package="pandas", detail="pandas missing"),
+    )
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=False,
+    )
+    assert exit_code == 0
+    assert fixes[0].status == "unfixable"
+
+
+def test_run_fix_interactive_q_skips_remaining(monkeypatch):
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.get_orphan_metadata",
+        lambda pp: {
+            "a": [{"path": "/a.egg-info", "version": "0.1"}],
+            "b": [{"path": "/b.egg-info", "version": "0.1"}],
+        },
+    )
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree", lambda p: None)
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli._prompt_user",
+        lambda msg: "q",
+    )
+
+    report = _env_report_with(
+        DepProblem(kind="stale-metadata", package="a",
+                   detail="a has orphaned metadata: /a.egg-info"),
+        DepProblem(kind="stale-metadata", package="b",
+                   detail="b has orphaned metadata: /b.egg-info"),
+    )
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=True,
+    )
+    assert exit_code == 0
+    assert all(f.status == "skipped" for f in fixes)
