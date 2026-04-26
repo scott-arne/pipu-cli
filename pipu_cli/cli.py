@@ -163,40 +163,92 @@ def _configure_debug_logging(console: Console, debug: bool, output: str) -> None
     console.print("[dim]Debug mode enabled[/dim]\n")
 
 
-def _maybe_run_auto_check(
-    *,
-    console: Console,
-    output: str,
-    python_path: Optional[str],
-    check_after_changes: bool,
-    no_check: bool,
-    result: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Optionally run a whole-env check after a mutating command.
+class PostCheck:
+    """Encapsulates the post-mutation consistency-check dispatch.
 
-    :param console: Rich console for human-mode output.
+    Each mutating command constructs one :class:`PostCheck` from the
+    resolved ``check_after_changes`` config and the per-invocation
+    ``--no-check`` flag. Callers invoke :meth:`run` at each successful
+    exit; when disabled the call is a no-op, so helpers don't need to
+    branch on the flag themselves.
+
+    :param console: Rich console for human-mode rendering.
     :param output: ``"human"`` or ``"json"``.
-    :param python_path: Env to check; ``None`` for local.
-    :param check_after_changes: Config-derived default for the flag.
-    :param no_check: ``True`` if ``--no-check`` was passed on this
-        invocation; always wins over ``check_after_changes``.
-    :param result: The command's result payload. In JSON mode the
-        post-check report is inserted under ``result["post_check"]``
-        and the same dict is returned for ``json.dumps``.
-    :returns: The (possibly mutated) ``result`` dict.
+    :param enabled: Whether the check should run. Pre-computed as
+        ``check_after_changes and not no_check`` so call-sites don't
+        repeat the predicate.
     """
-    if no_check or not check_after_changes:
-        return result
 
-    report = build_env_report(python_path=python_path)
+    def __init__(self, *, console: Console, output: str, enabled: bool) -> None:
+        self.console = console
+        self.output = output
+        self.enabled = enabled
 
-    if output == "json":
-        result["post_check"] = env_report_to_json(report)
-    else:
-        console.print()
-        print_env_report(console, report, group_by="problem")
+    @classmethod
+    def from_flags(
+        cls,
+        *,
+        console: Console,
+        output: str,
+        check_after_changes: bool,
+        no_check: bool,
+    ) -> "PostCheck":
+        """Build a :class:`PostCheck` from raw config + flag values."""
+        return cls(
+            console=console,
+            output=output,
+            enabled=check_after_changes and not no_check,
+        )
 
-    return result
+    def run(
+        self,
+        *,
+        python_path: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run the auto-check against ``python_path`` if enabled.
+
+        :param python_path: Env to check; ``None`` for local.
+        :param result: JSON payload to merge ``post_check`` into. Created
+            empty if the caller has no payload (human mode).
+        :returns: The (possibly mutated) ``result`` dict.
+        """
+        payload = {} if result is None else result
+        if not self.enabled:
+            return payload
+
+        report = build_env_report(python_path=python_path)
+        if self.output == "json":
+            payload["post_check"] = env_report_to_json(report)
+        else:
+            self.console.print()
+            print_env_report(self.console, report, group_by="problem")
+        return payload
+
+    def run_per_env(
+        self,
+        envs: Dict[str, str],
+        *,
+        title_prefix: str = "Check",
+    ) -> None:
+        """Run the check against every env in ``envs`` (human mode).
+
+        Each env gets a cyan Panel header naming the env before its
+        report, matching the group-mode banner style used elsewhere in
+        the CLI.
+
+        :param envs: Ordered ``{short_name: python_path}`` mapping.
+        :param title_prefix: Banner prefix; defaults to ``"Check"``.
+        """
+        if not self.enabled:
+            return
+        for env_name, env_path in envs.items():
+            self.console.print()
+            self.console.print(Panel(
+                env_path, title=f"{title_prefix}: {env_name}",
+                border_style="cyan", expand=False,
+            ))
+            self.run(python_path=env_path)
 
 
 def _print_cache_diagnostics(
@@ -862,7 +914,12 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     show_blocked = resolved['show_blocked']
     output = resolved['output']
     cache_ttl = resolved['cache_ttl']
-    check_after_changes = resolved['check_after_changes']
+
+    post_check = PostCheck.from_flags(
+        console=console, output=output,
+        check_after_changes=resolved['check_after_changes'],
+        no_check=no_check,
+    )
 
     # exclude has its own parsing pathway
     if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
@@ -884,7 +941,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             packages=packages, package_constraints={},
             update_requirements=update_requirements,
             cache_enabled=cache_enabled,
-            check_after_changes=check_after_changes, no_check=no_check,
+            post_check=post_check,
         )
         return
 
@@ -935,11 +992,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
             if not installed_packages:
                 payload: Dict[str, Any] = {"error": "No packages found"}
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check,
-                    result=payload,
-                )
+                post_check.run(result=payload)
                 if output == "json":
                     print(json.dumps(payload, indent=2))
                 else:
@@ -954,11 +1007,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
             if not latest_versions:
                 uptodate_payload: Dict[str, Any] = {"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check,
-                    result=uptodate_payload,
-                )
+                post_check.run(result=uptodate_payload)
                 if output == "json":
                     print(json.dumps(uptodate_payload, indent=2))
                 else:
@@ -977,18 +1026,10 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                         upgradable=[],
                         blocked=blocked_packages if show_blocked else None
                     )
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=None,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result=blocked_payload,
-                    )
+                    post_check.run(result=blocked_payload)
                     print(json.dumps(blocked_payload, indent=2))
                 else:
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=None,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result={},
-                    )
+                    post_check.run()
                     console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
                     if show_blocked and blocked_packages:
                         console.print()
@@ -1002,11 +1043,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                         upgradable=can_upgrade,
                         blocked=blocked_packages if show_blocked else None
                     )
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=None,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result=dryrun_payload,
-                    )
+                    post_check.run(result=dryrun_payload)
                     print(json.dumps(dryrun_payload, indent=2))
                     sys.exit(0)
             else:
@@ -1020,20 +1057,12 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                 if interactive:
                     can_upgrade = select_packages_interactively(can_upgrade, console)
                     if not can_upgrade:
-                        _maybe_run_auto_check(
-                            console=console, output=output, python_path=None,
-                            check_after_changes=check_after_changes, no_check=no_check,
-                            result={},
-                        )
+                        post_check.run()
                         console.print("[yellow]No packages selected for upgrade.[/yellow]")
                         sys.exit(0)
 
                 if dry_run:
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=None,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result={},
-                    )
+                    post_check.run()
                     console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
                     sys.exit(0)
 
@@ -1042,11 +1071,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                 console.print()
                 confirm = click.confirm(f"Upgrade {len(can_upgrade)} package(s)?", default=True)
                 if not confirm:
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=None,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result={},
-                    )
+                    post_check.run()
                     console.print("[yellow]Upgrade cancelled.[/yellow]")
                     sys.exit(0)
 
@@ -1072,11 +1097,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                     blocked=blocked_packages if show_blocked else None,
                     results=results
                 )
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check,
-                    result=results_payload,
-                )
+                post_check.run(result=results_payload)
                 print(json.dumps(results_payload, indent=2))
             else:
                 print_upgrade_results(results, console=console, verbose=debug)
@@ -1086,11 +1107,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                     total_time = step1_time + step2_time + step3_time + install_time
                     console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
 
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check,
-                    result={},
-                )
+                post_check.run()
 
             # Exit with appropriate code
             failed = [pkg for pkg in results if not pkg.upgraded]
@@ -1947,8 +1964,7 @@ def _run_group_upgrade(
     packages: tuple, package_constraints: dict,
     update_requirements: Optional[str],
     cache_enabled: bool,
-    check_after_changes: bool,
-    no_check: bool,
+    post_check: PostCheck,
 ) -> None:
     """Execute upgrade across all environments in a group using consolidated pipeline."""
     group_ctx = prepare_group(group_name, console=console, output=output)
@@ -2058,16 +2074,7 @@ def _run_group_upgrade(
 
             if total_upgradable == 0:
                 if output != "json":
-                    if check_after_changes and not no_check:
-                        for env_name in env_name_map:
-                            env_path = env_name_map[env_name]
-                            console.print()
-                            console.print(Panel(env_path, title=f"Check: {env_name}",
-                                                border_style="cyan", expand=False))
-                            _maybe_run_auto_check(
-                                console=console, output=output, python_path=env_path,
-                                check_after_changes=True, no_check=False, result={},
-                            )
+                    post_check.run_per_env(env_name_map)
                     console.print("\n[yellow]No packages can be upgraded.[/yellow]")
                     if show_blocked and all_blocked:
                         from pipu_cli.pretty import print_group_blocked_table
@@ -2083,11 +2090,7 @@ def _run_group_upgrade(
                             "results": [],
                             "summary": {"total": 0, "upgraded": 0, "failed": 0},
                         }
-                        _maybe_run_auto_check(
-                            console=console, output=output, python_path=env_path,
-                            check_after_changes=check_after_changes, no_check=no_check,
-                            result=env_dict,
-                        )
+                        post_check.run(python_path=env_path, result=env_dict)
                         group_results.append(env_dict)
                     print(json.dumps(group_results, indent=2))
                 sys.exit(0)
@@ -2225,11 +2228,7 @@ def _run_group_upgrade(
                         "results": [package_to_dict(r) for r in results],
                         "summary": {"total": upgraded + failed, "upgraded": upgraded, "failed": failed},
                     }
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=env_path,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result=env_result_dict,
-                    )
+                    post_check.run(python_path=env_path, result=env_result_dict)
                     group_results.append(env_result_dict)
                 print(json.dumps(group_results, indent=2))
             else:
@@ -2239,16 +2238,7 @@ def _run_group_upgrade(
                 if show_blocked and all_blocked:
                     print_group_blocked_table(all_blocked, console=console)
 
-                if check_after_changes and not no_check:
-                    for env_name in env_order:
-                        env_path = env_name_map[env_name]
-                        console.print()
-                        console.print(Panel(env_path, title=f"Check: {env_name}",
-                                            border_style="cyan", expand=False))
-                        _maybe_run_auto_check(
-                            console=console, output=output, python_path=env_path,
-                            check_after_changes=True, no_check=False, result={},
-                        )
+                post_check.run_per_env(env_name_map)
 
             total_failed = sum(
                 len([r for r in env_results.get(n, []) if not r.upgraded])
@@ -2496,7 +2486,12 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
     yes = resolved['yes']
     debug = resolved['debug']
     output = resolved['output']
-    check_after_changes = resolved['check_after_changes']
+
+    post_check = PostCheck.from_flags(
+        console=console, output=output,
+        check_after_changes=resolved['check_after_changes'],
+        no_check=no_check,
+    )
 
     # Group mode
     if group_name is not None:
@@ -2504,8 +2499,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
             group_name=group_name, console=console, output=output,
             packages=packages, no_update=no_update, timeout=timeout,
             pre=pre, yes=yes, debug=debug,
-            check_after_changes=check_after_changes,
-            no_check=no_check,
+            post_check=post_check,
         )
         return
 
@@ -2527,11 +2521,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
             confirm = click.confirm("Do you want to proceed?", default=True)
             if not confirm:
                 console.print("[yellow]Installation cancelled.[/yellow]")
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check,
-                    result={},
-                )
+                post_check.run()
                 sys.exit(0)
 
         # Step 2: Install packages
@@ -2550,19 +2540,11 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
         # Display results
         if output == "json":
             payload = build_install_payload(results)
-            _maybe_run_auto_check(
-                console=console, output=output, python_path=None,
-                check_after_changes=check_after_changes, no_check=no_check,
-                result=payload,
-            )
+            post_check.run(result=payload)
             print(json.dumps(payload, indent=2))
         else:
             print_install_results(results, console=console)
-            _maybe_run_auto_check(
-                console=console, output=output, python_path=None,
-                check_after_changes=check_after_changes, no_check=no_check,
-                result={},
-            )
+            post_check.run()
 
         # Exit with appropriate code
         failed = [r for r in results if not r.installed]
@@ -2632,8 +2614,7 @@ def _run_group_install(
     group_name: str, console: Console, output: str,
     packages: tuple, no_update: bool, timeout: int,
     pre: bool, yes: bool, debug: bool,
-    check_after_changes: bool,
-    no_check: bool,
+    post_check: PostCheck,
 ) -> None:
     """Execute install across all environments in a group."""
     del debug  # signature parity; install's debug handling happens upstream
@@ -2689,17 +2670,7 @@ def _run_group_install(
                     )
                     if not confirm:
                         console.print("[yellow]Installation cancelled.[/yellow]")
-                        if check_after_changes and not no_check:
-                            from pipu_cli.pretty import Panel
-                            for env_name in env_name_map:
-                                env_path = env_name_map[env_name]
-                                console.print()
-                                console.print(Panel(env_path, title=f"Check: {env_name}",
-                                                    border_style="cyan", expand=False))
-                                _maybe_run_auto_check(
-                                    console=console, output=output, python_path=env_path,
-                                    check_after_changes=True, no_check=False, result={},
-                                )
+                        post_check.run_per_env(env_name_map)
                         sys.exit(0)
 
             # Phase 3: Parallel install across environments via shared runner
@@ -2741,28 +2712,14 @@ def _run_group_install(
                             "failed": n_failed,
                         },
                     }
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=env_path,
-                        check_after_changes=check_after_changes, no_check=no_check,
-                        result=env_dict,
-                    )
+                    post_check.run(python_path=env_path, result=env_dict)
                     group_results.append(env_dict)
                 print(json.dumps(group_results, indent=2))
             else:
                 console.print()
                 print_group_install_results_matrix(env_results, env_name_map, console=console)
 
-                if check_after_changes and not no_check:
-                    from pipu_cli.pretty import Panel
-                    for env_name in env_name_map:
-                        env_path = env_name_map[env_name]
-                        console.print()
-                        console.print(Panel(env_path, title=f"Check: {env_name}",
-                                            border_style="cyan", expand=False))
-                        _maybe_run_auto_check(
-                            console=console, output=output, python_path=env_path,
-                            check_after_changes=True, no_check=False, result={},
-                        )
+                post_check.run_per_env(env_name_map)
 
             total_failed = sum(
                 len([r for r in env_results.get(n, []) if not r.installed])
@@ -2841,14 +2798,19 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
     yes = resolved['yes']
     debug = resolved['debug']
     output = resolved['output']
-    check_after_changes = resolved['check_after_changes']
+
+    post_check = PostCheck.from_flags(
+        console=console, output=output,
+        check_after_changes=resolved['check_after_changes'],
+        no_check=no_check,
+    )
 
     if group_name is not None:
         _run_group_uninstall(
             group_name=group_name, console=console, output=output,
             packages=packages, timeout=timeout,
             yes=yes,
-            check_after_changes=check_after_changes, no_check=no_check,
+            post_check=post_check,
         )
         return
 
@@ -2865,10 +2827,7 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
             confirm = click.confirm("Do you want to proceed?", default=True)
             if not confirm:
                 console.print("[yellow]Uninstallation cancelled.[/yellow]")
-                _maybe_run_auto_check(
-                    console=console, output=output, python_path=None,
-                    check_after_changes=check_after_changes, no_check=no_check, result={},
-                )
+                post_check.run()
                 sys.exit(0)
 
         if output != "json":
@@ -2883,17 +2842,11 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
 
         if output == "json":
             payload = build_uninstall_payload(results)
-            payload = _maybe_run_auto_check(
-                console=console, output=output, python_path=None,
-                check_after_changes=check_after_changes, no_check=no_check, result=payload,
-            )
+            payload = post_check.run(result=payload)
             print(json.dumps(payload, indent=2))
         else:
             print_uninstall_results(results, console=console)
-            _maybe_run_auto_check(
-                console=console, output=output, python_path=None,
-                check_after_changes=check_after_changes, no_check=no_check, result={},
-            )
+            post_check.run()
 
         failed = [r for r in results if not r.uninstalled]
         sys.exit(1 if failed else 0)
@@ -2955,8 +2908,7 @@ def _run_group_uninstall(
     packages: tuple, timeout: int,
     yes: bool,
     *,
-    check_after_changes: bool,
-    no_check: bool,
+    post_check: PostCheck,
 ) -> None:
     """Execute uninstall across all environments in a group."""
     from pipu_cli.pretty import (
@@ -3009,16 +2961,7 @@ def _run_group_uninstall(
                     )
                     if not confirm:
                         console.print("[yellow]Uninstallation cancelled.[/yellow]")
-                        if check_after_changes and not no_check:
-                            for env_name, env_path in env_name_map.items():
-                                if output != "json":
-                                    console.print()
-                                    from rich.panel import Panel
-                                    console.print(Panel(f"[bold]Environment:[/bold] {env_name}", expand=False))
-                                _maybe_run_auto_check(
-                                    console=console, output=output, python_path=env_path,
-                                    check_after_changes=check_after_changes, no_check=no_check, result={},
-                                )
+                        post_check.run_per_env(env_name_map, title_prefix="Check")
                         sys.exit(0)
 
             # Phase 3: Parallel uninstall across environments via shared runner
@@ -3065,25 +3008,13 @@ def _run_group_uninstall(
                             "failed": failed,
                         },
                     }
-                    _maybe_run_auto_check(
-                        console=console, output=output, python_path=env_path,
-                        check_after_changes=check_after_changes, no_check=no_check, result=env_dict,
-                    )
+                    post_check.run(python_path=env_path, result=env_dict)
                     group_results.append(env_dict)
                 print(json.dumps(group_results, indent=2))
             else:
                 console.print()
                 print_group_uninstall_results_matrix(env_results, env_name_map, console=console)
-                if check_after_changes and not no_check:
-                    for env_name in env_order:
-                        env_path = env_name_map[env_name]
-                        console.print()
-                        from rich.panel import Panel
-                        console.print(Panel(f"[bold]Environment:[/bold] {env_name}", expand=False))
-                        _maybe_run_auto_check(
-                            console=console, output=output, python_path=env_path,
-                            check_after_changes=check_after_changes, no_check=no_check, result={},
-                        )
+                post_check.run_per_env(env_name_map, title_prefix="Check")
 
 
             total_failed = sum(
