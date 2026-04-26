@@ -2466,13 +2466,18 @@ def _run_group_outdated(
     help="Output format (human-readable or json)"
 )
 @click.option(
+    "--no-check",
+    is_flag=True,
+    help="Skip the post-install consistency check",
+)
+@click.option(
     "--group", "-g",
     "group_name",
     default=None,
     help="Install across all environments in a named group"
 )
 def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, timeout: int,
-            pre: bool, yes: bool, debug: bool, output: str,
+            pre: bool, yes: bool, debug: bool, output: str, no_check: bool,
             group_name: Optional[str] = None) -> None:
     """
     Install packages using pip.
@@ -2500,6 +2505,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
             'yes': False,
             'debug': False,
             'output': 'human',
+            'check_after_changes': DEFAULT_CHECK_AFTER_CHANGES,
         },
     )
     timeout = resolved['timeout']
@@ -2507,6 +2513,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
     yes = resolved['yes']
     debug = resolved['debug']
     output = resolved['output']
+    check_after_changes = resolved['check_after_changes']
 
     json_formatter = JsonOutputFormatter() if output == "json" else None
 
@@ -2516,6 +2523,8 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
             group_name=group_name, console=console, output=output,
             packages=packages, no_update=no_update, timeout=timeout,
             pre=pre, yes=yes, debug=debug, json_formatter=json_formatter,
+            check_after_changes=check_after_changes,
+            no_check=no_check,
         )
         return
 
@@ -2537,6 +2546,11 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
             confirm = click.confirm("Do you want to proceed?", default=True)
             if not confirm:
                 console.print("[yellow]Installation cancelled.[/yellow]")
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check,
+                    result={},
+                )
                 sys.exit(0)
 
         # Step 2: Install packages
@@ -2555,9 +2569,20 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
         # Display results
         if output == "json":
             assert json_formatter is not None
-            print(json_formatter.format_install_results(results))
+            payload = json.loads(json_formatter.format_install_results(results))
+            _maybe_run_auto_check(
+                console=console, output=output, python_path=None,
+                check_after_changes=check_after_changes, no_check=no_check,
+                result=payload,
+            )
+            print(json.dumps(payload, indent=2))
         else:
             print_install_results(results, console=console)
+            _maybe_run_auto_check(
+                console=console, output=output, python_path=None,
+                check_after_changes=check_after_changes, no_check=no_check,
+                result={},
+            )
 
         # Exit with appropriate code
         failed = [r for r in results if not r.installed]
@@ -2628,6 +2653,8 @@ def _run_group_install(
     packages: tuple, no_update: bool, timeout: int,
     pre: bool, yes: bool, debug: bool,
     json_formatter: Optional[JsonOutputFormatter],
+    check_after_changes: bool,
+    no_check: bool,
 ) -> None:
     """Execute install across all environments in a group."""
     del debug  # signature parity; install's debug handling happens upstream
@@ -2683,6 +2710,17 @@ def _run_group_install(
                     )
                     if not confirm:
                         console.print("[yellow]Installation cancelled.[/yellow]")
+                        if check_after_changes and not no_check:
+                            from pipu_cli.pretty import Panel
+                            for env_name in env_name_map:
+                                env_path = env_name_map[env_name]
+                                console.print()
+                                console.print(Panel(env_path, title=f"Check: {env_name}",
+                                                    border_style="cyan", expand=False))
+                                _maybe_run_auto_check(
+                                    console=console, output=output, python_path=env_path,
+                                    check_after_changes=True, no_check=False, result={},
+                                )
                         sys.exit(0)
 
             # Phase 3: Parallel install across environments via shared runner
@@ -2716,7 +2754,7 @@ def _run_group_install(
                     env_res = env_results.get(env_name, [])
                     n_installed = len([r for r in env_res if r.installed])
                     n_failed = len([r for r in env_res if not r.installed])
-                    group_results.append({
+                    env_dict = {
                         "environment": env_path,
                         "results": [json_formatter._package_to_dict(r) for r in env_res],
                         "summary": {
@@ -2724,11 +2762,29 @@ def _run_group_install(
                             "installed": n_installed,
                             "failed": n_failed,
                         },
-                    })
+                    }
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=env_path,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result=env_dict,
+                    )
+                    group_results.append(env_dict)
                 print(json_formatter.format_group_install_results(group_results))
             else:
                 console.print()
                 print_group_install_results_matrix(env_results, env_name_map, console=console)
+
+                if check_after_changes and not no_check:
+                    from pipu_cli.pretty import Panel
+                    for env_name in env_name_map:
+                        env_path = env_name_map[env_name]
+                        console.print()
+                        console.print(Panel(env_path, title=f"Check: {env_name}",
+                                            border_style="cyan", expand=False))
+                        _maybe_run_auto_check(
+                            console=console, output=output, python_path=env_path,
+                            check_after_changes=True, no_check=False, result={},
+                        )
 
             total_failed = sum(
                 len([r for r in env_results.get(n, []) if not r.installed])
