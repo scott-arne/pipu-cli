@@ -1043,15 +1043,32 @@ def _build_tree_by_problem(report: EnvReport) -> Tree:
 
 
 def _build_tree_by_package(report: EnvReport) -> Tree:
-    """Render tree grouped by package (Task 7 fills this in).
+    """Render a tree grouped alphabetically by package name.
 
     :param report: The report to render.
-    :returns: A :class:`Tree` rendered by kind until Task 7 replaces
-        this stub with a real package-grouped implementation.
+    :returns: A :class:`Tree` with one branch per package, each
+        branch containing one leaf per problem on that package. Leaves
+        carry the kind code verbatim (``missing``, ``violates``, ...) so
+        consumers don't have to read the full ``DepProblem.detail``.
     """
-    # Task 7 implements this. For now, fall back to by-problem so the
-    # human path never crashes.
-    return _build_tree_by_problem(report)
+    root = Tree("[bold]Environment check[/bold]")
+    by_pkg: Dict[str, List[DepProblem]] = {}
+    for p in report.problems:
+        by_pkg.setdefault(p.package, []).append(p)
+
+    for pkg_name in sorted(by_pkg.keys()):
+        pkg_problems = by_pkg[pkg_name]
+        # Version label if any problem carries an installed_version.
+        version_label = ""
+        for p in pkg_problems:
+            if p.installed_version is not None:
+                version_label = f" [dim]{p.installed_version}[/dim]"
+                break
+        branch = root.add(f"[bold]{pkg_name}[/bold]{version_label}")
+        for p in pkg_problems:
+            leaf = f"{_CROSS_MARKUP} [dim]{p.kind}[/dim]  {_short_detail(p)}"
+            branch.add(leaf)
+    return root
 
 
 def print_env_report(
