@@ -58,6 +58,18 @@ from pipu_cli.output import (
     env_report_to_json,
     package_to_dict,
 )
+from pipu_cli._options import (
+    cache_ttl_option,
+    debug_option,
+    exclude_option,
+    group_option,
+    no_cache_option,
+    no_check_option,
+    output_option,
+    parallel_option,
+    pre_option,
+    yes_option,
+)
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
 from pipu_cli.config_file import load_config, get_config_value
@@ -788,83 +800,39 @@ def _download_and_install_phase(
     default=10,
     help="Network timeout in seconds for package queries"
 )
-@click.option(
-    "--pre",
-    is_flag=True,
-    help="Include pre-release versions"
-)
-@click.option(
-    "--yes", "-y",
-    is_flag=True,
-    help="Automatically confirm upgrade without prompting"
-)
-@click.option(
-    "--debug",
-    is_flag=True,
-    help="Enable debug logging and show performance timing"
-)
+@pre_option
+@yes_option("Automatically confirm upgrade without prompting")
+@debug_option
 @click.option(
     "--dry-run",
     is_flag=True,
     hidden=True,
     help="Show what would be upgraded without actually upgrading"
 )
-@click.option(
-    "--exclude", "-e",
-    multiple=True,
-    help="Packages to exclude from upgrade (repeatable, comma-separated)"
-)
+@exclude_option
 @click.option(
     "--show-blocked", "-b",
     is_flag=True,
     help="Show packages that cannot be upgraded and why"
 )
-@click.option(
-    "--output", "-o",
-    type=click.Choice(["human", "json"]),
-    default="human",
-    help="Output format (human-readable or json)"
-)
+@output_option
 @click.option(
     "--update-requirements",
     type=click.Path(exists=True),
     default=None,
     help="Update the specified requirements.txt file with new versions"
 )
-@click.option(
-    "--parallel", "-p",
-    type=int,
-    default=min(4, mp.cpu_count()),
-    help=f"Number of parallel requests for version checking (default: {min(4, mp.cpu_count())})"
-)
+@parallel_option
 @click.option(
     "--interactive", "-i",
     is_flag=True,
     hidden=True,
     help="Interactively select packages to upgrade"
 )
-@click.option(
-    "--no-cache",
-    is_flag=True,
-    help="Skip cache and fetch fresh version data"
-)
-@click.option(
-    "--cache-ttl",
-    type=int,
-    default=None,
-    help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})"
-)
-@click.option(
-    "--no-check",
-    is_flag=True,
-    help="Skip the post-upgrade consistency check"
-)
-@click.option(
-    "--group", "-g",
-    "group_name",
-    default=None,
-    help="Run upgrade across all environments in a named group"
-)
+@no_cache_option
+@cache_ttl_option
+@no_check_option("upgrade")
+@group_option("Run upgrade across all environments in a named group")
 def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
             exclude: tuple, show_blocked: bool, output: str, update_requirements: Optional[str],
             parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int],
@@ -1128,20 +1096,16 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 @cli.command()
 @click.pass_context
 @click.option("--timeout", type=int, default=10, help="Network timeout in seconds for package queries")
-@click.option("--pre", is_flag=True, help="Include pre-release versions")
-@click.option("--debug", is_flag=True, help="Enable debug logging and show performance timing")
-@click.option("--exclude", "-e", multiple=True, help="Packages to exclude (repeatable, comma-separated)")
+@pre_option
+@debug_option
+@exclude_option
 @click.option("--show-blocked", "-b", is_flag=True, default=True,
               help="Show packages blocked by constraints (default: enabled)")
-@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
-              help="Output format (human-readable or json)")
-@click.option("--parallel", "-p", type=int, default=min(4, mp.cpu_count()),
-              help=f"Number of parallel requests for version checking (default: {min(4, mp.cpu_count())})")
-@click.option("--no-cache", is_flag=True, help="Skip cache and fetch fresh version data")
-@click.option("--cache-ttl", type=int, default=None,
-              help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})")
-@click.option("--group", "-g", "group_name", default=None,
-              help="Show outdated packages across all environments in a named group")
+@output_option
+@parallel_option
+@no_cache_option
+@cache_ttl_option
+@group_option("Show outdated packages across all environments in a named group")
 def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, no_cache, cache_ttl,
              group_name=None):
     """
@@ -1294,11 +1258,9 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
               help="Recursion depth (default 1; 0 = unlimited)")
 @click.option("--check", is_flag=True,
               help="Exit non-zero if any problems are found")
-@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
-              help="Output format (human-readable or json)")
-@click.option("--debug", is_flag=True, help="Enable debug logging")
-@click.option("--group", "-g", "group_name", default=None,
-              help="Inspect PACKAGE in every environment of a named group")
+@output_option
+@debug_option
+@group_option("Inspect PACKAGE in every environment of a named group")
 def deps(ctx: click.Context, package: str, depth: int, check: bool,
          output: str, debug: bool, group_name: Optional[str]) -> None:
     """
@@ -1437,11 +1399,9 @@ def _run_group_deps(
 @click.pass_context
 @click.option("--by", type=click.Choice(["problem", "package"]), default="problem",
               help="Group problems by kind (default) or by package")
-@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
-              help="Output format")
-@click.option("--debug", is_flag=True, help="Enable debug logging")
-@click.option("--group", "-g", "group_name", default=None,
-              help="Check every environment in a named group")
+@output_option
+@debug_option
+@group_option("Check every environment in a named group")
 def check(ctx: click.Context, by: str, output: str, debug: bool,
           group_name: Optional[str]) -> None:
     """
@@ -2417,38 +2377,12 @@ def _run_group_outdated(
     default=300,
     help="Installation timeout in seconds"
 )
-@click.option(
-    "--pre",
-    is_flag=True,
-    help="Include pre-release versions"
-)
-@click.option(
-    "--yes", "-y",
-    is_flag=True,
-    help="Skip confirmation prompt"
-)
-@click.option(
-    "--debug",
-    is_flag=True,
-    help="Enable debug logging"
-)
-@click.option(
-    "--output", "-o",
-    type=click.Choice(["human", "json"]),
-    default="human",
-    help="Output format (human-readable or json)"
-)
-@click.option(
-    "--no-check",
-    is_flag=True,
-    help="Skip the post-install consistency check",
-)
-@click.option(
-    "--group", "-g",
-    "group_name",
-    default=None,
-    help="Install across all environments in a named group"
-)
+@pre_option
+@yes_option()
+@debug_option
+@output_option
+@no_check_option("install")
+@group_option("Install across all environments in a named group")
 def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, timeout: int,
             pre: bool, yes: bool, debug: bool, output: str, no_check: bool,
             group_name: Optional[str] = None) -> None:
@@ -2742,33 +2676,11 @@ def _run_group_install(
     default=300,
     help="Uninstallation timeout in seconds"
 )
-@click.option(
-    "--yes", "-y",
-    is_flag=True,
-    help="Skip confirmation prompt"
-)
-@click.option(
-    "--debug",
-    is_flag=True,
-    help="Enable debug logging"
-)
-@click.option(
-    "--output", "-o",
-    type=click.Choice(["human", "json"]),
-    default="human",
-    help="Output format (human-readable or json)"
-)
-@click.option(
-    "--no-check",
-    is_flag=True,
-    help="Skip the post-uninstall consistency check"
-)
-@click.option(
-    "--group", "-g",
-    "group_name",
-    default=None,
-    help="Uninstall across all environments in a named group"
-)
+@yes_option()
+@debug_option
+@output_option
+@no_check_option("uninstall")
+@group_option("Uninstall across all environments in a named group")
 def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
               yes: bool, debug: bool, output: str, no_check: bool,
               group_name: Optional[str] = None) -> None:
