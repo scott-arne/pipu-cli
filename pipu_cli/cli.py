@@ -50,10 +50,13 @@ from pipu_cli.pretty import (
     select_packages_interactively,
 )
 from pipu_cli.output import (
-    JsonOutputFormatter,
+    build_install_payload,
+    build_uninstall_payload,
+    build_upgrade_payload,
     dep_report_to_json,
-    env_report_to_json,
     env_report_group_to_json,
+    env_report_to_json,
+    package_to_dict,
 )
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
@@ -871,9 +874,6 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     # Check if caching is enabled
     cache_enabled = get_config_value(config, 'cache_enabled', True) and not no_cache
 
-    # Initialize JSON formatter if needed
-    json_formatter = JsonOutputFormatter() if output == "json" else None
-
     # Group mode: dispatch to group execution loop
     if group_name is not None:
         _run_group_upgrade(
@@ -883,7 +883,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
             packages=packages, package_constraints={},
             update_requirements=update_requirements,
-            json_formatter=json_formatter, cache_enabled=cache_enabled,
+            cache_enabled=cache_enabled,
             check_after_changes=check_after_changes, no_check=no_check,
         )
         return
@@ -973,12 +973,10 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
             if not can_upgrade:
                 if output == "json":
-                    assert json_formatter is not None
-                    json_data = json_formatter.format_all(
+                    blocked_payload = build_upgrade_payload(
                         upgradable=[],
                         blocked=blocked_packages if show_blocked else None
                     )
-                    blocked_payload: Dict[str, Any] = json.loads(json_data)
                     _maybe_run_auto_check(
                         console=console, output=output, python_path=None,
                         check_after_changes=check_after_changes, no_check=no_check,
@@ -999,13 +997,11 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
             # Step 4: Display table and ask for confirmation
             if output == "json":
-                assert json_formatter is not None
                 if dry_run:
-                    json_data = json_formatter.format_all(
+                    dryrun_payload = build_upgrade_payload(
                         upgradable=can_upgrade,
                         blocked=blocked_packages if show_blocked else None
                     )
-                    dryrun_payload: Dict[str, Any] = json.loads(json_data)
                     _maybe_run_auto_check(
                         console=console, output=output, python_path=None,
                         check_after_changes=check_after_changes, no_check=no_check,
@@ -1071,13 +1067,11 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
 
             # Print results summary
             if output == "json":
-                assert json_formatter is not None
-                json_data = json_formatter.format_all(
+                results_payload = build_upgrade_payload(
                     upgradable=can_upgrade,
                     blocked=blocked_packages if show_blocked else None,
                     results=results
                 )
-                results_payload: Dict[str, Any] = json.loads(json_data)
                 _maybe_run_auto_check(
                     console=console, output=output, python_path=None,
                     check_after_changes=check_after_changes, no_check=no_check,
@@ -1178,7 +1172,6 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         exclude_str = _parse_excludes(exclude)
 
     cache_enabled = get_config_value(config, 'cache_enabled', True) and not no_cache
-    json_formatter = JsonOutputFormatter() if output == "json" else None
 
     if group_name is not None:
         _run_group_outdated(
@@ -1186,7 +1179,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
             timeout=timeout, pre=pre, debug=debug,
             exclude_str=exclude_str, show_blocked=show_blocked,
             parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
-            json_formatter=json_formatter, cache_enabled=cache_enabled,
+            cache_enabled=cache_enabled,
         )
         return
 
@@ -1244,12 +1237,10 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
 
         # Display results
         if output == "json":
-            assert json_formatter is not None
-            json_data = json_formatter.format_all(
+            print(json.dumps(build_upgrade_payload(
                 upgradable=can_upgrade,
-                blocked=blocked_packages if show_blocked else None
-            )
-            print(json_data)
+                blocked=blocked_packages if show_blocked else None,
+            ), indent=2))
         else:
             if can_upgrade:
                 console.print("\n[bold]Packages with updates available:\n")
@@ -1955,7 +1946,6 @@ def _run_group_upgrade(
     parallel: int, no_cache: bool, cache_ttl: Optional[int],
     packages: tuple, package_constraints: dict,
     update_requirements: Optional[str],
-    json_formatter: Optional[JsonOutputFormatter],
     cache_enabled: bool,
     check_after_changes: bool,
     no_check: bool,
@@ -2083,14 +2073,13 @@ def _run_group_upgrade(
                         from pipu_cli.pretty import print_group_blocked_table
                         print_group_blocked_table(all_blocked, console=console)
                 else:
-                    assert json_formatter is not None
                     group_results = []
                     for env_name in env_name_map:
                         env_path = env_name_map[env_name]
                         env_dict: Dict[str, Any] = {
                             "environment": env_path,
                             "upgradable": [],
-                            "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
+                            "blocked": [package_to_dict(b) for en, b in all_blocked if en == env_name],
                             "results": [],
                             "summary": {"total": 0, "upgraded": 0, "failed": 0},
                         }
@@ -2100,7 +2089,7 @@ def _run_group_upgrade(
                             result=env_dict,
                         )
                         group_results.append(env_dict)
-                    print(json_formatter.format_group_results(group_results))
+                    print(json.dumps(group_results, indent=2))
                 sys.exit(0)
 
             # Phase 4: Show matrix table and confirm
@@ -2223,7 +2212,6 @@ def _run_group_upgrade(
 
             # Phase 8: Show results
             if output == "json":
-                assert json_formatter is not None
                 group_results = []
                 for env_name in env_order:
                     env_path = env_name_map[env_name]
@@ -2232,9 +2220,9 @@ def _run_group_upgrade(
                     failed = len([r for r in results if not r.upgraded])
                     env_result_dict: Dict[str, Any] = {
                         "environment": env_path,
-                        "upgradable": [json_formatter._package_to_dict(p) for p in env_upgrades.get(env_name, [])],
-                        "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
-                        "results": [json_formatter._package_to_dict(r) for r in results],
+                        "upgradable": [package_to_dict(p) for p in env_upgrades.get(env_name, [])],
+                        "blocked": [package_to_dict(b) for en, b in all_blocked if en == env_name],
+                        "results": [package_to_dict(r) for r in results],
                         "summary": {"total": upgraded + failed, "upgraded": upgraded, "failed": failed},
                     }
                     _maybe_run_auto_check(
@@ -2243,7 +2231,7 @@ def _run_group_upgrade(
                         result=env_result_dict,
                     )
                     group_results.append(env_result_dict)
-                print(json_formatter.format_group_results(group_results))
+                print(json.dumps(group_results, indent=2))
             else:
                 console.print()
                 from pipu_cli.pretty import print_group_results_matrix, print_group_blocked_table
@@ -2287,7 +2275,6 @@ def _outdated_single_env(
     parallel: int,
     cache_enabled: bool,
     cache_ttl: Optional[int],
-    json_formatter: Optional[JsonOutputFormatter],
     interrupt_token: Optional[InterruptToken] = None,
 ) -> Optional[dict[str, Any]]:
     """Run the full outdated pipeline for a single env.
@@ -2308,7 +2295,6 @@ def _outdated_single_env(
     :param parallel: Parallelism hint for the version fetcher.
     :param cache_enabled: Whether pip cache reads are permitted at all.
     :param cache_ttl: CLI/config TTL override in seconds.
-    :param json_formatter: Shared formatter (required in JSON mode).
     :param interrupt_token: Shared cancel signal; accepted for worker
         contract parity but not consumed inside this helper (the inspect /
         version-fetch paths don't spawn pip subprocesses that honor it).
@@ -2372,11 +2358,10 @@ def _outdated_single_env(
                 print_blocked_packages_table(blocked_packages, console=console)
             return None
 
-        assert json_formatter is not None
         return {
             "environment": env_path,
-            "upgradable": [json_formatter._package_to_dict(p) for p in can_upgrade],
-            "blocked": [json_formatter._package_to_dict(p) for p in blocked_packages] if show_blocked else [],
+            "upgradable": [package_to_dict(p) for p in can_upgrade],
+            "blocked": [package_to_dict(p) for p in blocked_packages] if show_blocked else [],
             "results": [],
             "summary": {"total": 0, "upgraded": 0, "failed": 0},
         }
@@ -2392,7 +2377,6 @@ def _run_group_outdated(
     timeout: int, pre: bool, debug: bool,
     exclude_str: str, show_blocked: bool,
     parallel: int, no_cache: bool, cache_ttl: Optional[int],
-    json_formatter: Optional[JsonOutputFormatter],
     cache_enabled: bool,
 ) -> None:
     """Execute outdated check across all environments in a group.
@@ -2414,7 +2398,7 @@ def _run_group_outdated(
                 timeout=timeout, pre=pre, debug=debug,
                 exclude_str=exclude_str, show_blocked=show_blocked,
                 parallel=parallel, cache_enabled=cache_enabled,
-                cache_ttl=cache_ttl, json_formatter=json_formatter,
+                cache_ttl=cache_ttl,
             )
             if record is not None:
                 group_results.append(record)
@@ -2424,8 +2408,7 @@ def _run_group_outdated(
         sys.exit(130)
 
     if output == "json":
-        assert json_formatter is not None
-        print(json_formatter.format_group_results(group_results))
+        print(json.dumps(group_results, indent=2))
 
     sys.exit(0)
 
@@ -2515,14 +2498,12 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
     output = resolved['output']
     check_after_changes = resolved['check_after_changes']
 
-    json_formatter = JsonOutputFormatter() if output == "json" else None
-
     # Group mode
     if group_name is not None:
         _run_group_install(
             group_name=group_name, console=console, output=output,
             packages=packages, no_update=no_update, timeout=timeout,
-            pre=pre, yes=yes, debug=debug, json_formatter=json_formatter,
+            pre=pre, yes=yes, debug=debug,
             check_after_changes=check_after_changes,
             no_check=no_check,
         )
@@ -2568,8 +2549,7 @@ def install(ctx: click.Context, packages: tuple[str, ...], no_update: bool, time
 
         # Display results
         if output == "json":
-            assert json_formatter is not None
-            payload = json.loads(json_formatter.format_install_results(results))
+            payload = build_install_payload(results)
             _maybe_run_auto_check(
                 console=console, output=output, python_path=None,
                 check_after_changes=check_after_changes, no_check=no_check,
@@ -2652,7 +2632,6 @@ def _run_group_install(
     group_name: str, console: Console, output: str,
     packages: tuple, no_update: bool, timeout: int,
     pre: bool, yes: bool, debug: bool,
-    json_formatter: Optional[JsonOutputFormatter],
     check_after_changes: bool,
     no_check: bool,
 ) -> None:
@@ -2747,7 +2726,6 @@ def _run_group_install(
 
             # Phase 4: Show results
             if output == "json":
-                assert json_formatter is not None
                 group_results = []
                 for env_name in env_order:
                     env_path = env_name_map[env_name]
@@ -2756,7 +2734,7 @@ def _run_group_install(
                     n_failed = len([r for r in env_res if not r.installed])
                     env_dict = {
                         "environment": env_path,
-                        "results": [json_formatter._package_to_dict(r) for r in env_res],
+                        "results": [package_to_dict(r) for r in env_res],
                         "summary": {
                             "total": len(env_res),
                             "installed": n_installed,
@@ -2769,7 +2747,7 @@ def _run_group_install(
                         result=env_dict,
                     )
                     group_results.append(env_dict)
-                print(json_formatter.format_group_install_results(group_results))
+                print(json.dumps(group_results, indent=2))
             else:
                 console.print()
                 print_group_install_results_matrix(env_results, env_name_map, console=console)
@@ -2865,13 +2843,11 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
     output = resolved['output']
     check_after_changes = resolved['check_after_changes']
 
-    json_formatter = JsonOutputFormatter() if output == "json" else None
-
     if group_name is not None:
         _run_group_uninstall(
             group_name=group_name, console=console, output=output,
             packages=packages, timeout=timeout,
-            yes=yes, json_formatter=json_formatter,
+            yes=yes,
             check_after_changes=check_after_changes, no_check=no_check,
         )
         return
@@ -2906,8 +2882,7 @@ def uninstall(ctx: click.Context, packages: tuple[str, ...], timeout: int,
         )
 
         if output == "json":
-            assert json_formatter is not None
-            payload = json.loads(json_formatter.format_uninstall_results(results))
+            payload = build_uninstall_payload(results)
             payload = _maybe_run_auto_check(
                 console=console, output=output, python_path=None,
                 check_after_changes=check_after_changes, no_check=no_check, result=payload,
@@ -2979,7 +2954,6 @@ def _run_group_uninstall(
     group_name: str, console: Console, output: str,
     packages: tuple, timeout: int,
     yes: bool,
-    json_formatter: Optional[JsonOutputFormatter],
     *,
     check_after_changes: bool,
     no_check: bool,
@@ -3070,7 +3044,6 @@ def _run_group_uninstall(
 
             # Phase 4: Show results
             if output == "json":
-                assert json_formatter is not None
                 group_results = []
                 for env_name in env_order:
                     env_path = env_name_map[env_name]
@@ -3097,7 +3070,7 @@ def _run_group_uninstall(
                         check_after_changes=check_after_changes, no_check=no_check, result=env_dict,
                     )
                     group_results.append(env_dict)
-                print(json_formatter.format_group_uninstall_results(group_results))
+                print(json.dumps(group_results, indent=2))
             else:
                 console.print()
                 print_group_uninstall_results_matrix(env_results, env_name_map, console=console)

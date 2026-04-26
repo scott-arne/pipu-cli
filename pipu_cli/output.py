@@ -1,7 +1,13 @@
-"""Output formatting for pipu CLI."""
+"""JSON payload builders for pipu CLI output.
 
-import json
+All builders return plain ``dict`` / ``list`` structures; callers are
+responsible for the final :func:`json.dumps` call so they can merge
+additional keys (e.g., ``post_check`` from auto-check) before
+serialization.
+"""
+
 from typing import List, Optional, Any, Dict
+
 from pipu_cli.package_management import (
     UpgradePackageInfo,
     UpgradedPackage,
@@ -16,179 +22,122 @@ from pipu_cli.package_management import (
 )
 
 
-class OutputFormatter:
-    """Base class for output formatting."""
+def package_to_dict(pkg: Any) -> Dict[str, Any]:
+    """Convert any pipu dataclass to a JSON-serializable ``dict``.
 
-    def format_upgradable(self, packages: List[UpgradePackageInfo]) -> str:
-        """Format upgradable packages."""
-        raise NotImplementedError
+    Walks ``__dataclass_fields__`` and stringifies values via ``str()``
+    so :class:`~packaging.version.Version` and similar wrapper types
+    round-trip cleanly through :func:`json.dumps`.
 
-    def format_blocked(self, packages: List[BlockedPackageInfo]) -> str:
-        """Format blocked packages."""
-        raise NotImplementedError
+    :param pkg: A dataclass instance.
+    :returns: Dict with the dataclass's fields as keys.
+    """
+    result: Dict[str, Any] = {}
+    for field_name in pkg.__dataclass_fields__:
+        value = getattr(pkg, field_name)
+        if hasattr(value, '__str__'):
+            result[field_name] = str(value)
+        else:
+            result[field_name] = value
+    return result
 
-    def format_results(self, results: List[UpgradedPackage]) -> str:
-        """Format upgrade results."""
-        raise NotImplementedError
 
+def build_upgrade_payload(
+    *,
+    upgradable: List[UpgradePackageInfo],
+    blocked: Optional[List[BlockedPackageInfo]] = None,
+    results: Optional[List[UpgradedPackage]] = None,
+) -> Dict[str, Any]:
+    """Build the standard ``pipu upgrade`` JSON payload.
 
-class JsonOutputFormatter(OutputFormatter):
-    """JSON output formatter."""
+    :param upgradable: Packages eligible for upgrade.
+    :param blocked: Packages blocked by constraints, if ``--show-blocked``.
+    :param results: Install results, if the upgrade has executed.
+    :returns: Dict with ``upgradable``, ``blocked``, ``results``, and
+        ``summary`` keys.
+    """
+    payload: Dict[str, Any] = {
+        "upgradable": [package_to_dict(pkg) for pkg in upgradable],
+        "blocked": [package_to_dict(pkg) for pkg in blocked] if blocked else [],
+        "results": [],
+        "summary": {"total": 0, "upgraded": 0, "failed": 0},
+    }
 
-    def _package_to_dict(self, pkg: Any) -> Dict[str, Any]:
-        """Convert a package dataclass to a JSON-serializable dict."""
-        result = {}
-        for field_name in pkg.__dataclass_fields__:
-            value = getattr(pkg, field_name)
-            if hasattr(value, '__str__'):
-                result[field_name] = str(value)
-            else:
-                result[field_name] = value
-        return result
-
-    def format_upgradable(self, packages: List[UpgradePackageInfo]) -> str:
-        """Format upgradable packages as JSON."""
-        data = {
-            "upgradable": [self._package_to_dict(pkg) for pkg in packages],
-            "count": len(packages)
-        }
-        return json.dumps(data, indent=2)
-
-    def format_blocked(self, packages: List[BlockedPackageInfo]) -> str:
-        """Format blocked packages as JSON."""
-        data = {
-            "blocked": [self._package_to_dict(pkg) for pkg in packages],
-            "count": len(packages)
-        }
-        return json.dumps(data, indent=2)
-
-    def format_results(self, results: List[UpgradedPackage]) -> str:
-        """Format upgrade results as JSON."""
-        successful = [self._package_to_dict(pkg) for pkg in results if pkg.upgraded]
-        failed = [self._package_to_dict(pkg) for pkg in results if not pkg.upgraded]
-
-        data = {
-            "successful": successful,
-            "failed": failed,
+    if results is not None:
+        payload["results"] = [package_to_dict(pkg) for pkg in results]
+        upgraded = sum(1 for pkg in results if pkg.upgraded)
+        payload["summary"] = {
             "total": len(results),
-            "success_count": len(successful),
-            "failure_count": len(failed)
-        }
-        return json.dumps(data, indent=2)
-
-    def format_all(
-        self,
-        upgradable: List[UpgradePackageInfo],
-        blocked: Optional[List[BlockedPackageInfo]] = None,
-        results: Optional[List[UpgradedPackage]] = None
-    ) -> str:
-        """Format all data as a single JSON object with standardized schema."""
-        data: Dict[str, Any] = {
-            "upgradable": [self._package_to_dict(pkg) for pkg in upgradable],
-            "blocked": [self._package_to_dict(pkg) for pkg in blocked] if blocked else [],
-            "results": [],
-            "summary": {
-                "total": 0,
-                "upgraded": 0,
-                "failed": 0
-            }
+            "upgraded": upgraded,
+            "failed": len(results) - upgraded,
         }
 
-        if results is not None:
-            data["results"] = [self._package_to_dict(pkg) for pkg in results]
-            successful = [pkg for pkg in results if pkg.upgraded]
-            failed = [pkg for pkg in results if not pkg.upgraded]
-            data["summary"] = {
-                "total": len(results),
-                "upgraded": len(successful),
-                "failed": len(failed)
-            }
+    return payload
 
-        return json.dumps(data, indent=2)
 
-    def format_install_results(self, results: List[InstalledResult]) -> str:
-        """Format install results as a single JSON object.
+def build_install_payload(results: List[InstalledResult]) -> Dict[str, Any]:
+    """Build the standard ``pipu install`` JSON payload.
 
-        :param results: List of InstalledResult objects
-        :returns: JSON string
-        """
-        result_dicts = [self._package_to_dict(pkg) for pkg in results]
-        new_installs = [pkg for pkg in results if pkg.installed and pkg.previous_version is None]
-        updated = [pkg for pkg in results if pkg.installed and pkg.previous_version is not None
-                    and pkg.version > pkg.previous_version]
-        failed = [pkg for pkg in results if not pkg.installed]
+    :param results: Install results.
+    :returns: Dict with ``results`` and ``summary`` keys.
+    """
+    new_installs = sum(
+        1 for pkg in results if pkg.installed and pkg.previous_version is None
+    )
+    updated = sum(
+        1 for pkg in results if pkg.installed and pkg.previous_version is not None
+        and pkg.version > pkg.previous_version
+    )
+    failed = sum(1 for pkg in results if not pkg.installed)
+    return {
+        "results": [package_to_dict(pkg) for pkg in results],
+        "summary": {
+            "total": len(results),
+            "installed": new_installs,
+            "updated": updated,
+            "failed": failed,
+        },
+    }
 
-        data: Dict[str, Any] = {
-            "results": result_dicts,
-            "summary": {
-                "total": len(results),
-                "installed": len(new_installs),
-                "updated": len(updated),
-                "failed": len(failed),
-            }
+
+def build_uninstall_payload(results: List[UninstalledResult]) -> Dict[str, Any]:
+    """Build the standard ``pipu uninstall`` JSON payload.
+
+    :param results: Uninstall results.
+    :returns: Dict with ``results`` and ``summary`` keys.
+    """
+    result_dicts = [
+        {
+            "name": pkg.name,
+            "previous_version": (
+                str(pkg.previous_version) if pkg.previous_version else None
+            ),
+            "uninstalled": pkg.uninstalled,
+            "already_absent": pkg.already_absent,
+            "failure_reason": pkg.failure_reason,
         }
-        return json.dumps(data, indent=2)
-
-    def format_group_install_results(self, env_results: List[Dict[str, Any]]) -> str:
-        """Format group install results as a JSON array of per-environment results.
-
-        :param env_results: List of dicts, each with 'environment' key plus install results
-        :returns: JSON string
-        """
-        return json.dumps(env_results, indent=2)
-
-    def format_group_results(self, env_results: List[Dict[str, Any]]) -> str:
-        """Format group results as a JSON array of per-environment results.
-
-        :param env_results: List of dicts, each with 'environment' key plus standard schema
-        :returns: JSON string
-        """
-        return json.dumps(env_results, indent=2)
-
-    def format_uninstall_results(self, results: List[UninstalledResult]) -> str:
-        """Format uninstall results as a single JSON object.
-
-        :param results: List of UninstalledResult objects.
-        :returns: JSON string.
-        """
-        result_dicts = []
-        for pkg in results:
-            result_dicts.append({
-                "name": pkg.name,
-                "previous_version": str(pkg.previous_version) if pkg.previous_version else None,
-                "uninstalled": pkg.uninstalled,
-                "already_absent": pkg.already_absent,
-                "failure_reason": pkg.failure_reason,
-            })
-
-        successful = [pkg for pkg in results if pkg.uninstalled]
-        already_absent = [pkg for pkg in results if pkg.already_absent]
-        failed = [pkg for pkg in results if not pkg.uninstalled]
-
-        data: Dict[str, Any] = {
-            "results": result_dicts,
-            "summary": {
-                "total": len(results),
-                "uninstalled": len(successful),
-                "already_absent": len(already_absent),
-                "failed": len(failed),
-            },
-        }
-        return json.dumps(data, indent=2)
-
-    def format_group_uninstall_results(self, env_results: List[Dict[str, Any]]) -> str:
-        """Format group uninstall results as a JSON array of per-environment results.
-
-        :param env_results: List of dicts, each with 'environment' key plus uninstall results.
-        :returns: JSON string.
-        """
-        return json.dumps(env_results, indent=2)
+        for pkg in results
+    ]
+    uninstalled = sum(1 for pkg in results if pkg.uninstalled)
+    already_absent = sum(1 for pkg in results if pkg.already_absent)
+    failed = sum(1 for pkg in results if not pkg.uninstalled)
+    return {
+        "results": result_dicts,
+        "summary": {
+            "total": len(results),
+            "uninstalled": uninstalled,
+            "already_absent": already_absent,
+            "failed": failed,
+        },
+    }
 
 
 def _edge_to_dict(edge: DepEdge) -> Dict[str, Any]:
     return {
         "name": edge.name,
-        "installed_version": str(edge.installed_version) if edge.installed_version is not None else None,
+        "installed_version": (
+            str(edge.installed_version) if edge.installed_version is not None else None
+        ),
         "specifier": edge.specifier,
         "is_editable": edge.is_editable,
         "editable_location": edge.editable_location,
@@ -211,7 +160,8 @@ def _problem_to_dict(problem: DepProblem) -> Dict[str, Any]:
         "required_by": problem.required_by,
         "specifier": problem.specifier,
         "installed_version": (
-            str(problem.installed_version) if problem.installed_version is not None else None
+            str(problem.installed_version)
+            if problem.installed_version is not None else None
         ),
     }
 
