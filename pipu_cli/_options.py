@@ -91,3 +91,14 @@ def group_option(help: str):
         "--group", "-g", "group_name",
         default=None, help=help,
     )
+
+
+fix_option = click.option(
+    "--fix", is_flag=True,
+    help="Automatically fix problems where the remediation is obvious",
+)
+
+interactive_option = click.option(
+    "--interactive", is_flag=True,
+    help="Prompt before each fix action (requires --fix; incompatible with -o json)",
+)

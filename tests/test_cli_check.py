@@ -123,3 +123,65 @@ def test_check_group_json(monkeypatch, make_installed_packages):
     payload = json.loads(result.output)
     assert payload["group"] == "prod"
     assert [e["env"] for e in payload["environments"]] == ["main", "tools"]
+
+
+def test_check_fix_auto_deletes_orphan(patch_inspect, make_installed_packages, monkeypatch):
+    import pipu_cli.package_management as pm
+    packages = make_installed_packages(("foo", "1.0.0", {}))
+    patch_inspect(packages)
+    monkeypatch.setitem(
+        pm._ORPHAN_METADATA_CACHE, "",
+        {"foo": [{"version": "1.0.0", "path": "/tmp/foo.egg-info"}]},
+    )
+    removed = []
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree",
+                        lambda p: removed.append(p))
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state",
+                        lambda pkgs, desc: None)
+
+    result = CliRunner().invoke(cli, ["check", "--fix"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert removed == ["/tmp/foo.egg-info"]
+    assert "deleted" in result.output
+
+
+def test_check_fix_json_embeds_fixes(patch_inspect, make_installed_packages, monkeypatch):
+    import pipu_cli.package_management as pm
+    packages = make_installed_packages(("foo", "1.0.0", {}))
+    patch_inspect(packages)
+    monkeypatch.setitem(
+        pm._ORPHAN_METADATA_CACHE, "",
+        {"foo": [{"version": "1.0.0", "path": "/tmp/foo.egg-info"}]},
+    )
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree", lambda p: None)
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state", lambda *a, **kw: None)
+
+    result = CliRunner().invoke(cli, ["check", "--fix", "-o", "json"],
+                                catch_exceptions=False)
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert "fixes" in payload
+    assert "fix_summary" in payload
+    assert payload["fix_summary"]["applied"] == 1
+
+
+def test_check_fix_interactive_json_is_rejected():
+    result = CliRunner().invoke(
+        cli, ["check", "--fix", "--interactive", "-o", "json"],
+    )
+    assert result.exit_code == 1
+    assert "--interactive" in result.output
+
+
+def test_check_without_fix_is_read_only(patch_inspect, make_installed_packages, monkeypatch):
+    packages = make_installed_packages(
+        ("foo", "1.0.0", {"bar": ">=1"}),
+    )
+    patch_inspect(packages)
+    monkeypatch.setattr("pipu_cli._fix_cli.shutil.rmtree",
+                        lambda p: (_ for _ in ()).throw(
+                            AssertionError("should not delete")))
+    result = CliRunner().invoke(cli, ["check"])
+    assert result.exit_code == 1
+    assert "Fix summary" not in result.output
+    assert "Fixing" not in result.output

@@ -62,7 +62,9 @@ from pipu_cli._options import (
     cache_ttl_option,
     debug_option,
     exclude_option,
+    fix_option,
     group_option,
+    interactive_option,
     no_cache_option,
     no_check_option,
     output_option,
@@ -99,6 +101,13 @@ from pipu_cli.cache import (
 click.rich_click.USE_RICH_MARKUP = True
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+click.rich_click.OPTION_GROUPS = {
+    "pipu check": [
+        {"name": "Fix options", "options": ["--fix", "--interactive"]},
+        {"name": "Output options", "options": ["--by", "--output", "--debug"]},
+        {"name": "Environments", "options": ["--group"]},
+    ],
+}
 
 
 @click.group(invoke_without_command=True)
@@ -1399,10 +1408,13 @@ def _run_group_deps(
 @click.pass_context
 @click.option("--by", type=click.Choice(["problem", "package"]), default="problem",
               help="Group problems by kind (default) or by package")
+@fix_option
+@interactive_option
 @output_option
 @debug_option
 @group_option("Check every environment in a named group")
 def check(ctx: click.Context, by: str, output: str, debug: bool,
+          fix: bool, interactive: bool,
           group_name: Optional[str]) -> None:
     """
     Check an environment for consistency problems.
@@ -1411,14 +1423,26 @@ def check(ctx: click.Context, by: str, output: str, debug: bool,
     violations, broken editable installs, duplicate distributions, and
     orphaned metadata. Exits non-zero if any problems are found.
 
+    Pass ``--fix`` to auto-apply remediations for stale-metadata
+    (delete) and violates (install satisfying version).
+    ``--interactive`` prompts before each action.
+
     \b
     Examples:
       pipu check              Scan current environment
       pipu check --by package Group findings by package
       pipu check -o json      Machine-readable output
+      pipu check --fix        Auto-fix stale-metadata + violates
+      pipu check --fix --interactive  Prompt per action
       pipu check -g prod      Check every env in a group
     """
     console = Console()
+
+    if interactive and output == "json":
+        console.print(
+            "[red]error: --interactive is incompatible with -o json[/red]"
+        )
+        sys.exit(1)
 
     config = load_config()
     resolved = _apply_config_defaults(
@@ -1441,9 +1465,24 @@ def check(ctx: click.Context, by: str, output: str, debug: bool,
     report = build_env_report()
 
     if output == "json":
+        if fix:
+            from pipu_cli._fix_cli import run_fix
+            fixes, exit_code = run_fix(
+                report=report, console=console, output="json",
+                interactive=interactive,
+            )
+            print(json.dumps(env_report_to_json(report, fixes=fixes), indent=2))
+            sys.exit(exit_code)
         print(json.dumps(env_report_to_json(report), indent=2))
     else:
         print_env_report(console, report, group_by=by)
+        if fix:
+            from pipu_cli._fix_cli import run_fix
+            _, exit_code = run_fix(
+                report=report, console=console, output="human",
+                interactive=interactive,
+            )
+            sys.exit(exit_code)
 
     sys.exit(1 if report.problems else 0)
 
