@@ -53,6 +53,7 @@ from pipu_cli.output import (
     JsonOutputFormatter,
     dep_report_to_json,
     env_report_to_json,
+    env_report_group_to_json,
 )
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
@@ -1379,8 +1380,50 @@ def check(ctx: click.Context, by: str, output: str, debug: bool,
     sys.exit(1 if report.problems else 0)
 
 
-def _run_group_check(**kwargs: Any) -> None:  # pragma: no cover -- Task 9
-    raise NotImplementedError("group mode lands in Task 9")
+def _run_group_check(
+    *,
+    group_name: str,
+    console: Console,
+    output: str,
+    group_by: str,
+) -> None:
+    """Execute ``pipu check`` across every env of a saved group.
+
+    Iterates envs sequentially so per-env panels don't interleave. In
+    JSON mode, aggregates per-env reports into the group schema.
+
+    :param group_name: Name of the group to iterate.
+    :param console: Rich console for human-mode output.
+    :param output: ``"human"`` or ``"json"``.
+    :param group_by: Forwarded to :func:`print_env_report` in human mode
+        (one of ``"problem"`` or ``"package"``).
+    """
+    group_ctx = prepare_group(group_name, console=console, output=output)
+
+    per_env_reports: List[tuple] = []  # [(env_name, EnvReport)]
+    any_problems = False
+
+    for env_name, env_path in group_ctx.envs.items():
+        if output != "json":
+            console.print()
+            console.print(Panel(env_path, title=f"Environment: {env_name}",
+                                border_style="cyan", expand=False))
+            console.print()
+
+        report = build_env_report(python_path=env_path)
+        per_env_reports.append((env_name, report))
+        if report.problems:
+            any_problems = True
+
+        if output != "json":
+            print_env_report(console, report, group_by=group_by)
+
+    if output == "json":
+        print(json.dumps(env_report_group_to_json(
+            group_name=group_name, per_env=per_env_reports,
+        ), indent=2))
+
+    sys.exit(1 if any_problems else 0)
 
 
 @cli.command()
