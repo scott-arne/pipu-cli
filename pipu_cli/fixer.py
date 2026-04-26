@@ -7,7 +7,7 @@ without I/O.
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from packaging.utils import NormalizedName, canonicalize_name
 
@@ -237,3 +237,35 @@ def apply_violates_fix(
         )
         for p in problems
     ]
+
+
+def summarize_fix_results(fix_results: List[FixResult]) -> Dict[str, Any]:
+    """Build the ``fix_summary`` JSON block from a flat list of results.
+
+    :param fix_results: All :class:`FixResult` entries emitted during
+        one env's fix pass, including ``"unfixable"`` entries for
+        problems whose kinds have no fix handler.
+    :returns: Dict with top-level ``applied`` / ``failed`` / ``skipped``
+        / ``unfixable`` counts and a ``by_kind`` breakdown. Attempted
+        kinds (``stale-metadata``, ``violates``) get three-key
+        sub-dicts; unfixable kinds get ``{"unfixable": N}``.
+    """
+    top = {"applied": 0, "failed": 0, "skipped": 0, "unfixable": 0}
+    by_kind: Dict[str, Dict[str, int]] = {}
+    slot_for = {
+        "succeeded": "applied", "failed": "failed",
+        "skipped": "skipped", "unfixable": "unfixable",
+    }
+    for r in fix_results:
+        slot = slot_for[r.status]
+        top[slot] += 1
+
+        kind = r.problem.kind
+        if kind not in by_kind:
+            by_kind[kind] = (
+                {"unfixable": 0} if r.status == "unfixable"
+                else {"applied": 0, "failed": 0, "skipped": 0}
+            )
+        by_kind[kind][slot] = by_kind[kind].get(slot, 0) + 1
+
+    return {**top, "by_kind": by_kind}

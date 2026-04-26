@@ -212,10 +212,17 @@ def dep_report_group_to_json(
     }
 
 
-def env_report_to_json(report: EnvReport) -> Dict[str, Any]:
+def env_report_to_json(
+    report: EnvReport,
+    *,
+    fixes: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
     """Serialize an :class:`EnvReport` to a JSON-ready ``dict``.
 
     :param report: The report to serialize.
+    :param fixes: Optional list of :class:`pipu_cli.fixer.FixResult`
+        entries. When provided, the payload gains ``fixes`` and
+        ``fix_summary`` keys.
     :returns: A dict suitable for :func:`json.dumps`.
     """
     summary = {
@@ -229,12 +236,26 @@ def env_report_to_json(report: EnvReport) -> Dict[str, Any]:
     for problem in report.problems:
         if problem.kind in summary:
             summary[problem.kind] += 1
-    return {
+    payload: Dict[str, Any] = {
         "environment": report.python_path,
         "package_count": report.package_count,
         "problems": [_problem_to_dict(p) for p in report.problems],
         "summary": summary,
     }
+    if fixes is not None:
+        from pipu_cli.fixer import summarize_fix_results
+        payload["fixes"] = [
+            {
+                "problem": _problem_to_dict(r.problem),
+                "action": r.action,
+                "target": r.target,
+                "status": r.status,
+                "detail": r.detail,
+            }
+            for r in fixes
+        ]
+        payload["fix_summary"] = summarize_fix_results(fixes)
+    return payload
 
 
 def env_report_group_to_json(
