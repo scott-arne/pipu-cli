@@ -2,7 +2,7 @@
 
 from packaging.version import Version
 
-from pipu_cli.fixer import FixResult, build_fix_plan
+from pipu_cli.fixer import FixResult, apply_stale_metadata_fix, build_fix_plan
 from pipu_cli.package_management import DepProblem, EnvReport
 
 
@@ -62,3 +62,68 @@ def test_build_fix_plan_sorts_within_kind():
     plan = build_fix_plan(report)
     assert [p.package for p in plan.stale_metadata] == ["alpha", "zeta"]
     assert [p.package for p in plan.violates] == ["flask", "numpy"]
+
+
+def _stale_problem(package="cnotebook", path="/old/cnotebook.egg-info") -> DepProblem:
+    return DepProblem(
+        kind="stale-metadata", package=package,
+        detail=f"{package} has orphaned metadata: {path}",
+    )
+
+
+def test_apply_stale_metadata_fix_succeeds():
+    removed = []
+    path = "/old/cnotebook.egg-info"
+    result = apply_stale_metadata_fix(
+        _stale_problem(path=path),
+        python_path=None,
+        verifier=lambda pp: {"cnotebook": [{"path": path, "version": "0.1"}]},
+        remover=lambda p: removed.append(p),
+    )
+    assert removed == [path]
+    assert result.status == "succeeded"
+    assert result.action == "delete"
+    assert result.target == path
+    assert result.detail is None
+
+
+def test_apply_stale_metadata_fix_skips_when_no_longer_orphan():
+    removed = []
+    result = apply_stale_metadata_fix(
+        _stale_problem(),
+        python_path=None,
+        verifier=lambda pp: {},
+        remover=lambda p: removed.append(p),
+    )
+    assert removed == []
+    assert result.status == "skipped"
+    assert "no longer classified as orphan" in (result.detail or "")
+
+
+def test_apply_stale_metadata_fix_skips_when_path_suffix_unknown():
+    removed = []
+    bad = "/old/cnotebook/random.txt"
+    result = apply_stale_metadata_fix(
+        _stale_problem(path=bad),
+        python_path=None,
+        verifier=lambda pp: {"cnotebook": [{"path": bad, "version": "0.1"}]},
+        remover=lambda p: removed.append(p),
+    )
+    assert removed == []
+    assert result.status == "skipped"
+
+
+def test_apply_stale_metadata_fix_fails_when_remover_raises():
+    def boom(p: str) -> None:
+        raise PermissionError("denied")
+
+    result = apply_stale_metadata_fix(
+        _stale_problem(),
+        python_path=None,
+        verifier=lambda pp: {
+            "cnotebook": [{"path": "/old/cnotebook.egg-info", "version": "0.1"}],
+        },
+        remover=boom,
+    )
+    assert result.status == "failed"
+    assert "denied" in (result.detail or "")

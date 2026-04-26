@@ -6,7 +6,7 @@ without I/O.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 from pipu_cli.package_management import DepProblem, EnvReport
 
@@ -78,4 +78,82 @@ def build_fix_plan(report: EnvReport) -> FixPlan:
         stale_metadata=stale,
         violates=violates,
         unfixable=unfixable,
+    )
+
+
+_ORPHAN_SUFFIXES = (".egg-info", ".dist-info")
+
+
+def _extract_orphan_path(detail: str) -> Optional[str]:
+    """Pull the orphan path out of a ``stale-metadata`` detail string.
+
+    Detail format is
+    ``"{package} has orphaned metadata: {path1}, {path2}..."`` (produced by
+    :func:`pipu_cli.package_management._collect_problems_over_edges`).
+    Only the first path is returned; callers fix one path at a time.
+
+    :param detail: The :class:`DepProblem.detail` string.
+    :returns: First path in the list, or ``None`` when the marker is
+        missing.
+    """
+    marker = "has orphaned metadata: "
+    idx = detail.find(marker)
+    if idx == -1:
+        return None
+    tail = detail[idx + len(marker):]
+    return tail.split(", ", 1)[0].strip()
+
+
+def apply_stale_metadata_fix(
+    problem: DepProblem,
+    *,
+    python_path: Optional[str],
+    verifier: Callable[[Optional[str]], Dict[str, List[Dict[str, str]]]],
+    remover: Callable[[str], None],
+) -> FixResult:
+    """Re-verify orphan status, then delete the metadata directory.
+
+    :param problem: A :class:`DepProblem` with ``kind == "stale-metadata"``.
+    :param python_path: Env identity; forwarded to ``verifier``.
+    :param verifier: Callable returning the current orphan map
+        (canonical-name to list of ``{"version", "path"}`` dicts).
+        Typically :func:`pipu_cli.package_management.get_orphan_metadata`.
+    :param remover: Callable removing a path (e.g., ``shutil.rmtree``
+        for directories). Injected for testability.
+    :returns: A :class:`FixResult` describing the outcome.
+    """
+    path = _extract_orphan_path(problem.detail)
+    if path is None:
+        return FixResult(
+            problem=problem, action="delete", target="",
+            status="skipped",
+            detail="unable to parse orphan path from problem detail",
+        )
+
+    if not path.endswith(_ORPHAN_SUFFIXES):
+        return FixResult(
+            problem=problem, action="delete", target=path,
+            status="skipped",
+            detail=f"path does not end in {_ORPHAN_SUFFIXES}",
+        )
+
+    current = verifier(python_path)
+    entries = current.get(problem.package, [])
+    if not any(entry.get("path") == path for entry in entries):
+        return FixResult(
+            problem=problem, action="delete", target=path,
+            status="skipped",
+            detail="path is no longer classified as orphan",
+        )
+
+    try:
+        remover(path)
+    except Exception as exc:
+        return FixResult(
+            problem=problem, action="delete", target=path,
+            status="failed", detail=str(exc),
+        )
+    return FixResult(
+        problem=problem, action="delete", target=path,
+        status="succeeded", detail=None,
     )
