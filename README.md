@@ -161,6 +161,29 @@ pipu check -g prod
 Exit code is `0` if clean, `1` if any problems are found. Group mode exits
 `1` if any env has problems.
 
+#### Automatic remediation
+
+```bash
+# Auto-fix stale-metadata (delete) and violates (install satisfying version)
+pipu check --fix
+
+# Prompt before each action (y/n/a/q)
+pipu check --fix --interactive
+
+# Machine-readable output with per-fix status
+pipu check --fix -o json
+
+# Fix every env in a group, sequentially
+pipu check --fix -g prod
+```
+
+`--fix` attempts remediation for two problem kinds; the others
+(`missing`, `broken-editable`, `duplicate-install`) are reported as
+unfixable and must be resolved manually. Before any `violates` fix runs,
+pipu saves a rollback state so the batch can be reverted with
+`pipu rollback`. Combining `--interactive` with `-o json` is an error —
+JSON consumers can't answer prompts.
+
 ### Automatic consistency check after changes
 
 `pipu upgrade`, `pipu install`, and `pipu uninstall` automatically run
