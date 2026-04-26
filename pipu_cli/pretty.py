@@ -19,6 +19,8 @@ from pipu_cli.package_management import (
     UninstalledResult,
     DepNode,
     DepReport,
+    DepProblem,
+    EnvReport,
 )
 from pipu_cli.ui import CHECKMARK, CROSS, STYLES
 
@@ -973,3 +975,115 @@ def print_dep_report(console: Console, report: DepReport) -> None:
             border_style=_FAILURE,
             expand=False,
         ))
+
+
+_KIND_LABEL = {
+    "missing": "Missing",
+    "violates": "Violates",
+    "broken-editable": "Broken editable",
+    "duplicate-install": "Duplicate install",
+    "stale-metadata": "Stale metadata",
+}
+
+_KIND_ORDER = ("missing", "violates", "broken-editable", "duplicate-install", "stale-metadata")
+
+
+def _summarize_counts(problems: List[DepProblem]) -> str:
+    """Build the comma-separated summary line for the failure panel.
+
+    :param problems: The problems to summarize.
+    :returns: A string like ``"2 missing, 3 violates"`` listing only
+        kinds with at least one entry, in :data:`_KIND_ORDER`.
+    """
+    counts: Dict[str, int] = {k: 0 for k in _KIND_ORDER}
+    for p in problems:
+        if p.kind in counts:
+            counts[p.kind] += 1
+    parts = [
+        f"{counts[k]} {_KIND_LABEL[k].lower()}"
+        for k in _KIND_ORDER if counts[k] > 0
+    ]
+    return ", ".join(parts)
+
+
+def _short_detail(problem: DepProblem) -> str:
+    """Short form of ``DepProblem.detail`` for tree leaves.
+
+    Strips the redundant ``{package}`` / ``{package} {version}`` prefix
+    so the leaf reads cleanly next to the tree glyph.
+
+    :param problem: The problem whose detail should be shortened.
+    :returns: Detail string with the leading package name/version removed.
+    """
+    detail = problem.detail
+    pkg = problem.package
+    if problem.installed_version is not None:
+        prefix = f"{pkg} {problem.installed_version} "
+    else:
+        prefix = f"{pkg} "
+    if detail.startswith(prefix):
+        return detail[len(prefix):]
+    return detail
+
+
+def _build_tree_by_problem(report: EnvReport) -> Tree:
+    root = Tree("[bold]Environment check[/bold]")
+    for kind in _KIND_ORDER:
+        kind_problems = [p for p in report.problems if p.kind == kind]
+        if not kind_problems:
+            continue
+        branch = root.add(f"[bold]{_KIND_LABEL[kind]}[/bold] ({len(kind_problems)})")
+        for p in kind_problems:
+            if p.installed_version is not None:
+                leaf = f"{_CROSS_MARKUP} [{_FAILURE}]{p.package}[/{_FAILURE}] [dim]{p.installed_version}[/dim]  {_short_detail(p)}"
+            else:
+                leaf = f"{_CROSS_MARKUP} [{_FAILURE}]{p.package}[/{_FAILURE}]  {_short_detail(p)}"
+            branch.add(leaf)
+    return root
+
+
+def _build_tree_by_package(report: EnvReport) -> Tree:
+    """Render tree grouped by package (Task 7 fills this in).
+
+    :param report: The report to render.
+    :returns: A :class:`Tree` rendered by kind until Task 7 replaces
+        this stub with a real package-grouped implementation.
+    """
+    # Task 7 implements this. For now, fall back to by-problem so the
+    # human path never crashes.
+    return _build_tree_by_problem(report)
+
+
+def print_env_report(
+    console: Console,
+    report: EnvReport,
+    *,
+    group_by: str = "problem",
+) -> None:
+    """Render an :class:`EnvReport` to a Rich console.
+
+    :param console: Rich console to render into.
+    :param report: The report to render.
+    :param group_by: ``"problem"`` (default) or ``"package"``.
+    """
+    n_problems = len(report.problems)
+    title = f"Environment check — {report.package_count} packages, {n_problems} problem(s)"
+
+    if n_problems == 0:
+        console.print(Panel(
+            f"[{_SUCCESS}]{_CHECK_MARKUP} No consistency problems found[/{_SUCCESS}]",
+            title=title, border_style=_SUCCESS, expand=False,
+        ))
+        return
+
+    summary_line = _summarize_counts(report.problems)
+    console.print(Panel(
+        f"{_CROSS_MARKUP} {summary_line}",
+        title=title, border_style=_FAILURE, expand=False,
+    ))
+
+    if group_by == "package":
+        tree = _build_tree_by_package(report)
+    else:
+        tree = _build_tree_by_problem(report)
+    console.print(tree)
