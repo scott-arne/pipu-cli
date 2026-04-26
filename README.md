@@ -134,6 +134,59 @@ If any dependency is missing, installed at a version that violates a
 constraint, or points at a broken editable path, the affected rows are
 marked and summarized in a `Problems` panel below the tree.
 
+### Check environment consistency
+
+```bash
+# Scan the current environment for consistency problems
+pipu check
+
+# Group findings by package instead of by problem kind
+pipu check --by package
+
+# Machine-readable output
+pipu check -o json
+
+# Check every environment in a saved group
+pipu check -g prod
+```
+
+`pipu check` scans for:
+
+- **Missing** — packages required by something installed but not installed.
+- **Violates** — installed versions that violate a constraint.
+- **Broken editable** — editable installs whose source path no longer exists.
+- **Duplicate install** — two or more distributions sharing a canonical name.
+- **Stale metadata** — leftover `.dist-info` / `.egg-info` directories that pip no longer counts.
+
+Exit code is `0` if clean, `1` if any problems are found. Group mode exits
+`1` if any env has problems.
+
+### Automatic consistency check after changes
+
+`pipu upgrade`, `pipu install`, and `pipu uninstall` automatically run
+`pipu check` on the affected environment after completing. The auto-check
+only informs; it never changes the host command's exit code.
+
+Disable per-invocation with `--no-check`:
+
+```bash
+pipu upgrade --no-check
+pipu install requests --no-check
+pipu uninstall numpy --no-check
+```
+
+Disable globally in your config (`~/.pipu/config.toml`) or via environment
+variable:
+
+```toml
+[settings]
+check_after_changes = false
+```
+
+```bash
+export PIPU_CHECK_AFTER_CHANGES=false
+```
+
 ### Rollback
 
 pipu saves package state before each upgrade. If something goes wrong:
@@ -255,6 +308,8 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 | `pipu install` | Install packages (wraps pip install -U) |
 | `pipu uninstall` | Uninstall packages |
 | `pipu outdated` | Show packages with updates available |
+| `pipu deps` | Inspect a package's required-by and requires |
+| `pipu check` | Scan an environment for consistency problems |
 | `pipu update` | Refresh the package version cache |
 | `pipu clean` | Clear caches |
 | `pipu rollback` | Restore packages to a previous state |
@@ -279,6 +334,7 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 | `--timeout INTEGER` | | Network timeout in seconds (default: 10) |
 | `--pre` | | Include pre-release versions |
 | `--yes` | `-y` | Skip confirmation |
+| `--no-check` | | Skip the post-upgrade consistency check |
 | `--debug` | | Show detailed logging |
 
 ### Install Options
@@ -292,6 +348,7 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 | `--timeout INTEGER` | | Timeout in seconds (default: 300) |
 | `--pre` | | Include pre-release versions |
 | `--yes` | `-y` | Skip confirmation |
+| `--no-check` | | Skip the post-install consistency check |
 | `--debug` | | Show detailed logging |
 
 ### Uninstall Options
@@ -303,6 +360,7 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 | `--output [human\|json]` | `-o` | Output format |
 | `--timeout INTEGER` | | Timeout in seconds (default: 300) |
 | `--yes` | `-y` | Skip confirmation |
+| `--no-check` | | Skip the post-uninstall consistency check |
 | `--debug` | | Show detailed logging |
 
 ### Rollback Options
