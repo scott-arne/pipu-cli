@@ -24,6 +24,7 @@ from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
     build_dep_report,
+    build_env_report,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
@@ -39,6 +40,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version, InvalidVersion
 from pipu_cli.pretty import (
     print_dep_report,
+    print_env_report,
     print_upgradable_packages_table,
     print_upgrade_results,
     print_install_results,
@@ -47,7 +49,11 @@ from pipu_cli.pretty import (
     ConsoleStream,
     select_packages_interactively,
 )
-from pipu_cli.output import JsonOutputFormatter, dep_report_to_json
+from pipu_cli.output import (
+    JsonOutputFormatter,
+    dep_report_to_json,
+    env_report_to_json,
+)
 from pipu_cli.ui import UpgradeUI
 from pipu_cli.download import download_packages, install_from_local
 from pipu_cli.config_file import load_config, get_config_value
@@ -1316,6 +1322,65 @@ def _run_group_deps(
     if check and any_problems:
         sys.exit(1)
     sys.exit(0)
+
+
+@cli.command()
+@click.pass_context
+@click.option("--by", type=click.Choice(["problem", "package"]), default="problem",
+              help="Group problems by kind (default) or by package")
+@click.option("--output", "-o", type=click.Choice(["human", "json"]), default="human",
+              help="Output format")
+@click.option("--debug", is_flag=True, help="Enable debug logging")
+@click.option("--group", "-g", "group_name", default=None,
+              help="Check every environment in a named group")
+def check(ctx: click.Context, by: str, output: str, debug: bool,
+          group_name: Optional[str]) -> None:
+    """
+    Check an environment for consistency problems.
+
+    Scans installed packages for missing dependencies, version constraint
+    violations, broken editable installs, duplicate distributions, and
+    orphaned metadata. Exits non-zero if any problems are found.
+
+    \b
+    Examples:
+      pipu check              Scan current environment
+      pipu check --by package Group findings by package
+      pipu check -o json      Machine-readable output
+      pipu check -g prod      Check every env in a group
+    """
+    console = Console()
+
+    config = load_config()
+    resolved = _apply_config_defaults(
+        ctx, config,
+        {"by": "problem", "output": "human", "debug": False},
+    )
+    by = resolved["by"]
+    output = resolved["output"]
+    debug = resolved["debug"]
+
+    _configure_debug_logging(console, debug, output)
+
+    if group_name is not None:
+        _run_group_check(
+            group_name=group_name, console=console,
+            output=output, group_by=by,
+        )
+        return
+
+    report = build_env_report()
+
+    if output == "json":
+        print(json.dumps(env_report_to_json(report), indent=2))
+    else:
+        print_env_report(console, report, group_by=by)
+
+    sys.exit(1 if report.problems else 0)
+
+
+def _run_group_check(**kwargs: Any) -> None:  # pragma: no cover -- Task 9
+    raise NotImplementedError("group mode lands in Task 9")
 
 
 @cli.command()
