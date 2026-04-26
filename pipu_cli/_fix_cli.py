@@ -6,7 +6,7 @@ prompting, rollback invocation, and group-mode dispatch. Calls into
 and easy to unit-test.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Set
 
 from rich.console import Console
 from rich.panel import Panel
@@ -112,3 +112,66 @@ def render_fix_summary(console: Console, fixes: List[FixResult]) -> None:
     console.print(
         Panel(body, title=title, border_style=border_style, expand=False)
     )
+
+
+class Prompter:
+    """Interactive ``[y/n/a/q]`` prompt with sticky-per-kind ``a`` and terminal ``q``.
+
+    Designed to be injectable: tests supply a ``prompt_fn`` returning
+    canned answers, production wires it to ``input`` (or Click's
+    :func:`click.prompt`).
+
+    :param interactive: When ``False``, :meth:`should_apply` always
+        returns ``True`` and never invokes ``prompt_fn``.
+    :param prompt_fn: Callable taking a prompt message and returning
+        the raw user response as a string.
+    """
+
+    def __init__(
+        self,
+        *,
+        interactive: bool,
+        prompt_fn: Callable[[str], str],
+    ) -> None:
+        self._interactive = interactive
+        self._prompt_fn = prompt_fn
+        self._sticky_kinds: Set[str] = set()
+        self._quit = False
+
+    @property
+    def should_quit(self) -> bool:
+        """``True`` once the user has answered ``q``."""
+        return self._quit
+
+    def should_apply(self, *, kind: str, message: str) -> bool:
+        """Ask whether to apply a fix.
+
+        :param kind: The problem kind. Scopes the sticky ``a`` behavior
+            so ``a`` on a stale-metadata prompt does not auto-answer
+            subsequent violates prompts.
+        :param message: Human-readable prompt (e.g.,
+            ``"Fix: delete /x [y/n/a/q]: "``).
+        :returns: ``True`` to apply, ``False`` to skip. Once
+            :attr:`should_quit` is ``True`` all subsequent calls return
+            ``False`` without prompting.
+        """
+        if self._quit:
+            return False
+        if not self._interactive:
+            return True
+        if kind in self._sticky_kinds:
+            return True
+
+        while True:
+            raw = (self._prompt_fn(message) or "").strip().lower()
+            if raw in ("", "n"):
+                return False
+            if raw == "y":
+                return True
+            if raw == "a":
+                self._sticky_kinds.add(kind)
+                return True
+            if raw == "q":
+                self._quit = True
+                return False
+            # Invalid — re-prompt.

@@ -5,7 +5,7 @@ from io import StringIO
 from packaging.version import Version
 from rich.console import Console
 
-from pipu_cli._fix_cli import render_fix_line, render_fix_summary
+from pipu_cli._fix_cli import Prompter, render_fix_line, render_fix_summary
 from pipu_cli.fixer import FixResult
 from pipu_cli.package_management import DepProblem
 
@@ -100,3 +100,60 @@ def test_render_fix_summary_shows_counts_and_unfixable():
     assert "0 failed" in out
     assert "1 unfixable" in out
     assert "missing" in out
+
+
+def test_prompter_disabled_always_approves():
+    p = Prompter(interactive=False, prompt_fn=lambda msg: "n")
+    assert p.should_apply(kind="stale-metadata", message="fix this?") is True
+    assert p.should_apply(kind="violates", message="fix that?") is True
+    assert p.should_quit is False
+
+
+def test_prompter_yes():
+    p = Prompter(interactive=True, prompt_fn=lambda msg: "y")
+    assert p.should_apply(kind="stale-metadata", message="fix?") is True
+    assert p.should_quit is False
+
+
+def test_prompter_no():
+    p = Prompter(interactive=True, prompt_fn=lambda msg: "n")
+    assert p.should_apply(kind="stale-metadata", message="fix?") is False
+    assert p.should_quit is False
+
+
+def test_prompter_default_on_enter_is_no():
+    p = Prompter(interactive=True, prompt_fn=lambda msg: "")
+    assert p.should_apply(kind="stale-metadata", message="fix?") is False
+
+
+def test_prompter_a_is_sticky_within_kind():
+    answers = iter(["a"])
+    p = Prompter(interactive=True, prompt_fn=lambda msg: next(answers))
+    # First prompt: user says "a" -> apply
+    assert p.should_apply(kind="stale-metadata", message="fix a?") is True
+    # Subsequent same-kind prompts: no prompt_fn call needed
+    assert p.should_apply(kind="stale-metadata", message="fix b?") is True
+    assert p.should_apply(kind="stale-metadata", message="fix c?") is True
+
+
+def test_prompter_a_does_not_leak_to_other_kind():
+    answers = iter(["a", "n"])
+    p = Prompter(interactive=True, prompt_fn=lambda msg: next(answers))
+    assert p.should_apply(kind="stale-metadata", message="fix a?") is True
+    # Different kind -> prompt again, answer "n"
+    assert p.should_apply(kind="violates", message="fix urllib3?") is False
+
+
+def test_prompter_q_stops_and_skips_rest():
+    p = Prompter(interactive=True, prompt_fn=lambda msg: "q")
+    assert p.should_apply(kind="stale-metadata", message="fix?") is False
+    assert p.should_quit is True
+    # Subsequent calls: no prompt, always False
+    assert p.should_apply(kind="stale-metadata", message="next?") is False
+    assert p.should_apply(kind="violates", message="next?") is False
+
+
+def test_prompter_invalid_reprompts():
+    answers = iter(["maybe", "x", "y"])
+    p = Prompter(interactive=True, prompt_fn=lambda msg: next(answers))
+    assert p.should_apply(kind="stale-metadata", message="fix?") is True
