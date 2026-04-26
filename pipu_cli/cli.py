@@ -66,7 +66,7 @@ from pipu_cli.groups import (
     get_group,
     validate_python_path,
 )
-from pipu_cli.config import DEFAULT_CACHE_TTL
+from pipu_cli.config import DEFAULT_CACHE_TTL, DEFAULT_CHECK_AFTER_CHANGES
 from pipu_cli.cache import (
     is_cache_fresh,
     load_cache,
@@ -800,6 +800,11 @@ def _download_and_install_phase(
     help=f"Cache freshness threshold in seconds (default: {DEFAULT_CACHE_TTL})"
 )
 @click.option(
+    "--no-check",
+    is_flag=True,
+    help="Skip the post-upgrade consistency check"
+)
+@click.option(
     "--group", "-g",
     "group_name",
     default=None,
@@ -808,7 +813,7 @@ def _download_and_install_phase(
 def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
             exclude: tuple, show_blocked: bool, output: str, update_requirements: Optional[str],
             parallel: int, interactive: bool, no_cache: bool, cache_ttl: Optional[int],
-            group_name: Optional[str] = None) -> None:
+            no_check: bool, group_name: Optional[str] = None) -> None:
     """
     Upgrade installed packages.
 
@@ -843,6 +848,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             'show_blocked': False,
             'output': 'human',
             'cache_ttl': DEFAULT_CACHE_TTL,
+            'check_after_changes': DEFAULT_CHECK_AFTER_CHANGES,
         },
     )
     timeout = resolved['timeout']
@@ -853,6 +859,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     show_blocked = resolved['show_blocked']
     output = resolved['output']
     cache_ttl = resolved['cache_ttl']
+    check_after_changes = resolved['check_after_changes']
 
     # exclude has its own parsing pathway
     if ctx.get_parameter_source('exclude') == ParameterSource.DEFAULT:
@@ -877,6 +884,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             packages=packages, package_constraints={},
             update_requirements=update_requirements,
             json_formatter=json_formatter, cache_enabled=cache_enabled,
+            check_after_changes=check_after_changes, no_check=no_check,
         )
         return
 
@@ -926,8 +934,14 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             )
 
             if not installed_packages:
+                payload: Dict[str, Any] = {"error": "No packages found"}
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check,
+                    result=payload,
+                )
                 if output == "json":
-                    print('{"error": "No packages found"}')
+                    print(json.dumps(payload, indent=2))
                 else:
                     console.print("[yellow]No packages found.[/yellow]")
                 sys.exit(0)
@@ -939,8 +953,14 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             )
 
             if not latest_versions:
+                uptodate_payload: Dict[str, Any] = {"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check,
+                    result=uptodate_payload,
+                )
                 if output == "json":
-                    print('{"upgradable": [], "blocked": [], "results": [], "summary": {"total": 0, "upgraded": 0, "failed": 0}}')
+                    print(json.dumps(uptodate_payload, indent=2))
                 else:
                     console.print("\n[bold green]All packages are up to date![/bold green]")
                 sys.exit(0)
@@ -958,8 +978,19 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                         upgradable=[],
                         blocked=blocked_packages if show_blocked else None
                     )
-                    print(json_data)
+                    blocked_payload: Dict[str, Any] = json.loads(json_data)
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=None,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result=blocked_payload,
+                    )
+                    print(json.dumps(blocked_payload, indent=2))
                 else:
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=None,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result={},
+                    )
                     console.print("\n[yellow]No packages can be upgraded (all blocked by constraints).[/yellow]")
                     if show_blocked and blocked_packages:
                         console.print()
@@ -974,7 +1005,13 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                         upgradable=can_upgrade,
                         blocked=blocked_packages if show_blocked else None
                     )
-                    print(json_data)
+                    dryrun_payload: Dict[str, Any] = json.loads(json_data)
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=None,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result=dryrun_payload,
+                    )
+                    print(json.dumps(dryrun_payload, indent=2))
                     sys.exit(0)
             else:
                 console.print()
@@ -987,10 +1024,20 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                 if interactive:
                     can_upgrade = select_packages_interactively(can_upgrade, console)
                     if not can_upgrade:
+                        _maybe_run_auto_check(
+                            console=console, output=output, python_path=None,
+                            check_after_changes=check_after_changes, no_check=no_check,
+                            result={},
+                        )
                         console.print("[yellow]No packages selected for upgrade.[/yellow]")
                         sys.exit(0)
 
                 if dry_run:
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=None,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result={},
+                    )
                     console.print("\n[bold cyan]Dry run complete.[/bold cyan] No packages were modified.")
                     sys.exit(0)
 
@@ -999,6 +1046,11 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                 console.print()
                 confirm = click.confirm(f"Upgrade {len(can_upgrade)} package(s)?", default=True)
                 if not confirm:
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=None,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result={},
+                    )
                     console.print("[yellow]Upgrade cancelled.[/yellow]")
                     sys.exit(0)
 
@@ -1025,7 +1077,13 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                     blocked=blocked_packages if show_blocked else None,
                     results=results
                 )
-                print(json_data)
+                results_payload: Dict[str, Any] = json.loads(json_data)
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check,
+                    result=results_payload,
+                )
+                print(json.dumps(results_payload, indent=2))
             else:
                 print_upgrade_results(results, console=console, verbose=debug)
 
@@ -1033,6 +1091,12 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
                     console.print(f"\n[dim]Install time: {install_time:.2f}s[/dim]")
                     total_time = step1_time + step2_time + step3_time + install_time
                     console.print(f"[dim]Total time: {total_time:.2f}s[/dim]")
+
+                _maybe_run_auto_check(
+                    console=console, output=output, python_path=None,
+                    check_after_changes=check_after_changes, no_check=no_check,
+                    result={},
+                )
 
             # Exit with appropriate code
             failed = [pkg for pkg in results if not pkg.upgraded]
@@ -1893,6 +1957,8 @@ def _run_group_upgrade(
     update_requirements: Optional[str],
     json_formatter: Optional[JsonOutputFormatter],
     cache_enabled: bool,
+    check_after_changes: bool,
+    no_check: bool,
 ) -> None:
     """Execute upgrade across all environments in a group using consolidated pipeline."""
     group_ctx = prepare_group(group_name, console=console, output=output)
@@ -2002,6 +2068,16 @@ def _run_group_upgrade(
 
             if total_upgradable == 0:
                 if output != "json":
+                    if check_after_changes and not no_check:
+                        for env_name in env_name_map:
+                            env_path = env_name_map[env_name]
+                            console.print()
+                            console.print(Panel(env_path, title=f"Check: {env_name}",
+                                                border_style="cyan", expand=False))
+                            _maybe_run_auto_check(
+                                console=console, output=output, python_path=env_path,
+                                check_after_changes=True, no_check=False, result={},
+                            )
                     console.print("\n[yellow]No packages can be upgraded.[/yellow]")
                     if show_blocked and all_blocked:
                         from pipu_cli.pretty import print_group_blocked_table
@@ -2011,13 +2087,19 @@ def _run_group_upgrade(
                     group_results = []
                     for env_name in env_name_map:
                         env_path = env_name_map[env_name]
-                        group_results.append({
+                        env_dict: Dict[str, Any] = {
                             "environment": env_path,
                             "upgradable": [],
                             "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
                             "results": [],
                             "summary": {"total": 0, "upgraded": 0, "failed": 0},
-                        })
+                        }
+                        _maybe_run_auto_check(
+                            console=console, output=output, python_path=env_path,
+                            check_after_changes=check_after_changes, no_check=no_check,
+                            result=env_dict,
+                        )
+                        group_results.append(env_dict)
                     print(json_formatter.format_group_results(group_results))
                 sys.exit(0)
 
@@ -2148,13 +2230,19 @@ def _run_group_upgrade(
                     results = env_results.get(env_name, [])
                     upgraded = len([r for r in results if r.upgraded])
                     failed = len([r for r in results if not r.upgraded])
-                    group_results.append({
+                    env_result_dict: Dict[str, Any] = {
                         "environment": env_path,
                         "upgradable": [json_formatter._package_to_dict(p) for p in env_upgrades.get(env_name, [])],
                         "blocked": [json_formatter._package_to_dict(b) for en, b in all_blocked if en == env_name],
                         "results": [json_formatter._package_to_dict(r) for r in results],
                         "summary": {"total": upgraded + failed, "upgraded": upgraded, "failed": failed},
-                    })
+                    }
+                    _maybe_run_auto_check(
+                        console=console, output=output, python_path=env_path,
+                        check_after_changes=check_after_changes, no_check=no_check,
+                        result=env_result_dict,
+                    )
+                    group_results.append(env_result_dict)
                 print(json_formatter.format_group_results(group_results))
             else:
                 console.print()
@@ -2162,6 +2250,17 @@ def _run_group_upgrade(
                 print_group_results_matrix(env_results, env_name_map, console=console)
                 if show_blocked and all_blocked:
                     print_group_blocked_table(all_blocked, console=console)
+
+                if check_after_changes and not no_check:
+                    for env_name in env_order:
+                        env_path = env_name_map[env_name]
+                        console.print()
+                        console.print(Panel(env_path, title=f"Check: {env_name}",
+                                            border_style="cyan", expand=False))
+                        _maybe_run_auto_check(
+                            console=console, output=output, python_path=env_path,
+                            check_after_changes=True, no_check=False, result={},
+                        )
 
             total_failed = sum(
                 len([r for r in env_results.get(n, []) if not r.upgraded])

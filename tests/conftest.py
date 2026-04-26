@@ -6,7 +6,22 @@ import pytest
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from pipu_cli import package_management as _pm
 from pipu_cli.package_management import InstalledPackage
+
+
+@pytest.fixture(autouse=True)
+def _reset_orphan_metadata_cache():
+    """Isolate ``_ORPHAN_METADATA_CACHE`` across tests.
+
+    Several tests (``tests/test_cli.py``) exercise real CLI paths that
+    populate the module-level orphan cache with entries from the
+    developer's actual environment. Without this fixture, that state
+    leaks into later tests that expect an empty cache for the local env.
+    """
+    _pm._ORPHAN_METADATA_CACHE.clear()
+    yield
+    _pm._ORPHAN_METADATA_CACHE.clear()
 
 
 PackageSpec = Union[
