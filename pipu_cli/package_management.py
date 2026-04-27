@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, runtime_checkable
 
@@ -869,6 +870,63 @@ def _build_pip_session(
     return session, package_finder
 
 
+def _fetch_latest_version(
+    installed_pkg: "InstalledPackage",
+    *,
+    include_prereleases: bool = False,
+    timeout: int = 10,
+) -> Optional[tuple["InstalledPackage", "Package"]]:
+    """Query the configured indexes for the latest version of one package.
+
+    Builds a per-call :class:`PipSession` / :class:`PackageFinder` so
+    concurrent callers never share pip's non-thread-safe session state.
+    The session is always closed via :class:`ExitStack` callback, even
+    when candidate parsing raises.
+
+    :param installed_pkg: The installed package to probe.
+    :param include_prereleases: When ``True``, prerelease candidates are
+        eligible. When ``False``, they are filtered out unless every
+        candidate is a prerelease.
+    :param timeout: Network timeout applied to the underlying
+        :class:`PipSession`.
+    :returns: ``(installed_pkg, latest_package)`` on success, or ``None``
+        if no candidates parse as valid :class:`Version` values.
+    """
+    with ExitStack() as stack:
+        session, finder = _build_pip_session(
+            timeout=timeout, include_prereleases=include_prereleases
+        )
+        stack.callback(session.close)
+
+        canonical_name = canonicalize_name(installed_pkg.name)
+        candidates = finder.find_all_candidates(canonical_name)
+        if not candidates:
+            logger.debug("No candidates found for %s", installed_pkg.name)
+            return None
+
+        parsed: List[tuple[Version, Any]] = []
+        for candidate in candidates:
+            try:
+                version_obj = Version(str(candidate.version))
+            except InvalidVersion:
+                continue
+            parsed.append((version_obj, candidate))
+
+        if not parsed:
+            return None
+
+        if include_prereleases:
+            scan = parsed
+        else:
+            stable = [pair for pair in parsed if not pair[0].is_prerelease]
+            scan = stable if stable else parsed
+
+        latest_version, _ = max(scan, key=lambda pair: pair[0])
+        return installed_pkg, Package(name=installed_pkg.name, version=latest_version)
+
+    return None
+
+
 def get_latest_versions_parallel(
     installed_packages: List[InstalledPackage],
     timeout: int = 10,
@@ -894,10 +952,6 @@ def get_latest_versions_parallel(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    session, package_finder = _build_pip_session(
-        timeout=timeout, include_prereleases=include_prereleases,
-    )
-
     # Thread-safe result storage and progress tracking
     result: Dict[InstalledPackage, Package] = {}
     result_lock = threading.Lock()
@@ -905,72 +959,27 @@ def get_latest_versions_parallel(
     completed_count = [0]  # Mutable container for thread-safe counter
     total_packages = len(installed_packages)
 
-    def check_package(installed_pkg: InstalledPackage) -> Optional[tuple[InstalledPackage, Package]]:
-        """Check a single package for updates."""
-        try:
-            # Get canonical name for querying
-            canonical_name = canonicalize_name(installed_pkg.name)
-
-            # Find all available versions
-            candidates = package_finder.find_all_candidates(canonical_name)
-
-            if not candidates:
-                logger.debug(f"No candidates found for {installed_pkg.name}")
-                return None
-
-            # Filter out pre-releases if not requested
-            if not include_prereleases:
-                stable_candidates = []
-                for candidate in candidates:
-                    try:
-                        version_obj = Version(str(candidate.version))
-                        if not version_obj.is_prerelease:
-                            stable_candidates.append(candidate)
-                    except InvalidVersion:
-                        continue
-
-                # Use stable candidates if available, otherwise use all
-                candidates = stable_candidates if stable_candidates else candidates
-
-            # Get the latest version
-            if candidates:
-                latest_candidate = max(candidates, key=lambda c: c.version)
-                latest_version = Version(str(latest_candidate.version))
-
-                # Create Package object with latest version
-                latest_package = Package(
-                    name=installed_pkg.name,
-                    version=latest_version
-                )
-
-                logger.debug(f"Found latest version for {installed_pkg.name}: {latest_version}")
-                return (installed_pkg, latest_package)
-
-        except Exception as e:
-            logger.warning(f"Error checking {installed_pkg.name}: {e}")
+    def worker(installed_pkg: InstalledPackage) -> Optional[InstalledPackage]:
+        """Fetch the latest version for one package via an isolated session."""
+        fetched = _fetch_latest_version(
+            installed_pkg,
+            include_prereleases=include_prereleases,
+            timeout=timeout,
+        )
+        if fetched is None:
             return None
 
-        return None
+        pkg, latest_pkg = fetched
+        with result_lock:
+            result[pkg] = latest_pkg
+        return pkg
 
     # Execute parallel queries
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        futures = {
-            executor.submit(check_package, pkg): pkg
-            for pkg in installed_packages
-        }
+        futures = [executor.submit(worker, pkg) for pkg in installed_packages]
 
-        # Process results as they complete
         for future in as_completed(futures):
-            result_tuple = future.result()
-
-            # Update result if package was found
-            if result_tuple:
-                installed_pkg, latest_pkg = result_tuple
-                with result_lock:
-                    result[installed_pkg] = latest_pkg
-
-            # Update progress
+            future.result()
             with progress_lock:
                 completed_count[0] += 1
                 if progress_callback:
@@ -1000,63 +1009,29 @@ def get_latest_versions(
     :raises ConnectionError: If unable to connect to package indexes
     :raises RuntimeError: If unable to load pip configuration
     """
-    session, package_finder = _build_pip_session(
-        timeout=timeout, include_prereleases=include_prereleases,
-    )
-
-    # Query latest version for each package
     result: Dict[InstalledPackage, Package] = {}
     total_packages = len(installed_packages)
 
     for idx, installed_pkg in enumerate(installed_packages):
-        # Report progress if callback provided
-        if progress_callback:
-            progress_callback(idx, total_packages)
-
         try:
-            # Get canonical name for querying
-            canonical_name = canonicalize_name(installed_pkg.name)
-
-            # Find all available versions
-            candidates = package_finder.find_all_candidates(canonical_name)
-
-            if not candidates:
-                logger.debug(f"No candidates found for {installed_pkg.name}")
-                continue
-
-            # Filter out pre-releases if not requested
-            if not include_prereleases:
-                stable_candidates = []
-                for candidate in candidates:
-                    try:
-                        version_obj = Version(str(candidate.version))
-                        if not version_obj.is_prerelease:
-                            stable_candidates.append(candidate)
-                    except InvalidVersion:
-                        continue
-
-                # Use stable candidates if available, otherwise use all
-                candidates = stable_candidates if stable_candidates else candidates
-
-            # Get the latest version
-            if candidates:
-                latest_candidate = max(candidates, key=lambda c: c.version)
-                latest_version = Version(str(latest_candidate.version))
-
-                # Create Package object with latest version
-                latest_package = Package(
-                    name=installed_pkg.name,
-                    version=latest_version
-                )
-
-                result[installed_pkg] = latest_package
-                logger.debug(f"Found latest version for {installed_pkg.name}: {latest_version}")
-
+            fetched = _fetch_latest_version(
+                installed_pkg,
+                include_prereleases=include_prereleases,
+                timeout=timeout,
+            )
+        except ConnectionError:
+            raise
         except Exception as e:
             logger.warning(f"Error checking {installed_pkg.name}: {e}")
-            continue
+            fetched = None
 
-    # Report completion
+        if fetched is not None:
+            pkg, latest_pkg = fetched
+            result[pkg] = latest_pkg
+
+        if progress_callback:
+            progress_callback(idx + 1, total_packages)
+
     if progress_callback:
         progress_callback(total_packages, total_packages)
 

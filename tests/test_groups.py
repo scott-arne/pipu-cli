@@ -7,6 +7,12 @@ from unittest.mock import patch
 import click
 import pytest
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore
+
+from pipu_cli import groups
 from pipu_cli.groups import (
     load_groups,
     save_groups,
@@ -248,3 +254,19 @@ class TestValidateGroupName:
     def test_accept_valid_group_name(self, good):
         """Valid group names pass without raising."""
         validate_group_name(good)  # no raise
+
+
+def test_save_groups_handles_quoted_and_windows_paths(tmp_path, monkeypatch):
+    groups_file = tmp_path / "groups.toml"
+    monkeypatch.setattr(groups, "GROUPS_FILE", groups_file)
+
+    sample_groups = {
+        "prod": [r"C:\\Program Files\\Python38\\python.exe", '/opt/"quoted"/python'],
+    }
+
+    groups.save_groups(sample_groups)
+
+    with open(groups_file, "rb") as fh:
+        parsed = tomllib.load(fh)
+
+    assert parsed["groups"]["prod"]["environments"] == sample_groups["prod"]

@@ -28,6 +28,25 @@ GROUPS_FILE = Path.home() / ".config" / "pipu" / "groups.toml"
 _GROUP_NAME_RE = re.compile(r"\A[A-Za-z0-9_.-]*[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
+def _toml_quote(value: str) -> str:
+    """Escape a string for a TOML basic-quoted scalar.
+
+    Handles the characters that would otherwise break parsing when the
+    stored path contains backslashes (Windows paths) or embedded double
+    quotes.
+
+    :param value: Raw string to serialize.
+    :returns: The TOML basic-string literal, including surrounding quotes.
+    """
+    escape_map = {
+        "\\": "\\\\",
+        '"': '\\"',
+        "\r": "\\r",
+        "\n": "\\n",
+    }
+    return '"' + "".join(escape_map.get(ch, ch) for ch in value) + '"'
+
+
 def validate_group_name(name: str) -> None:
     """Validate a group name against the allowed character set.
 
@@ -81,7 +100,7 @@ def save_groups(groups: Dict[str, List[str]]) -> None:
         lines.append(f"[groups.{name}]")
         lines.append("environments = [")
         for env_path in environments:
-            lines.append(f'    "{env_path}",')
+            lines.append(f"    {_toml_quote(env_path)},")
         lines.append("]")
         lines.append("")
 

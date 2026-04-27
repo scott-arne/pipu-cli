@@ -97,7 +97,7 @@ from pipu_cli.cache import (
 
 
 # Configure rich_click
-click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
 click.rich_click.OPTION_GROUPS = {

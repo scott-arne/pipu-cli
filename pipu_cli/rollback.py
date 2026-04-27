@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -49,8 +50,10 @@ def save_state(packages: List[Dict[str, str]], description: str = "") -> Path:
     """
     ROLLBACK_DIR.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    state_file = ROLLBACK_DIR / f"state_{timestamp}.json"
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    suffix = f"{time.time_ns()}"
+    state_file = ROLLBACK_DIR / f"state_{timestamp}_{suffix}.json"
 
     state = {
         "timestamp": timestamp,

@@ -177,6 +177,12 @@ def run_pip(
         if interrupt_token.is_set():
             interrupt_token.deregister(proc)
             _cleanup(proc)
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
             return PipResult(returncode=-1, stdout="", stderr="", interrupted=True)
 
     stdout_buf: list[str] = []

@@ -4,6 +4,7 @@ import json
 import subprocess
 from unittest.mock import patch
 
+from pipu_cli import rollback
 from pipu_cli.rollback import save_state, get_latest_state, rollback_to_state
 
 
@@ -62,3 +63,15 @@ def test_rollback_to_state_surfaces_pip_failures(monkeypatch):
     assert result.failed[0].spec == "broken-pkg==9.9.9"
     reason = result.failed[0].reason or ""
     assert "no such distribution" in reason or "pip exit code 1" in reason
+
+
+def test_save_state_generates_unique_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(rollback, "ROLLBACK_DIR", tmp_path)
+    payload = [{"name": "demo", "version": "1.0.0"}]
+
+    first = rollback.save_state(payload, "first")
+    second = rollback.save_state(payload, "second")
+
+    assert first != second
+    stored = sorted(tmp_path.glob("state_*.json"))
+    assert len(stored) == 2
