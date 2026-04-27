@@ -8,6 +8,7 @@ import pytest
 
 from packaging.version import Version
 
+from pipu_cli import package_management
 from pipu_cli.package_management import (
     InstalledPackage,
     Package,
@@ -1189,6 +1190,51 @@ https://internal.pypi.org/simple/
         assert all(not url.startswith('#') for url in index_urls)
 
     assert len(result) == 1
+
+
+def test_get_latest_versions_parallel_closes_sessions(monkeypatch):
+    installed_pkg = package_management.InstalledPackage(
+        name="demo",
+        version=Version("1.0.0"),
+    )
+    closed = []
+
+    class FakeSession:
+        def close(self):
+            closed.append(True)
+
+    class FakeFinder:
+        def find_all_candidates(self, canonical_name):
+            return []
+
+    def fake_build_session(*, timeout, include_prereleases=False):
+        return FakeSession(), FakeFinder()
+
+    monkeypatch.setattr(package_management, "_build_pip_session", fake_build_session)
+
+    package_management.get_latest_versions_parallel([installed_pkg])
+
+    assert closed == [True]
+
+
+def test_get_latest_versions_reports_progress_after_each_package(monkeypatch):
+    pkgs = [
+        package_management.InstalledPackage(name=f"pkg{i}", version=Version("1.0.0"))
+        for i in range(3)
+    ]
+    callback_calls = []
+
+    def fake_fetch(installed_pkg, *, include_prereleases, timeout):
+        return installed_pkg, package_management.Package(installed_pkg.name, Version("1.2.0"))
+
+    monkeypatch.setattr(package_management, "_fetch_latest_version", fake_fetch)
+
+    package_management.get_latest_versions(
+        pkgs,
+        progress_callback=lambda current, total: callback_calls.append((current, total)),
+    )
+
+    assert callback_calls == [(1, 3), (2, 3), (3, 3), (3, 3)]
 
 
 # ============================================================================
