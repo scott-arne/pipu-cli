@@ -710,6 +710,7 @@ def print_group_install_matrix(
     package_names: List[str],
     env_names: Dict[str, str],
     upgrade: bool = True,
+    target_versions: Optional[Dict[str, Version]] = None,
     console: Optional[Console] = None,
 ) -> None:
     """Print a matrix showing install plan across environments.
@@ -718,6 +719,8 @@ def print_group_install_matrix(
     :param package_names: Original package spec strings.
     :param env_names: Dict of short name -> full path.
     :param upgrade: Whether -U flag will be used.
+    :param target_versions: Optional original package spec -> latest
+        resolved target version. Used for upgrade previews.
     :param console: Optional Rich console.
     """
     if console is None:
@@ -733,15 +736,32 @@ def print_group_install_matrix(
 
     for pkg_spec in package_names:
         row = [pkg_spec]
+        target_version = target_versions.get(pkg_spec) if target_versions else None
         for env_name in env_order:
             cur_ver = env_versions.get(env_name, {}).get(pkg_spec)
             if cur_ver is not None:
                 if upgrade:
-                    row.append(f"{cur_ver} -> [{_SUCCESS}]latest[/{_SUCCESS}]")
+                    if target_version is None:
+                        row.append(f"{cur_ver} -> [{_SUCCESS}]unknown[/{_SUCCESS}]")
+                    elif target_version > cur_ver:
+                        row.append(
+                            f"{cur_ver} -> [{_SUCCESS}]{target_version}[/{_SUCCESS}] "
+                            "[dim](latest)[/dim]"
+                        )
+                    else:
+                        row.append(
+                            f"{cur_ver} [dim](latest: {target_version})[/dim]"
+                        )
                 else:
                     row.append(f"[dim]{cur_ver} (installed)[/dim]")
             else:
-                row.append(f"[{_SUCCESS}]new[/{_SUCCESS}]")
+                if upgrade and target_version is not None:
+                    row.append(
+                        f"[{_SUCCESS}]{target_version}[/{_SUCCESS}] "
+                        "[dim](new, latest)[/dim]"
+                    )
+                else:
+                    row.append(f"[{_SUCCESS}]new[/{_SUCCESS}]")
         table.add_row(*row)
 
     console.print(table)

@@ -7,7 +7,17 @@ from unittest.mock import Mock
 from rich.console import Console
 from packaging.version import Version
 
-from pipu_cli.pretty import ConsoleStream, _parse_selection, print_upgrade_results, print_blocked_packages_table, extract_env_short_name, print_env_legend, print_group_upgrade_matrix, print_group_blocked_table
+from pipu_cli.pretty import (
+    ConsoleStream,
+    _parse_selection,
+    extract_env_short_name,
+    print_blocked_packages_table,
+    print_env_legend,
+    print_group_blocked_table,
+    print_group_install_matrix,
+    print_group_upgrade_matrix,
+    print_upgrade_results,
+)
 from pipu_cli.package_management import UpgradedPackage, BlockedPackageInfo, UpgradePackageInfo
 
 
@@ -287,3 +297,25 @@ class TestGroupBlockedTable:
         assert "scipy" in output
         assert "ml" in output
         assert "numpy" in output
+
+
+class TestGroupInstallMatrix:
+    """Tests for the consolidated group install preview table."""
+
+    def test_upgrade_plan_shows_latest_version_number(self):
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120)
+
+        print_group_install_matrix(
+            {"main": {"requests": Version("2.28.0")}},
+            ["requests"],
+            {"main": "/path/main/bin/python"},
+            upgrade=True,
+            target_versions={"requests": Version("2.31.0")},
+            console=console,
+        )
+
+        output = buf.getvalue()
+        assert "2.28.0" in output
+        assert "2.31.0" in output
+        assert "-> latest" not in output

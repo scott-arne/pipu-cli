@@ -2965,6 +2965,40 @@ class TestPythonPathInspection:
         }
 
 
+class TestOrphanMetadataDetection:
+    """Tests for local orphan metadata classification."""
+
+    def test_compat_editable_source_egg_info_is_not_orphan(self, monkeypatch):
+        """Editable ``.egg-info`` in the source tree is valid metadata."""
+        from pipu_cli.package_management import _detect_local_orphan_metadata
+
+        class PipDist:
+            metadata = {"Name": "my-pkg"}
+            version = "1.0.0"
+            location = "/venv/lib/python3.13/site-packages"
+            editable_project_location = "/src/my-pkg"
+
+        class PipEnv:
+            def iter_all_distributions(self):
+                return [PipDist()]
+
+        class ImportlibDist:
+            metadata = {"Name": "my-pkg"}
+            version = "1.0.0"
+            _path = "/src/my-pkg/my_pkg.egg-info"
+
+        monkeypatch.setattr(
+            "pipu_cli.package_management.get_default_environment",
+            lambda: PipEnv(),
+        )
+        monkeypatch.setattr(
+            "importlib.metadata.distributions",
+            lambda: [ImportlibDist()],
+        )
+
+        assert _detect_local_orphan_metadata() == {}
+
+
 class TestPythonPathInstallation:
     """Tests for install/reinstall with python_path."""
 

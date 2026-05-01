@@ -22,6 +22,7 @@ from pipu_cli._group_runner import GroupContext, prepare_group, run_per_env_para
 from pipu_cli._subprocess import InterruptToken
 from pipu_cli.package_management import (
     BlockedPackageInfo,
+    InstalledPackage,
     Package,
     build_dep_report,
     build_env_report,
@@ -2610,6 +2611,61 @@ def _install_single_env(
         return []
 
 
+def _resolve_group_install_target_versions(
+    packages: tuple,
+    *,
+    timeout: int,
+    pre: bool,
+) -> dict[str, Version]:
+    """Resolve latest package versions for the group install preview.
+
+    :param packages: User-supplied package specs.
+    :param timeout: Network timeout for package index queries.
+    :param pre: Include pre-release versions when resolving latest.
+    :returns: Original package spec -> latest version.
+    """
+    probes: list[InstalledPackage] = []
+    specs_by_name: dict[str, str] = {}
+    for spec in packages:
+        try:
+            parsed = parse_package_spec(spec)
+        except ValueError:
+            continue
+        canonical = canonicalize_name(parsed.name)
+        if canonical in specs_by_name:
+            continue
+        specs_by_name[canonical] = spec
+        probes.append(
+            InstalledPackage(
+                name=parsed.name,
+                version=Version("0"),
+                constrained_dependencies={},
+            )
+        )
+
+    if not probes:
+        return {}
+
+    try:
+        latest_versions = get_latest_versions(
+            probes,
+            timeout=timeout,
+            include_prereleases=pre,
+        )
+    except Exception as e:
+        logging.getLogger(__name__).debug(
+            "Could not resolve latest install targets for group preview: %s", e
+        )
+        return {}
+
+    targets: dict[str, Version] = {}
+    for package, latest in latest_versions.items():
+        spec = specs_by_name.get(canonicalize_name(package.name))
+        if spec is not None:
+            targets[spec] = latest.version
+    return targets
+
+
 def _run_group_install(
     group_name: str, console: Console, output: str,
     packages: tuple, no_update: bool, timeout: int,
@@ -2651,6 +2707,15 @@ def _run_group_install(
             if ui:
                 ui.complete_phase(f"{len(valid_envs)} environments inspected")
 
+            target_versions = (
+                _resolve_group_install_target_versions(
+                    packages,
+                    timeout=timeout,
+                    pre=pre,
+                )
+                if output != "json" and not no_update else {}
+            )
+
             # Phase 2: Show matrix and confirm
             if output != "json":
                 console.print()
@@ -2658,7 +2723,8 @@ def _run_group_install(
                 console.print()
                 print_group_install_matrix(
                     env_versions, list(packages), env_name_map,
-                    upgrade=not no_update, console=console,
+                    upgrade=not no_update, target_versions=target_versions,
+                    console=console,
                 )
 
                 if not yes:

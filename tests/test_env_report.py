@@ -85,6 +85,9 @@ def test_env_violates(make_installed_packages):
     assert len(violates) == 1
     assert violates[0].package == "urllib3"
     assert violates[0].required_by == "requests"
+    assert violates[0].detail == (
+        "urllib3 2.2.2 violates urllib3<2 required by requests"
+    )
 
 
 def test_env_broken_editable(make_installed_packages):

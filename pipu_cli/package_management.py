@@ -448,9 +448,10 @@ except ImportError:
 from pip._internal.metadata import get_default_environment
 
 # Raw view: importlib.metadata. Any path here that doesn't fall inside
-# a pip-reported location is orphaned metadata (stale .egg-info from a
-# deleted editable install, leftover .dist-info, etc.) — worth flagging
-# because it breaks tools that use importlib.metadata directly.
+# a pip-reported install or editable source location is orphaned
+# metadata (stale .egg-info from a deleted editable install, leftover
+# .dist-info, etc.) — worth flagging because it breaks tools that use
+# importlib.metadata directly.
 try:
     from importlib.metadata import distributions as _im_distributions
 except ImportError:
@@ -505,7 +506,11 @@ for dist in env.iter_all_distributions():
             constraints[canonicalize_name(req.name)] = str(req.specifier)
     packages.append({"name": name, "version": version, "constraints": constraints})
     canonical = canonicalize_name(name)
-    pip_locations.setdefault(canonical, []).append(str(getattr(dist, "location", "") or ""))
+    known_locations = pip_locations.setdefault(canonical, [])
+    known_locations.append(str(getattr(dist, "location", "") or ""))
+    editable_location = str(getattr(dist, "editable_project_location", "") or "")
+    if editable_location:
+        known_locations.append(editable_location)
 
 orphans = {}
 for dist in _im_distributions():
@@ -593,8 +598,14 @@ def _detect_local_orphan_metadata() -> Dict[str, List[Dict[str, str]]]:
             if not name:
                 continue
             canonical = canonicalize_name(name)
+            known_locations = pip_locations.setdefault(canonical, [])
             loc = str(getattr(dist, "location", "") or "")
-            pip_locations.setdefault(canonical, []).append(loc)
+            known_locations.append(loc)
+            editable_location = str(
+                getattr(dist, "editable_project_location", "") or ""
+            )
+            if editable_location:
+                known_locations.append(editable_location)
     except Exception as e:
         logger.debug(f"Could not enumerate pip environment for orphan check: {e}")
         return {}
@@ -2183,7 +2194,10 @@ def _collect_problems_over_edges(
                 emit(DepProblem(
                     kind="violates",
                     package=e.owner_name,
-                    detail=f"{e.owner_name} {e.owner_version} violates {e.constraint_source}{e.specifier}",
+                    detail=(
+                        f"{e.owner_name} {e.owner_version} violates "
+                        f"{e.owner_name}{e.specifier} required by {e.constraint_source}"
+                    ),
                     required_by=e.constraint_source,
                     specifier=e.specifier,
                     installed_version=e.owner_version,

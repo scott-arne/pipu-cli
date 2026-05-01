@@ -712,6 +712,43 @@ class TestInstallCommand:
         assert "/python/a" in paths
         assert "/python/b" in paths
 
+    def test_install_group_preview_shows_latest_version_number(self, runner):
+        """Group install preview shows the resolved latest version, not only an alias."""
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        results = [
+            InstalledResult(
+                name="requests",
+                version=Version("2.31.0"),
+                installed=True,
+                previous_version=Version("2.28.0"),
+            )
+        ]
+
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a"]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch(
+                 "pipu_cli.cli.get_latest_versions",
+                 return_value={installed[0]: Mock(version=Version("2.31.0"))},
+             ), \
+             patch("pipu_cli.cli.run_pip_install", return_value=results):
+            result = runner.invoke(
+                cli,
+                ["install", "requests", "-g", "mygroup", "--yes", "--no-check"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "2.28.0" in result.output
+        assert "2.31.0" in result.output
+        assert "-> latest" not in result.output
+
     def test_install_failure_exits_nonzero(self, runner):
         """install exits 1 when packages fail to install."""
         results = [

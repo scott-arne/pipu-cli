@@ -22,6 +22,7 @@ from pipu_cli.fixer import (
     _extract_orphan_path,
 )
 from pipu_cli.package_management import (
+    build_env_report,
     DepProblem,
     EnvReport,
     get_orphan_metadata,
@@ -216,6 +217,31 @@ def _collect_rollback_snapshot(python_path: Optional[str]) -> List[Dict[str, str
     return [{"name": p.name, "version": str(p.version)} for p in pkgs]
 
 
+def _post_fix_violation_failures(report: EnvReport) -> List[FixResult]:
+    """Convert post-fix ``violates`` findings into failed fix results.
+
+    :param report: Fresh environment report collected after at least one
+        ``violates`` install succeeded.
+    :returns: Failure results for unresolved version conflicts.
+    """
+    failures: List[FixResult] = []
+    for problem in report.problems:
+        if problem.kind != "violates":
+            continue
+        target = f"{problem.package}{problem.specifier or ''}"
+        failures.append(FixResult(
+            problem=problem,
+            action="install",
+            target=target,
+            status="failed",
+            detail=(
+                "constraint still violated after fixes; resolve the "
+                "dependency set manually or run `pipu rollback`"
+            ),
+        ))
+    return failures
+
+
 def run_fix(
     *,
     report: EnvReport,
@@ -320,6 +346,18 @@ def run_fix(
         if output == "human" and group_results:
             # All group_results share status/target; show one streaming line.
             render_fix_line(console, group_results[0])
+
+    violates_install_succeeded = any(
+        f.problem.kind == "violates" and f.status == "succeeded"
+        for f in fixes
+    )
+    if violates_install_succeeded:
+        post_report = build_env_report(python_path=plan.python_path)
+        post_fix_failures = _post_fix_violation_failures(post_report)
+        fixes.extend(post_fix_failures)
+        if output == "human":
+            for failure in post_fix_failures:
+                render_fix_line(console, failure)
 
     # Unfixable problems: surface in the flat results list (summary only).
     for problem in plan.unfixable:

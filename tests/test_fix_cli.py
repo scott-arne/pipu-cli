@@ -196,6 +196,14 @@ def test_run_fix_auto_mode_all_succeed(monkeypatch):
         "pipu_cli._fix_cli.inspect_installed_packages",
         lambda **kw: [],
     )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.build_env_report",
+        lambda **kw: EnvReport(
+            python_path=kw.get("python_path"),
+            package_count=0,
+            problems=[],
+        ),
+    )
 
     report = _env_report_with(
         DepProblem(kind="stale-metadata", package="foo",
@@ -270,6 +278,68 @@ def test_run_fix_failed_install_sets_exit_1(monkeypatch):
     )
     assert exit_code == 1
     assert fixes[0].status == "failed"
+
+
+def test_run_fix_fails_when_post_fix_check_still_has_violates(monkeypatch):
+    monkeypatch.setattr("pipu_cli._fix_cli.save_state", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.inspect_installed_packages",
+        lambda **kw: [],
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.run_pip_install",
+        lambda **kw: [InstalledResult(
+            name="opentelemetry-semantic-conventions",
+            version=Version("0.60b1"),
+            installed=True,
+            previous_version=Version("0.62b1"),
+            failure_reason=None,
+        )],
+    )
+
+    post_fix_problem = DepProblem(
+        kind="violates",
+        package="opentelemetry-semantic-conventions",
+        detail=(
+            "opentelemetry-semantic-conventions 0.60b1 violates "
+            "opentelemetry-instrumentation==0.62b1"
+        ),
+        required_by="opentelemetry-instrumentation",
+        specifier="==0.62b1",
+        installed_version=Version("0.60b1"),
+    )
+    monkeypatch.setattr(
+        "pipu_cli._fix_cli.build_env_report",
+        lambda **kw: EnvReport(
+            python_path=kw.get("python_path"),
+            package_count=376,
+            problems=[post_fix_problem],
+        ),
+    )
+
+    report = _env_report_with(
+        DepProblem(
+            kind="violates",
+            package="opentelemetry-semantic-conventions",
+            detail=(
+                "opentelemetry-semantic-conventions 0.62b1 violates "
+                "mistralai<0.61,>=0.60b1"
+            ),
+            required_by="mistralai",
+            specifier="<0.61,>=0.60b1",
+            installed_version=Version("0.62b1"),
+        ),
+    )
+    console, _buf = _console_with_buf()
+    fixes, exit_code = run_fix(
+        report=report, console=console, output="human", interactive=False,
+    )
+
+    assert exit_code == 1
+    assert [f.status for f in fixes] == ["succeeded", "failed"]
+    assert fixes[1].problem == post_fix_problem
+    assert fixes[1].target == "opentelemetry-semantic-conventions==0.62b1"
+    assert "after fixes" in (fixes[1].detail or "")
 
 
 def test_run_fix_unfixable_does_not_change_exit(monkeypatch):
