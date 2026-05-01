@@ -29,6 +29,7 @@ from pipu_cli.package_management import (
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
+    get_target_constraints_for_disputed_upgrades,
     parse_package_spec,
     PackageNotInstalledError,
     resolve_upgradable_packages,
@@ -632,6 +633,10 @@ def _step3_resolve_packages(
     latest_versions: dict, installed_packages: list, show_blocked: bool,
     exclude: str, packages: tuple, total_steps: int = 5,
     ui: Optional[UpgradeUI] = None,
+    metadata_timeout: Optional[int] = None,
+    pre: bool = False,
+    python_path: Optional[str] = None,
+    target_constraints_cache: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> tuple[list, list, dict, float]:
     """Step 3: Resolve upgradable packages and apply filters."""
     if output != "json":
@@ -641,12 +646,25 @@ def _step3_resolve_packages(
             console.print(f"\n[bold]Step 3/{total_steps}:[/bold] Resolving dependency constraints...")
     step_start = time.time()
 
+    target_constraints = None
+    if metadata_timeout is not None:
+        target_constraints = get_target_constraints_for_disputed_upgrades(
+            latest_versions,
+            installed_packages,
+            timeout=metadata_timeout,
+            include_prereleases=pre,
+            python_path=python_path,
+            constraints_cache=target_constraints_cache,
+        )
+
     if show_blocked:
         upgradable_packages, blocked_packages = resolve_upgradable_packages_with_reasons(
-            latest_versions, installed_packages
+            latest_versions, installed_packages, target_constraints=target_constraints,
         )
     else:
-        all_upgradable = resolve_upgradable_packages(latest_versions, installed_packages)
+        all_upgradable = resolve_upgradable_packages(
+            latest_versions, installed_packages, target_constraints=target_constraints,
+        )
         upgradable_packages = [pkg for pkg in all_upgradable if pkg.upgradable]
         blocked_packages = []
 
@@ -994,7 +1012,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             # Step 3: Resolve upgradable packages
             can_upgrade, blocked_packages, package_constraints, step3_time = _step3_resolve_packages(
                 console, output, debug, latest_versions, installed_packages, show_blocked,
-                exclude_str, packages, ui=ui,
+                exclude_str, packages, ui=ui, metadata_timeout=timeout, pre=pre,
             )
 
             if not can_upgrade:
@@ -1222,7 +1240,7 @@ def outdated(ctx, timeout, pre, debug, exclude, show_blocked, output, parallel, 
         # Step 3: Resolve
         can_upgrade, blocked_packages, _, step3_time = _step3_resolve_packages(
             console, output, debug, latest_versions, installed_packages, show_blocked,
-            exclude_str, (), total_steps=3
+            exclude_str, (), total_steps=3, metadata_timeout=timeout, pre=pre,
         )
 
         # Display results
@@ -2077,12 +2095,26 @@ def _run_group_upgrade(
 
             for env_name, installed in env_installed.items():
                 env_latest = {pkg: latest_by_name[pkg.name.lower()] for pkg in installed if pkg.name.lower() in latest_by_name}
+                target_constraints = get_target_constraints_for_disputed_upgrades(
+                    env_latest,
+                    installed,
+                    timeout=timeout,
+                    include_prereleases=pre,
+                    python_path=env_name_map[env_name],
+                )
                 if show_blocked:
-                    upgradable, blocked = resolve_upgradable_packages_with_reasons(env_latest, installed)
+                    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+                        env_latest, installed, target_constraints=target_constraints,
+                    )
                     for b in blocked:
                         all_blocked.append((env_name, b))
                 else:
-                    upgradable = [p for p in resolve_upgradable_packages(env_latest, installed) if p.upgradable]
+                    upgradable = [
+                        p for p in resolve_upgradable_packages(
+                            env_latest, installed, target_constraints=target_constraints,
+                        )
+                        if p.upgradable
+                    ]
 
                 # Apply exclusions and package filters
                 excluded_names = set()
@@ -2361,7 +2393,8 @@ def _outdated_single_env(
 
         can_upgrade, blocked_packages, _, _ = _step3_resolve_packages(
             console, output, debug, latest_versions, installed_packages,
-            show_blocked, exclude_str, (), total_steps=3
+            show_blocked, exclude_str, (), total_steps=3,
+            metadata_timeout=timeout, pre=pre, python_path=env_path,
         )
 
         if output != "json":

@@ -6,9 +6,13 @@ import os.path
 import re
 import subprocess
 import sys
+import tempfile
 import threading
+import zipfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from email.parser import Parser
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, runtime_checkable
 
 from packaging.utils import canonicalize_name
@@ -786,6 +790,183 @@ def _extract_constrained_dependencies(dist: Any) -> Dict[str, str]:
     return constrained_dependencies
 
 
+class _MetadataTextDistribution:
+    """Distribution-like adapter for package metadata text."""
+
+    def __init__(self, metadata_text: str) -> None:
+        self.metadata = Parser().parsestr(metadata_text)
+
+
+def _extract_constrained_dependencies_from_metadata_text(
+    metadata_text: str,
+) -> Dict[str, str]:
+    """Extract constrained dependencies from raw package metadata text.
+
+    :param metadata_text: Contents of a wheel ``METADATA`` file.
+    :returns: Canonical dependency name -> specifier string.
+    """
+    return _extract_constrained_dependencies(
+        _MetadataTextDistribution(metadata_text)
+    )
+
+
+def _extract_wheel_constraints(wheel_path: Path) -> Optional[Dict[str, str]]:
+    """Extract constrained dependencies from a downloaded wheel.
+
+    :param wheel_path: Path to a ``.whl`` file.
+    :returns: Constraints from ``*.dist-info/METADATA``, or ``None`` if
+        the metadata cannot be found or parsed.
+    """
+    try:
+        with zipfile.ZipFile(wheel_path) as archive:
+            metadata_names = [
+                name for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
+            if not metadata_names:
+                return None
+            metadata_text = archive.read(metadata_names[0]).decode(
+                "utf-8", errors="replace"
+            )
+            return _extract_constrained_dependencies_from_metadata_text(
+                metadata_text
+            )
+    except Exception as e:
+        logger.debug("Could not read wheel metadata from %s: %s", wheel_path, e)
+        return None
+
+
+def _download_target_package_constraints(
+    package: Package,
+    *,
+    timeout: int = 300,
+    include_prereleases: bool = False,
+    python_path: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """Download a target wheel and extract its dependency constraints.
+
+    Only wheels are accepted. Source distributions can have dynamic
+    dependencies that are not reliably visible without a build, so they
+    are treated as unavailable and the caller can fail closed.
+
+    :param package: Target package/version to inspect.
+    :param timeout: ``pip download`` timeout in seconds.
+    :param include_prereleases: Include pre-release candidates.
+    :param python_path: Python interpreter used to run pip.
+    :returns: Target dependency constraints, or ``None`` if unavailable.
+    """
+    executable = python_path or sys.executable
+    spec = f"{package.name}=={package.version}"
+    with tempfile.TemporaryDirectory(prefix="pipu-metadata-") as tmp_dir:
+        dest_dir = Path(tmp_dir)
+        cmd = [
+            executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            str(dest_dir),
+            "--no-deps",
+            "--only-binary=:all:",
+        ]
+        if include_prereleases:
+            cmd.append("--pre")
+        cmd.append(spec)
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+        except Exception as e:
+            logger.debug("Could not download metadata target %s: %s", spec, e)
+            return None
+
+        if result.returncode != 0:
+            logger.debug(
+                "Could not download metadata target %s: %s",
+                spec,
+                (result.stderr or result.stdout or "").strip(),
+            )
+            return None
+
+        wheels = sorted(dest_dir.glob("*.whl"))
+        if not wheels:
+            return None
+        return _extract_wheel_constraints(wheels[0])
+
+
+def _find_disputed_target_packages(
+    upgrade_candidates: Dict[InstalledPackage, Package],
+    all_installed: List[InstalledPackage],
+) -> Dict[str, Package]:
+    """Find upgrading packages whose target metadata is needed for safety."""
+    actual_upgrades: Dict[str, tuple[InstalledPackage, Package]] = {
+        canonicalize_name(pkg.name): (pkg, latest_pkg)
+        for pkg, latest_pkg in upgrade_candidates.items()
+        if latest_pkg.version > pkg.version
+    }
+    if not actual_upgrades:
+        return {}
+
+    disputed: Dict[str, Package] = {}
+    for constrained_name, (_installed_pkg, latest_pkg) in actual_upgrades.items():
+        for constraining_pkg in all_installed:
+            constraining_name = canonicalize_name(constraining_pkg.name)
+            if constraining_name not in actual_upgrades:
+                continue
+            specifier_str = constraining_pkg.constrained_dependencies.get(
+                constrained_name
+            )
+            if not specifier_str:
+                continue
+            try:
+                if latest_pkg.version in SpecifierSet(specifier_str):
+                    continue
+            except InvalidSpecifier:
+                pass
+            disputed[constraining_name] = actual_upgrades[constraining_name][1]
+    return disputed
+
+
+def get_target_constraints_for_disputed_upgrades(
+    upgrade_candidates: Dict[InstalledPackage, Package],
+    all_installed: List[InstalledPackage],
+    *,
+    timeout: int = 300,
+    include_prereleases: bool = False,
+    python_path: Optional[str] = None,
+    constraints_cache: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
+) -> Dict[str, Optional[Dict[str, str]]]:
+    """Fetch target constraints only where an upgrade would violate a current pin.
+
+    :param upgrade_candidates: Installed package -> target package.
+    :param all_installed: Full installed package list for the environment.
+    :param timeout: Metadata download timeout.
+    :param include_prereleases: Include pre-release targets.
+    :param python_path: Python interpreter used to run pip.
+    :param constraints_cache: Optional mutable cache keyed by canonical
+        package name for compatible resolver calls.
+    :returns: Canonical package name -> target constraints, or ``None``
+        when target metadata was unavailable.
+    """
+    disputed = _find_disputed_target_packages(upgrade_candidates, all_installed)
+    if not disputed:
+        return {}
+
+    cache = constraints_cache if constraints_cache is not None else {}
+    result: Dict[str, Optional[Dict[str, str]]] = {}
+    for canonical_name, package in disputed.items():
+        if canonical_name not in cache:
+            cache[canonical_name] = _download_target_package_constraints(
+                package,
+                timeout=timeout,
+                include_prereleases=include_prereleases,
+                python_path=python_path,
+            )
+        result[canonical_name] = cache[canonical_name]
+    return result
+
+
 def _build_pip_session(
     *, timeout: int, include_prereleases: bool = False,
 ) -> tuple[PipSession, PackageFinder]:
@@ -1051,7 +1232,8 @@ def get_latest_versions(
 
 def resolve_upgradable_packages(
     upgrade_candidates: Dict[InstalledPackage, Package],
-    all_installed: List[InstalledPackage]
+    all_installed: List[InstalledPackage],
+    target_constraints: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> List[UpgradePackageInfo]:
     """Resolve upgradable packages, discarding block reasons.
 
@@ -1061,10 +1243,13 @@ def resolve_upgradable_packages(
 
     :param upgrade_candidates: Dict mapping installed packages to their latest available versions.
     :param all_installed: List of all installed packages (for constraint checking).
+    :param target_constraints: Optional canonical package name -> target
+        version constraints. ``None`` for a package means target metadata
+        could not be inspected, so disputed dependency upgrades fail closed.
     :returns: List of UpgradePackageInfo objects, each flagged upgradable or not.
     """
     upgradable, _blocked = resolve_upgradable_packages_with_reasons(
-        upgrade_candidates, all_installed
+        upgrade_candidates, all_installed, target_constraints=target_constraints,
     )
     # Preserve prior contract: return one entry per candidate with
     # upgradable flag set. _with_reasons returns only truly upgradable
@@ -1087,7 +1272,8 @@ def resolve_upgradable_packages(
 
 def resolve_upgradable_packages_with_reasons(
     upgrade_candidates: Dict[InstalledPackage, Package],
-    all_installed: List[InstalledPackage]
+    all_installed: List[InstalledPackage],
+    target_constraints: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> tuple[List[UpgradePackageInfo], List[BlockedPackageInfo]]:
     """
     Resolve upgradable packages and provide detailed blocking reasons.
@@ -1096,6 +1282,11 @@ def resolve_upgradable_packages_with_reasons(
 
     :param upgrade_candidates: Dict mapping installed packages to their latest available versions
     :param all_installed: List of all installed packages (for constraint checking)
+    :param target_constraints: Optional canonical package name -> target
+        version constraints. When a currently constraining package is also
+        upgrading, these target constraints determine whether the disputed
+        dependency upgrade remains safe. ``None`` means target metadata
+        was unavailable, so the disputed dependency upgrade is blocked.
     :returns: Tuple of (upgradable_packages, blocked_packages_with_reasons)
     """
     # Build a reverse dependency map
@@ -1116,6 +1307,55 @@ def resolve_upgradable_packages_with_reasons(
 
     # Track blocking reasons for each package
     blocking_reasons: Dict[str, List[str]] = {}
+
+    normalized_target_constraints: Optional[Dict[str, Optional[Dict[str, str]]]]
+    if target_constraints is None:
+        normalized_target_constraints = None
+    else:
+        normalized_target_constraints = {}
+        for pkg_name, constraints in target_constraints.items():
+            canonical_pkg = canonicalize_name(pkg_name)
+            if constraints is None:
+                normalized_target_constraints[canonical_pkg] = None
+                continue
+            normalized_target_constraints[canonical_pkg] = {
+                canonicalize_name(dep_name): specifier
+                for dep_name, specifier in constraints.items()
+            }
+
+    def block(canonical_name: str, reason: str) -> None:
+        packages_to_remove.add(canonical_name)
+        if canonical_name not in blocking_reasons:
+            blocking_reasons[canonical_name] = []
+        blocking_reasons[canonical_name].append(reason)
+
+    def target_allows(
+        *,
+        constraining_pkg: InstalledPackage,
+        constrained_name: str,
+        constrained_version: Version,
+    ) -> tuple[bool, Optional[str]]:
+        """Return whether target metadata keeps the dependency upgrade safe."""
+        if normalized_target_constraints is None:
+            return True, None
+
+        constraining_canonical = canonicalize_name(constraining_pkg.name)
+        target = normalized_target_constraints.get(constraining_canonical)
+        if target is None:
+            return False, f"{constraining_pkg.name} target metadata unavailable"
+
+        target_specifier_str = target.get(constrained_name)
+        if not target_specifier_str:
+            return True, None
+
+        try:
+            target_specifier = SpecifierSet(target_specifier_str)
+        except InvalidSpecifier:
+            return False, f"{constraining_pkg.name} target constraint invalid"
+
+        if constrained_version in target_specifier:
+            return True, None
+        return False, f"{constraining_pkg.name} target requires {target_specifier_str}"
 
     # Fixed-point iteration
     upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
@@ -1141,20 +1381,23 @@ def resolve_upgradable_packages_with_reasons(
                         if not satisfies:
                             constraining_canonical = canonicalize_name(constraining_pkg.name)
                             if constraining_canonical not in upgrading_packages:
-                                packages_to_remove.add(canonical_name)
-                                reason = f"{constraining_pkg.name} requires {specifier_str}"
-                                if canonical_name not in blocking_reasons:
-                                    blocking_reasons[canonical_name] = []
-                                blocking_reasons[canonical_name].append(reason)
+                                block(canonical_name, f"{constraining_pkg.name} requires {specifier_str}")
+                                break
+                            target_safe, target_reason = target_allows(
+                                constraining_pkg=constraining_pkg,
+                                constrained_name=canonical_name,
+                                constrained_version=latest_version,
+                            )
+                            if not target_safe:
+                                block(canonical_name, target_reason or "Unknown constraint")
                                 break
                     except (InvalidSpecifier, Exception):
                         constraining_canonical = canonicalize_name(constraining_pkg.name)
                         if constraining_canonical not in upgrading_packages:
-                            packages_to_remove.add(canonical_name)
-                            reason = f"{constraining_pkg.name} (invalid constraint)"
-                            if canonical_name not in blocking_reasons:
-                                blocking_reasons[canonical_name] = []
-                            blocking_reasons[canonical_name].append(reason)
+                            block(canonical_name, f"{constraining_pkg.name} (invalid constraint)")
+                            break
+                        if normalized_target_constraints is not None:
+                            block(canonical_name, f"{constraining_pkg.name} target metadata unavailable")
                             break
 
         if not packages_to_remove:

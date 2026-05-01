@@ -2,13 +2,16 @@
 
 import json
 import sys
+from io import StringIO
 import click
 import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, Mock
 
 from packaging.version import Version
+from rich.console import Console
 from pipu_cli.cli import cli
+import pipu_cli.cli as cli_module
 from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo, InstalledResult
 from pipu_cli.rollback import PackageRollbackOutcome, RollbackResult
 
@@ -443,6 +446,46 @@ def test_outdated_shows_blocked_by_default(runner):
         assert result.exit_code == 0
 
 
+def test_step3_uses_target_constraints_for_resolution(monkeypatch):
+    """Step 3 fetches target metadata and passes it to the resolver."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b",
+        version=Version("2.0.0"),
+        constrained_dependencies={},
+        is_editable=False,
+    )
+    latest_versions = {
+        installed_a: Mock(version=Version("2.0.0")),
+        installed_b: Mock(version=Version("3.5.0")),
+    }
+
+    monkeypatch.setattr(
+        "pipu_cli.cli.get_target_constraints_for_disputed_upgrades",
+        lambda *args, **kwargs: {"package-a": {"package-b": "<3.0"}},
+    )
+
+    can_upgrade, blocked_packages, _, _ = cli_module._step3_resolve_packages(
+        Console(file=StringIO()),
+        "human",
+        False,
+        latest_versions,
+        [installed_a, installed_b],
+        True,
+        "",
+        (),
+        metadata_timeout=10,
+    )
+
+    assert [pkg.name for pkg in can_upgrade] == ["package-a"]
+    assert [pkg.name for pkg in blocked_packages] == ["package-b"]
+
+
 def test_rollback_list_json_output(runner):
     """Test pipu rollback --list --output json returns valid JSON."""
     mock_states = [
@@ -595,6 +638,89 @@ class TestGroupExecution:
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
 
         assert "upgrades across" in result.output.lower() or "no packages can be upgraded" in result.output.lower()
+
+    def test_upgrade_group_uses_target_constraints_per_environment(self, runner):
+        """Group upgrades must not leak one env's safe target into another env."""
+        env_a_path = "/tmp/envA/bin/python"
+        env_b_path = "/tmp/envB/bin/python"
+        env_a_package = InstalledPackage(
+            name="package1",
+            version=Version("0.9"),
+            is_editable=False,
+            constrained_dependencies={},
+        )
+        env_b_constrainer = InstalledPackage(
+            name="package-a",
+            version=Version("1.0"),
+            is_editable=False,
+            constrained_dependencies={"package1": "<1"},
+        )
+        env_b_package = InstalledPackage(
+            name="package1",
+            version=Version("0.9"),
+            is_editable=False,
+            constrained_dependencies={},
+        )
+        seen_metadata_envs = []
+        captured_env_specs = {}
+
+        def fake_inspect(*_args, **kwargs):
+            if kwargs["python_path"] == env_a_path:
+                return [env_a_package]
+            if kwargs["python_path"] == env_b_path:
+                return [env_b_constrainer, env_b_package]
+            return []
+
+        def fake_latest(installed, **_kwargs):
+            versions = {
+                "package1": Version("1.0"),
+                "package-a": Version("2.0"),
+            }
+            return {
+                pkg: Mock(name=pkg.name, version=versions[pkg.name])
+                for pkg in installed
+                if pkg.name in versions
+            }
+
+        def fake_target_constraints(_candidates, installed, **kwargs):
+            seen_metadata_envs.append(kwargs["python_path"])
+            if any(pkg.name == "package-a" for pkg in installed):
+                return {"package-a": {"package1": "<1"}}
+            return {}
+
+        def fake_group_download(env_specs, *_args, **_kwargs):
+            captured_env_specs.update(env_specs)
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_a_path, env_b_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", side_effect=fake_inspect), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch(
+                 "pipu_cli.cli.get_target_constraints_for_disputed_upgrades",
+                 side_effect=fake_target_constraints,
+             ), \
+             patch("pipu_cli.download.download_packages_for_group", side_effect=fake_group_download), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=lambda ctx, _worker: {name: [] for name in ctx.envs}), \
+             patch("pipu_cli.rollback.save_state"):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "package1",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert seen_metadata_envs == [env_a_path, env_b_path]
+        assert captured_env_specs["envA"] == ["package1==1.0"]
+        assert captured_env_specs["envB"] == []
 
 
 class TestInstallCommand:

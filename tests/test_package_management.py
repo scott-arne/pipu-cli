@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import zipfile
 from unittest.mock import Mock, MagicMock, patch
 import pytest
 
@@ -268,6 +269,24 @@ def test_extract_constrained_dependencies_exception_in_metadata(mock_distributio
 
     # Should return empty dict on error
     assert result == {}
+
+
+def test_extract_wheel_constraints_reads_metadata(tmp_path):
+    """Wheel target metadata can be parsed without installing the package."""
+    wheel_path = tmp_path / "package_a-2.0.0-py3-none-any.whl"
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: package-a\n"
+        "Version: 2.0.0\n"
+        "Requires-Dist: package-b <4.0\n"
+        "Requires-Dist: unconstrained\n"
+    )
+    with zipfile.ZipFile(wheel_path, "w") as archive:
+        archive.writestr("package_a-2.0.0.dist-info/METADATA", metadata)
+
+    result = package_management._extract_wheel_constraints(wheel_path)
+
+    assert result == {"package-b": "<4.0"}
 
 
 # ============================================================================
@@ -1350,6 +1369,156 @@ def test_resolve_upgradable_packages_constraint_violated_both_upgrading():
 
     b_result = next(r for r in result if r.name == "package-b")
     assert b_result.upgradable is True  # Allowed because A is also upgrading
+
+
+def test_resolve_upgradable_packages_checks_target_constraint_when_both_upgrading():
+    """A target package that still pins a dependency keeps blocking that dependency."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_a: Package(name="package-a", version=Version("2.0.0")),
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+    }
+
+    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates,
+        [installed_a, installed_b],
+        target_constraints={"package-a": {"package-b": "<3.0"}},
+    )
+
+    assert [pkg.name for pkg in upgradable] == ["package-a"]
+    assert [(pkg.name, pkg.blocked_by) for pkg in blocked] == [
+        ("package-b", ["package-a target requires <3.0"])
+    ]
+
+
+def test_resolve_upgradable_packages_allows_relaxed_target_constraint():
+    """A target package that relaxes its dependency pin allows the dependency upgrade."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_a: Package(name="package-a", version=Version("2.0.0")),
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+    }
+
+    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates,
+        [installed_a, installed_b],
+        target_constraints={"package-a": {"package-b": "<4.0"}},
+    )
+
+    assert [pkg.name for pkg in upgradable] == ["package-a", "package-b"]
+    assert blocked == []
+
+
+def test_resolve_upgradable_packages_blocks_when_target_metadata_unavailable():
+    """Missing target metadata fails closed for the disputed dependency edge."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_a: Package(name="package-a", version=Version("2.0.0")),
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+    }
+
+    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates,
+        [installed_a, installed_b],
+        target_constraints={"package-a": None},
+    )
+
+    assert [pkg.name for pkg in upgradable] == ["package-a"]
+    assert [(pkg.name, pkg.blocked_by) for pkg in blocked] == [
+        ("package-b", ["package-a target metadata unavailable"])
+    ]
+
+
+def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(monkeypatch):
+    """Target metadata is fetched only for upgrading packages with disputed pins."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    installed_c = InstalledPackage(
+        name="package-c", version=Version("1.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_a: Package(name="package-a", version=Version("2.0.0")),
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+        installed_c: Package(name="package-c", version=Version("1.1.0")),
+    }
+    fetched = []
+
+    def fake_download(package, **_kwargs):
+        fetched.append(package.name)
+        return {"package-b": "<4.0"}
+
+    monkeypatch.setattr(
+        package_management, "_download_target_package_constraints", fake_download
+    )
+
+    result = package_management.get_target_constraints_for_disputed_upgrades(
+        upgrade_candidates,
+        [installed_a, installed_b, installed_c],
+    )
+
+    assert result == {"package-a": {"package-b": "<4.0"}}
+    assert fetched == ["package-a"]
+
+
+def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
+    """Failed target metadata fetches are recorded as unavailable."""
+    installed_a = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"package-b": "<3.0"},
+        is_editable=False,
+    )
+    installed_b = InstalledPackage(
+        name="package-b", version=Version("2.0.0"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_a: Package(name="package-a", version=Version("2.0.0")),
+        installed_b: Package(name="package-b", version=Version("3.5.0")),
+    }
+
+    monkeypatch.setattr(
+        package_management,
+        "_download_target_package_constraints",
+        lambda package, **_kwargs: None,
+    )
+
+    result = package_management.get_target_constraints_for_disputed_upgrades(
+        upgrade_candidates,
+        [installed_a, installed_b],
+    )
+
+    assert result == {"package-a": None}
 
 
 def test_resolve_upgradable_packages_multiple_constraints_all_satisfied():
