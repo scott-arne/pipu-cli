@@ -899,7 +899,14 @@ def _find_disputed_target_packages(
     upgrade_candidates: Dict[InstalledPackage, Package],
     all_installed: List[InstalledPackage],
 ) -> Dict[str, Package]:
-    """Find upgrading packages whose target metadata is needed for safety."""
+    """Find upgrading packages whose target metadata is needed for safety.
+
+    A co-upgraded package may tighten a dependency constraint even when its
+    currently installed metadata allows the dependency's proposed target. Fetch
+    metadata for every upgrading package that currently constrains another
+    upgrading package so resolution uses the target package's real dependency
+    contract.
+    """
     actual_upgrades: Dict[str, tuple[InstalledPackage, Package]] = {
         canonicalize_name(pkg.name): (pkg, latest_pkg)
         for pkg, latest_pkg in upgrade_candidates.items()
@@ -919,11 +926,6 @@ def _find_disputed_target_packages(
             )
             if not specifier_str:
                 continue
-            try:
-                if latest_pkg.version in SpecifierSet(specifier_str):
-                    continue
-            except InvalidSpecifier:
-                pass
             disputed[constraining_name] = actual_upgrades[constraining_name][1]
     return disputed
 
@@ -937,7 +939,7 @@ def get_target_constraints_for_disputed_upgrades(
     python_path: Optional[str] = None,
     constraints_cache: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> Dict[str, Optional[Dict[str, str]]]:
-    """Fetch target constraints only where an upgrade would violate a current pin.
+    """Fetch target constraints for co-upgraded packages with dependency pins.
 
     :param upgrade_candidates: Installed package -> target package.
     :param all_installed: Full installed package list for the environment.
@@ -1065,6 +1067,7 @@ def _build_pip_session(
 def _fetch_latest_version(
     installed_pkg: "InstalledPackage",
     *,
+    specifier: Optional[SpecifierSet] = None,
     include_prereleases: bool = False,
     timeout: int = 10,
 ) -> Optional[tuple["InstalledPackage", "Package"]]:
@@ -1076,6 +1079,8 @@ def _fetch_latest_version(
     when candidate parsing raises.
 
     :param installed_pkg: The installed package to probe.
+    :param specifier: Optional version specifier that target candidates must
+        satisfy.
     :param include_prereleases: When ``True``, prerelease candidates are
         eligible. When ``False``, they are filtered out unless every
         candidate is a prerelease.
@@ -1102,6 +1107,9 @@ def _fetch_latest_version(
                 version_obj = Version(str(candidate.version))
             except InvalidVersion:
                 continue
+            if specifier is not None and str(specifier):
+                if not specifier.contains(version_obj, prereleases=True):
+                    continue
             parsed.append((version_obj, candidate))
 
         if not parsed:
@@ -1117,6 +1125,35 @@ def _fetch_latest_version(
         return installed_pkg, Package(name=installed_pkg.name, version=latest_version)
 
     return None
+
+
+def get_latest_version_for_spec(
+    parsed_spec: ParsedSpec,
+    timeout: int = 10,
+    include_prereleases: bool = False,
+) -> Optional[Package]:
+    """Resolve the newest index version satisfying a parsed package spec.
+
+    :param parsed_spec: Parsed user-supplied package spec.
+    :param timeout: Network timeout in seconds for package queries.
+    :param include_prereleases: Include pre-release versions when resolving.
+    :returns: Target package/version, or ``None`` if no matching candidate was
+        found.
+    """
+    probe = InstalledPackage(
+        name=parsed_spec.name,
+        version=Version("0"),
+        constrained_dependencies={},
+    )
+    fetched = _fetch_latest_version(
+        probe,
+        specifier=parsed_spec.specifier,
+        include_prereleases=include_prereleases,
+        timeout=timeout,
+    )
+    if fetched is None:
+        return None
+    return fetched[1]
 
 
 def get_latest_versions_parallel(
@@ -1362,7 +1399,7 @@ def resolve_upgradable_packages_with_reasons(
     max_iterations = len(upgrading_packages) + 1
 
     for _iteration in range(1, max_iterations + 1):
-        packages_to_remove = set()
+        packages_to_remove: set[str] = set()
 
         for installed_pkg, latest_pkg in actual_upgrades.items():
             canonical_name = canonicalize_name(installed_pkg.name)
@@ -1378,11 +1415,10 @@ def resolve_upgradable_packages_with_reasons(
                         specifier = SpecifierSet(specifier_str)
                         satisfies = latest_version in specifier
 
-                        if not satisfies:
-                            constraining_canonical = canonicalize_name(constraining_pkg.name)
-                            if constraining_canonical not in upgrading_packages:
-                                block(canonical_name, f"{constraining_pkg.name} requires {specifier_str}")
-                                break
+                        constraining_canonical = canonicalize_name(constraining_pkg.name)
+                        if constraining_canonical in upgrading_packages:
+                            if normalized_target_constraints is None:
+                                continue
                             target_safe, target_reason = target_allows(
                                 constraining_pkg=constraining_pkg,
                                 constrained_name=canonical_name,
@@ -1391,6 +1427,11 @@ def resolve_upgradable_packages_with_reasons(
                             if not target_safe:
                                 block(canonical_name, target_reason or "Unknown constraint")
                                 break
+                            continue
+
+                        if not satisfies:
+                            block(canonical_name, f"{constraining_pkg.name} requires {specifier_str}")
+                            break
                     except (InvalidSpecifier, Exception):
                         constraining_canonical = canonicalize_name(constraining_pkg.name)
                         if constraining_canonical not in upgrading_packages:

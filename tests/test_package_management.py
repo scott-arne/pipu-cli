@@ -1425,6 +1425,34 @@ def test_resolve_upgradable_packages_allows_relaxed_target_constraint():
     assert blocked == []
 
 
+def test_resolve_upgradable_packages_blocks_tightened_target_constraint():
+    """A target package can tighten a pin that the installed package allowed."""
+    installed_marimo = InstalledPackage(
+        name="marimo",
+        version=Version("0.23.4"),
+        constrained_dependencies={"jedi": ">=0.18.0"},
+        is_editable=False,
+    )
+    installed_jedi = InstalledPackage(
+        name="jedi", version=Version("0.19.2"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_marimo: Package(name="marimo", version=Version("0.23.5")),
+        installed_jedi: Package(name="jedi", version=Version("0.20.0")),
+    }
+
+    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates,
+        [installed_marimo, installed_jedi],
+        target_constraints={"marimo": {"jedi": ">=0.18.0,<0.20.0"}},
+    )
+
+    assert [pkg.name for pkg in upgradable] == ["marimo"]
+    assert [(pkg.name, pkg.blocked_by) for pkg in blocked] == [
+        ("jedi", ["marimo target requires >=0.18.0,<0.20.0"])
+    ]
+
+
 def test_resolve_upgradable_packages_blocks_when_target_metadata_unavailable():
     """Missing target metadata fails closed for the disputed dependency edge."""
     installed_a = InstalledPackage(
@@ -1491,6 +1519,40 @@ def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(mo
     assert fetched == ["package-a"]
 
 
+def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
+    """Fetch target metadata when a co-upgraded target may tighten a satisfied pin."""
+    installed_marimo = InstalledPackage(
+        name="marimo",
+        version=Version("0.23.4"),
+        constrained_dependencies={"jedi": ">=0.18.0"},
+        is_editable=False,
+    )
+    installed_jedi = InstalledPackage(
+        name="jedi", version=Version("0.19.2"), is_editable=False
+    )
+    upgrade_candidates = {
+        installed_marimo: Package(name="marimo", version=Version("0.23.5")),
+        installed_jedi: Package(name="jedi", version=Version("0.20.0")),
+    }
+    fetched = []
+
+    def fake_download(package, **_kwargs):
+        fetched.append(package.name)
+        return {"jedi": ">=0.18.0,<0.20.0"}
+
+    monkeypatch.setattr(
+        package_management, "_download_target_package_constraints", fake_download
+    )
+
+    result = package_management.get_target_constraints_for_disputed_upgrades(
+        upgrade_candidates,
+        [installed_marimo, installed_jedi],
+    )
+
+    assert result == {"marimo": {"jedi": ">=0.18.0,<0.20.0"}}
+    assert fetched == ["marimo"]
+
+
 def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
     """Failed target metadata fetches are recorded as unavailable."""
     installed_a = InstalledPackage(
@@ -1519,6 +1581,48 @@ def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
     )
 
     assert result == {"package-a": None}
+
+
+def test_fetch_latest_version_respects_requested_specifier(monkeypatch):
+    """Latest-version probing can target the newest version satisfying a spec."""
+    from packaging.specifiers import SpecifierSet
+
+    installed_jedi = InstalledPackage(
+        name="jedi", version=Version("0.20.0"), is_editable=False
+    )
+
+    class Candidate:
+        def __init__(self, version):
+            self.version = version
+
+    class Session:
+        def close(self):
+            pass
+
+    class Finder:
+        def find_all_candidates(self, canonical_name):
+            assert canonical_name == "jedi"
+            return [
+                Candidate("0.18.2"),
+                Candidate("0.19.2"),
+                Candidate("0.20.0"),
+            ]
+
+    monkeypatch.setattr(
+        package_management,
+        "_build_pip_session",
+        lambda **_kwargs: (Session(), Finder()),
+    )
+
+    result = package_management._fetch_latest_version(
+        installed_jedi,
+        specifier=SpecifierSet("<0.20.0,>=0.18.0"),
+    )
+
+    assert result == (
+        installed_jedi,
+        Package(name="jedi", version=Version("0.19.2")),
+    )
 
 
 def test_resolve_upgradable_packages_multiple_constraints_all_satisfied():

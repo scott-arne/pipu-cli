@@ -12,7 +12,13 @@ from packaging.version import Version
 from rich.console import Console
 from pipu_cli.cli import cli
 import pipu_cli.cli as cli_module
-from pipu_cli.package_management import InstalledPackage, UpgradePackageInfo, BlockedPackageInfo, InstalledResult
+from pipu_cli.package_management import (
+    BlockedPackageInfo,
+    InstalledPackage,
+    InstalledResult,
+    Package,
+    UpgradePackageInfo,
+)
 from pipu_cli.rollback import PackageRollbackOutcome, RollbackResult
 
 
@@ -861,8 +867,8 @@ class TestInstallCommand:
              patch("os.path.exists", return_value=True), \
              patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
              patch(
-                 "pipu_cli.cli.get_latest_versions",
-                 return_value={installed[0]: Mock(version=Version("2.31.0"))},
+                 "pipu_cli.cli.get_latest_version_for_spec",
+                 return_value=Package(name="requests", version=Version("2.31.0")),
              ), \
              patch("pipu_cli.cli.run_pip_install", return_value=results):
             result = runner.invoke(
@@ -874,6 +880,51 @@ class TestInstallCommand:
         assert "2.28.0" in result.output
         assert "2.31.0" in result.output
         assert "-> latest" not in result.output
+
+    def test_install_group_preview_respects_version_specifier(self, runner):
+        """Group install preview shows the constrained target version."""
+        installed = [
+            InstalledPackage(
+                name="jedi",
+                version=Version("0.20.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        results = [
+            InstalledResult(
+                name="jedi",
+                version=Version("0.19.2"),
+                installed=True,
+                previous_version=Version("0.20.0"),
+            )
+        ]
+
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a"]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch(
+                 "pipu_cli.cli.get_latest_version_for_spec",
+                 return_value=Package(name="jedi", version=Version("0.19.2")),
+             ), \
+             patch("pipu_cli.cli.run_pip_install", return_value=results):
+            result = runner.invoke(
+                cli,
+                [
+                    "install",
+                    "jedi<0.20.0,>=0.18.0",
+                    "-g",
+                    "mygroup",
+                    "--yes",
+                    "--no-check",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "0.20.0 ->" in result.output
+        assert "0.19.2" in result.output
+        assert "target" in result.output
+        assert "latest: 0.20.0" not in result.output
 
     def test_install_failure_exits_nonzero(self, runner):
         """install exits 1 when packages fail to install."""

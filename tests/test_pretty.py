@@ -319,3 +319,22 @@ class TestGroupInstallMatrix:
         assert "2.28.0" in output
         assert "2.31.0" in output
         assert "-> latest" not in output
+
+    def test_upgrade_plan_shows_lower_constrained_target(self):
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120)
+
+        print_group_install_matrix(
+            {"main": {"jedi<0.20.0,>=0.18.0": Version("0.20.0")}},
+            ["jedi<0.20.0,>=0.18.0"],
+            {"main": "/path/main/bin/python"},
+            upgrade=True,
+            target_versions={"jedi<0.20.0,>=0.18.0": Version("0.19.2")},
+            console=console,
+        )
+
+        output = buf.getvalue()
+        assert "0.20.0" in output
+        assert "0.19.2" in output
+        assert "target" in output
+        assert "latest: 0.19.2" not in output

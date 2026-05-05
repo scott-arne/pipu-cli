@@ -22,13 +22,13 @@ from pipu_cli._group_runner import GroupContext, prepare_group, run_per_env_para
 from pipu_cli._subprocess import InterruptToken
 from pipu_cli.package_management import (
     BlockedPackageInfo,
-    InstalledPackage,
     Package,
     build_dep_report,
     build_env_report,
     inspect_installed_packages,
     get_latest_versions,
     get_latest_versions_parallel,
+    get_latest_version_for_spec,
     get_target_constraints_for_disputed_upgrades,
     parse_package_spec,
     PackageNotInstalledError,
@@ -2650,52 +2650,36 @@ def _resolve_group_install_target_versions(
     timeout: int,
     pre: bool,
 ) -> dict[str, Version]:
-    """Resolve latest package versions for the group install preview.
+    """Resolve target package versions for the group install preview.
 
     :param packages: User-supplied package specs.
     :param timeout: Network timeout for package index queries.
-    :param pre: Include pre-release versions when resolving latest.
-    :returns: Original package spec -> latest version.
+    :param pre: Include pre-release versions when resolving targets.
+    :returns: Original package spec -> newest matching target version.
     """
-    probes: list[InstalledPackage] = []
-    specs_by_name: dict[str, str] = {}
+    targets: dict[str, Version] = {}
+    seen_names: set[str] = set()
     for spec in packages:
         try:
             parsed = parse_package_spec(spec)
         except ValueError:
             continue
-        canonical = canonicalize_name(parsed.name)
-        if canonical in specs_by_name:
+        if parsed.name in seen_names:
             continue
-        specs_by_name[canonical] = spec
-        probes.append(
-            InstalledPackage(
-                name=parsed.name,
-                version=Version("0"),
-                constrained_dependencies={},
+        seen_names.add(parsed.name)
+        try:
+            target = get_latest_version_for_spec(
+                parsed,
+                timeout=timeout,
+                include_prereleases=pre,
             )
-        )
-
-    if not probes:
-        return {}
-
-    try:
-        latest_versions = get_latest_versions(
-            probes,
-            timeout=timeout,
-            include_prereleases=pre,
-        )
-    except Exception as e:
-        logging.getLogger(__name__).debug(
-            "Could not resolve latest install targets for group preview: %s", e
-        )
-        return {}
-
-    targets: dict[str, Version] = {}
-    for package, latest in latest_versions.items():
-        spec = specs_by_name.get(canonicalize_name(package.name))
-        if spec is not None:
-            targets[spec] = latest.version
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                "Could not resolve install target for %s: %s", spec, e
+            )
+            continue
+        if target is not None:
+            targets[spec] = target.version
     return targets
 
 

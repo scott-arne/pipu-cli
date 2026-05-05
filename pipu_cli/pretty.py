@@ -748,6 +748,11 @@ def print_group_install_matrix(
                             f"{cur_ver} -> [{_SUCCESS}]{target_version}[/{_SUCCESS}] "
                             "[dim](latest)[/dim]"
                         )
+                    elif target_version < cur_ver:
+                        row.append(
+                            f"{cur_ver} -> [{_SUCCESS}]{target_version}[/{_SUCCESS}] "
+                            "[dim](target)[/dim]"
+                        )
                     else:
                         row.append(
                             f"{cur_ver} [dim](latest: {target_version})[/dim]"
