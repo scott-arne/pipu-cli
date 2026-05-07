@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_TIMEOUT = 300
 
 
+class DownloadError(RuntimeError):
+    """Raised when one or more package downloads fail.
+
+    :param failed: Mapping of package spec to the diagnostic emitted by pip.
+    """
+
+    def __init__(self, failed: Dict[str, str]) -> None:
+        self.failed = dict(failed)
+        super().__init__(f"Failed to download: {', '.join(self.failed)}")
+
+
 def _download_single(
     spec: str,
     dest_dir: Path,
@@ -96,7 +107,7 @@ def download_packages(
         return []
 
     executable = python_path or sys.executable
-    failed: List[str] = []
+    failed: Dict[str, str] = {}
 
     if max_workers > 1:
         def _download_with_start(spec: str) -> Tuple[str, bool, str]:
@@ -109,7 +120,7 @@ def download_packages(
             for future in as_completed(futures):
                 spec, success, error_msg = future.result()
                 if not success:
-                    failed.append(spec)
+                    failed[spec] = error_msg or "download failed"
                 if progress_callback:
                     progress_callback(spec, success, error_msg)
     else:
@@ -118,12 +129,12 @@ def download_packages(
                 start_callback(spec)
             spec, success, error_msg = _download_single(spec, dest_dir, executable, pre, timeout)
             if not success:
-                failed.append(spec)
+                failed[spec] = error_msg or "download failed"
             if progress_callback:
                 progress_callback(spec, success, error_msg)
 
     if failed:
-        raise RuntimeError(f"Failed to download: {', '.join(failed)}")
+        raise DownloadError(failed)
 
     return list(dest_dir.iterdir())
 
@@ -193,25 +204,49 @@ def install_from_local(
     else:
         pre_versions = _get_local_package_versions(canonical_names)
 
-    failed_specs: Dict[str, str] = {}
-    for spec in specs:
-        cmd = [
-            executable, "-m", "pip", "install",
-            "--find-links", str(dest_dir),
-            "--no-deps", spec,
+    cmd = [
+        executable, "-m", "pip", "install", "--upgrade",
+        "--find-links", str(dest_dir),
+        *specs,
+    ]
+
+    def failed_results(reason: str) -> List[UpgradedPackage]:
+        return [
+            UpgradedPackage(
+                name=_canonical_name_for_spec(spec),
+                version=pre_versions.get(_canonical_name_for_spec(spec), Version("0")),
+                upgraded=False,
+                previous_version=pre_versions.get(_canonical_name_for_spec(spec), Version("0")),
+                failure_reason=reason,
+            )
+            for spec in specs
         ]
 
-        logger.debug(f"Running: {' '.join(cmd)}")
+    logger.debug(f"Running: {' '.join(cmd)}")
+    try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         )
+    except subprocess.TimeoutExpired as e:
+        for spec in specs:
+            if progress_callback:
+                progress_callback(spec)
+        return failed_results(f"Installation timed out after {e.timeout}s")
+    except OSError as e:
+        if progress_callback:
+            for spec in specs:
+                progress_callback(spec)
+        return failed_results(f"Installation failed: {e}")
 
-        if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip()
-            failed_specs[spec] = error_output or f"pip exit code {result.returncode}"
-
+    for spec in specs:
         if progress_callback:
             progress_callback(spec)
+
+    failed_specs: Dict[str, str] = {}
+    if result.returncode != 0:
+        error_output = result.stderr.strip() or result.stdout.strip()
+        reason = error_output or f"pip exit code {result.returncode}"
+        failed_specs = {spec: reason for spec in specs}
 
     if python_path:
         post_versions = _get_remote_package_versions(python_path, canonical_names)

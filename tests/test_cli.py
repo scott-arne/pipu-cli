@@ -18,8 +18,10 @@ from pipu_cli.package_management import (
     InstalledResult,
     Package,
     UpgradePackageInfo,
+    UpgradedPackage,
 )
 from pipu_cli.rollback import PackageRollbackOutcome, RollbackResult
+from pipu_cli.download import DownloadError
 
 
 @pytest.fixture
@@ -87,6 +89,59 @@ def test_dry_run_exit_code_zero_when_upgrades_available(runner, mock_packages):
         result = runner.invoke(cli, ['upgrade', '--dry-run', '--no-cache', '-p', '1'])
 
         assert result.exit_code == 0
+
+
+def test_download_and_install_phase_skips_specs_that_failed_download():
+    """A download timeout should become a package failure, not an install command error."""
+    console = Console(file=StringIO(), force_terminal=True)
+    upgrades = [
+        UpgradePackageInfo(
+            name="requests",
+            version=Version("2.28.0"),
+            upgradable=True,
+            latest_version=Version("2.31.0"),
+        ),
+        UpgradePackageInfo(
+            name="rich",
+            version=Version("13.0.0"),
+            upgradable=True,
+            latest_version=Version("13.7.0"),
+        ),
+    ]
+    installed_specs = []
+
+    def fake_download(*_args, progress_callback=None, **_kwargs):
+        if progress_callback is not None:
+            progress_callback("requests==2.31.0", False, "timed out after 300s")
+            progress_callback("rich==13.7.0", True, "")
+        raise DownloadError({"requests==2.31.0": "timed out after 300s"})
+
+    def fake_install(*_args, specs, **_kwargs):
+        installed_specs.extend(specs)
+        return [
+            UpgradedPackage(
+                name="rich",
+                version=Version("13.7.0"),
+                upgraded=True,
+                previous_version=Version("13.0.0"),
+            )
+        ]
+
+    with patch("pipu_cli.cli.download_packages", side_effect=fake_download), \
+         patch("pipu_cli.cli.install_from_local", side_effect=fake_install), \
+         patch("pipu_cli.rollback.save_state"):
+        results, _ = cli_module._download_and_install_phase(
+            console,
+            "human",
+            upgrades,
+            {},
+        )
+
+    assert installed_specs == ["rich==13.7.0"]
+    failed = [result for result in results if result.name == "requests"]
+    assert len(failed) == 1
+    assert failed[0].upgraded is False
+    assert failed[0].failure_reason == "Download failed: timed out after 300s"
 
 
 def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
@@ -727,6 +782,77 @@ class TestGroupExecution:
         assert seen_metadata_envs == [env_a_path, env_b_path]
         assert captured_env_specs["envA"] == ["package1==1.0"]
         assert captured_env_specs["envB"] == []
+
+    def test_upgrade_group_skips_specs_that_failed_download(self, runner):
+        """A shared download failure should not be retried by every env install."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            ),
+            InstalledPackage(
+                name="rich",
+                version=Version("13.0.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            ),
+        ]
+        latest_by_name = {
+            "requests": Version("2.31.0"),
+            "rich": Version("13.7.0"),
+        }
+        captured_specs = {}
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=latest_by_name[pkg.name])
+                for pkg in installed_packages
+            }
+
+        def fake_download(env_specs, *_args, progress_callback=None, **_kwargs):
+            if progress_callback is not None:
+                progress_callback("requests==2.31.0", False, "timed out after 300s")
+                progress_callback("rich==13.7.0", True, "")
+            raise DownloadError({"requests==2.31.0": "timed out after 300s"})
+
+        def fake_install_single_env(env_name, _env_path, specs, **_kwargs):
+            captured_specs[env_name] = list(specs)
+            return [
+                UpgradedPackage(
+                    name="rich",
+                    version=Version("13.7.0"),
+                    upgraded=True,
+                    previous_version=Version("13.0.0"),
+                )
+            ]
+
+        def fake_run_per_env(ctx, worker):
+            return {
+                name: worker(name, path, cli_module.InterruptToken())
+                for name, path in ctx.envs.items()
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}), \
+             patch("pipu_cli.download.download_packages_for_group", side_effect=fake_download), \
+             patch("pipu_cli.cli._upgrade_install_single_env", side_effect=fake_install_single_env), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=fake_run_per_env), \
+             patch("pipu_cli.rollback.save_state"):
+            result = runner.invoke(
+                cli,
+                ["upgrade", "-g", "all", "--yes", "--no-cache", "--no-check", "-p", "1"],
+            )
+
+        assert result.exit_code == 1, result.output
+        assert captured_specs == {"main": ["rich==13.7.0"]}
+        assert "requests" in result.output
+        assert "Download failed: timed out after 300s" in result.output
 
 
 class TestInstallCommand:

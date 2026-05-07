@@ -23,6 +23,7 @@ from pipu_cli._subprocess import InterruptToken
 from pipu_cli.package_management import (
     BlockedPackageInfo,
     Package,
+    UpgradedPackage,
     build_dep_report,
     build_env_report,
     inspect_installed_packages,
@@ -74,7 +75,7 @@ from pipu_cli._options import (
     yes_option,
 )
 from pipu_cli.ui import UpgradeUI
-from pipu_cli.download import download_packages, install_from_local
+from pipu_cli.download import DownloadError, download_packages, install_from_local
 from pipu_cli.config_file import load_config, get_config_value
 from pipu_cli.groups import (
     add_environment,
@@ -737,15 +738,19 @@ def _download_and_install_phase(
     if non_editable_packages:
         # Build pinned specs
         specs = []
+        spec_packages = {}
         for pkg in non_editable_packages:
             name_key = canonicalize_name(pkg.name)
             if name_key in package_constraints:
-                specs.append(f"{pkg.name}{package_constraints[name_key]}")
+                spec = f"{pkg.name}{package_constraints[name_key]}"
             else:
-                specs.append(f"{pkg.name}=={pkg.latest_version}")
+                spec = f"{pkg.name}=={pkg.latest_version}"
+            specs.append(spec)
+            spec_packages[spec] = pkg
 
         with tempfile.TemporaryDirectory(prefix="pipu-") as tmp_dir:
             dest_dir = Path(tmp_dir)
+            download_failures: dict[str, str] = {}
 
             # Download phase
             if ui and output != "json":
@@ -758,6 +763,7 @@ def _download_and_install_phase(
                     if success:
                         tracker.complete(spec)
                     else:
+                        download_failures[spec] = error_msg or "download failed"
                         tracker.fail(spec)
 
                 try:
@@ -768,19 +774,46 @@ def _download_and_install_phase(
                         progress_callback=on_download,
                         start_callback=on_download_start,
                     )
-                except RuntimeError:
+                except DownloadError as e:
+                    download_failures.update(e.failed)
                     pass
                 finally:
                     tracker.finish()
             else:
-                download_packages(
-                    specs=specs, dest_dir=dest_dir,
-                    python_path=python_path,
-                    max_workers=parallel,
-                )
+                def on_download(spec: str, success: bool, error_msg: str) -> None:
+                    if not success:
+                        download_failures[spec] = error_msg or "download failed"
+
+                try:
+                    download_packages(
+                        specs=specs, dest_dir=dest_dir,
+                        python_path=python_path,
+                        max_workers=parallel,
+                        progress_callback=on_download,
+                    )
+                except DownloadError as e:
+                    download_failures.update(e.failed)
+
+            for spec, reason in download_failures.items():
+                failed_pkg = spec_packages.get(spec)
+                if failed_pkg is None:
+                    continue
+                results.append(UpgradedPackage(
+                    name=failed_pkg.name,
+                    version=failed_pkg.version,
+                    upgraded=False,
+                    previous_version=failed_pkg.version,
+                    is_editable=failed_pkg.is_editable,
+                    editable_location=failed_pkg.editable_location,
+                    failure_reason=f"Download failed: {reason}",
+                ))
+
+            # A failed download is already represented in results; do not let
+            # the install phase reattempt it and obscure the useful error.
+            specs = [spec for spec in specs if spec not in download_failures]
 
             # Install phase
-            if ui and output != "json":
+            if specs and ui and output != "json":
                 install_tracker = ui.show_install_progress(specs)
 
                 def on_install(spec: str) -> None:
@@ -792,11 +825,13 @@ def _download_and_install_phase(
                     progress_callback=on_install,
                 )
                 install_tracker.finish()
-            else:
+            elif specs:
                 regular_results = install_from_local(
                     dest_dir=dest_dir, specs=specs,
                     python_path=python_path,
                 )
+            else:
+                regular_results = []
 
             results.extend(regular_results)
 
@@ -2186,22 +2221,28 @@ def _run_group_upgrade(
 
             # Phase 6: Shared download (editable packages bypass this)
             env_specs: dict[str, list[str]] = {}
+            env_spec_packages: dict[str, dict[str, Any]] = {}
             for env_name, upgrades in env_upgrades.items():
                 specs = []
+                spec_packages = {}
                 for pkg in upgrades:
                     if pkg.is_editable:
                         continue
                     name_key = canonicalize_name(pkg.name)
                     if name_key in package_constraints:
-                        specs.append(f"{pkg.name}{package_constraints[name_key]}")
+                        spec = f"{pkg.name}{package_constraints[name_key]}"
                     else:
-                        specs.append(f"{pkg.name}=={pkg.latest_version}")
+                        spec = f"{pkg.name}=={pkg.latest_version}"
+                    specs.append(spec)
+                    spec_packages[spec] = pkg
                 env_specs[env_name] = specs
+                env_spec_packages[env_name] = spec_packages
 
             with tempfile.TemporaryDirectory(prefix="pipu-group-") as tmp_dir:
                 dest_dir = Path(tmp_dir)
 
                 from pipu_cli.download import download_packages_for_group
+                download_failures: dict[str, str] = {}
 
                 if ui:
                     unique_specs = list(dict.fromkeys(
@@ -2214,18 +2255,55 @@ def _run_group_upgrade(
                         if success:
                             tracker.complete(spec)
                         else:
+                            download_failures[spec] = error_msg or "download failed"
                             tracker.fail(spec)
                     try:
                         download_packages_for_group(
                             env_specs, dest_dir, pre=pre, max_workers=parallel,
                             progress_callback=on_download, start_callback=on_download_start,
                         )
-                    except RuntimeError:
+                    except DownloadError as e:
+                        download_failures.update(e.failed)
                         pass
                     finally:
                         tracker.finish()
                 else:
-                    download_packages_for_group(env_specs, dest_dir, pre=pre, max_workers=parallel)
+                    def on_download(spec: str, success: bool, error_msg: str) -> None:
+                        if not success:
+                            download_failures[spec] = error_msg or "download failed"
+
+                    try:
+                        download_packages_for_group(
+                            env_specs, dest_dir, pre=pre, max_workers=parallel,
+                            progress_callback=on_download,
+                        )
+                    except DownloadError as e:
+                        download_failures.update(e.failed)
+
+                download_failed_results: dict[str, list[UpgradedPackage]] = {}
+                if download_failures:
+                    for env_name, specs in env_specs.items():
+                        retained_specs = []
+                        for spec in specs:
+                            reason = download_failures.get(spec)
+                            if reason is None:
+                                retained_specs.append(spec)
+                                continue
+                            failed_pkg = env_spec_packages[env_name].get(spec)
+                            if failed_pkg is None:
+                                continue
+                            download_failed_results.setdefault(env_name, []).append(
+                                UpgradedPackage(
+                                    name=failed_pkg.name,
+                                    version=failed_pkg.version,
+                                    upgraded=False,
+                                    previous_version=failed_pkg.version,
+                                    is_editable=failed_pkg.is_editable,
+                                    editable_location=failed_pkg.editable_location,
+                                    failure_reason=f"Download failed: {reason}",
+                                )
+                            )
+                        env_specs[env_name] = retained_specs
 
                 # Phase 7: Install per environment (fanned out via shared runner)
                 env_order = list(env_name_map.keys())
@@ -2251,6 +2329,9 @@ def _run_group_upgrade(
                 env_results = (
                     run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
                 )
+                for env_name, failed_results in download_failed_results.items():
+                    env_results.setdefault(env_name, [])
+                    env_results[env_name] = [*failed_results, *env_results[env_name]]
 
                 if group_tracker is not None:
                     group_tracker.finish()

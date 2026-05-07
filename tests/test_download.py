@@ -1,12 +1,18 @@
 """Tests for download-then-install pipeline."""
 
+import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from packaging.version import Version
 
-from pipu_cli.download import download_packages, install_from_local, download_packages_for_group
+from pipu_cli.download import (
+    DownloadError,
+    download_packages,
+    download_packages_for_group,
+    install_from_local,
+)
 
 
 class TestDownloadPackages:
@@ -81,13 +87,18 @@ class TestDownloadPackages:
         mock_process = MagicMock()
         mock_process.returncode = 1
         mock_process.communicate.return_value = ("", "ERROR: No matching distribution")
+        mock_process.stderr = "ERROR: No matching distribution"
+        mock_process.stdout = ""
 
         with patch("pipu_cli.download.subprocess.run", return_value=mock_process):
-            with pytest.raises(RuntimeError, match="Failed to download"):
+            with pytest.raises(DownloadError, match="Failed to download") as exc_info:
                 download_packages(
                     specs=["nonexistent-pkg==1.0.0"],
                     dest_dir=tmp_path,
                 )
+        assert exc_info.value.failed == {
+            "nonexistent-pkg==1.0.0": "ERROR: No matching distribution"
+        }
 
     def test_download_empty_specs_returns_empty(self, tmp_path):
         result = download_packages(specs=[], dest_dir=tmp_path)
@@ -137,12 +148,63 @@ class TestInstallFromLocal:
 
             cmd = mock_run.call_args[0][0]
             assert "--find-links" in cmd
-            assert "--no-deps" in cmd
+            assert "--no-deps" not in cmd
             assert "requests==2.31.0" in cmd
             assert len(results) == 1
             assert results[0].upgraded is True
             assert results[0].version == Version("2.31.0")
             assert results[0].previous_version == Version("2.28.0")
+
+    def test_install_batches_specs_so_pip_resolves_dependencies(self, tmp_path):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.stderr = ""
+        mock_process.stdout = ""
+
+        pre_versions = {
+            "mypy": Version("1.20.2"),
+            "librt": Version("0.9.0"),
+        }
+        post_versions = {
+            "mypy": Version("2.0.0"),
+            "librt": Version("0.10.0"),
+        }
+
+        with patch("pipu_cli.download.subprocess.run", return_value=mock_process) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["mypy==2.0.0", "librt==0.10.0"],
+            )
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "--no-deps" not in cmd
+        assert "mypy==2.0.0" in cmd
+        assert "librt==0.10.0" in cmd
+        assert [result.name for result in results] == ["mypy", "librt"]
+
+    def test_install_timeout_returns_failed_results(self, tmp_path):
+        pre_versions = {"requests": Version("2.28.0")}
+
+        with patch(
+            "pipu_cli.download.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["python", "-m", "pip", "install"], timeout=300,
+            ),
+        ), patch(
+            "pipu_cli.download._get_local_package_versions",
+            return_value=pre_versions,
+        ):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["requests==2.31.0"],
+            )
+
+        assert len(results) == 1
+        assert results[0].upgraded is False
+        assert results[0].failure_reason is not None
+        assert "timed out" in results[0].failure_reason
 
     def test_install_with_python_path(self, tmp_path):
         mock_process = MagicMock()
