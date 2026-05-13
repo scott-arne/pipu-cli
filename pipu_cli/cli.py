@@ -802,7 +802,8 @@ def _download_and_install_phase(
                 def on_download_progress(
                     spec: str, downloaded: int, total: Optional[int],
                 ) -> None:
-                    tracker.progress(spec, downloaded, total)
+                    del downloaded, total
+                    tracker.activity(spec)
 
                 def on_download(spec: str, success: bool, error_msg: str) -> None:
                     if success:
@@ -2350,7 +2351,8 @@ def _run_group_upgrade(
                     def on_download_progress(
                         spec: str, downloaded: int, total: Optional[int],
                     ) -> None:
-                        tracker.progress(spec, downloaded, total)
+                        del downloaded, total
+                        tracker.activity(spec)
                     def on_download(spec: str, success: bool, error_msg: str) -> None:
                         if success:
                             tracker.complete(spec)

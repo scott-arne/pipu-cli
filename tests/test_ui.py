@@ -249,6 +249,31 @@ class TestDownloadTracker:
         assert any(span.style == "dim" for span in line.spans)
         tracker.finish()
 
+    def test_download_tracker_activity_shows_liveness_without_artifact_percent(self):
+        """Raw pip progress should not look like top-level package progress."""
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["large-pkg==1.0.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("large-pkg==1.0.0")
+        tracker.activity("large-pkg==1.0.0")
+
+        line = tracker._render_active_lines()
+        assert "large-pkg==1.0.0" in line.plain
+        assert "receiving data" in line.plain
+        assert "%" not in line.plain
+        assert " / " not in line.plain
+        tracker.finish()
+
 
 class TestInstallTracker:
     """Tests for install progress tracking."""

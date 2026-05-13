@@ -240,6 +240,84 @@ def test_download_and_install_phase_relaxes_unconstrained_install_specs():
     assert [result.name for result in results] == ["logfire", "zope.interface"]
 
 
+def test_download_and_install_phase_treats_raw_progress_as_liveness_only():
+    """Artifact-level pip progress should not render as package-level percent."""
+    console = Console(file=StringIO(), force_terminal=True)
+    upgrades = [
+        UpgradePackageInfo(
+            name="large-pkg",
+            version=Version("1.0.0"),
+            upgradable=True,
+            latest_version=Version("2.0.0"),
+        )
+    ]
+    events = []
+
+    class FakeTracker:
+        def start(self, spec):
+            events.append(("start", spec))
+
+        def activity(self, spec):
+            events.append(("activity", spec))
+
+        def progress(self, spec, downloaded, total):
+            events.append(("progress", spec, downloaded, total))
+
+        def complete(self, spec):
+            events.append(("complete", spec))
+
+        def fail(self, spec):
+            events.append(("fail", spec))
+
+        def finish(self):
+            events.append(("finish",))
+
+    class FakeUI:
+        def show_download_progress(self, specs, idle_timeout=None):
+            events.append(("show", tuple(specs), idle_timeout))
+            return FakeTracker()
+
+        def show_install_progress(self, specs):
+            events.append(("show-install", tuple(specs)))
+            return FakeTracker()
+
+    def fake_download(*_args, start_callback=None, download_progress_callback=None, progress_callback=None, **_kwargs):
+        assert start_callback is not None
+        assert download_progress_callback is not None
+        assert progress_callback is not None
+        start_callback("large-pkg==2.0.0")
+        download_progress_callback("large-pkg==2.0.0", 1_024, 4_096)
+        download_progress_callback("large-pkg==2.0.0", 4_096, 4_096)
+        download_progress_callback("large-pkg==2.0.0", 512, 2_048)
+        progress_callback("large-pkg==2.0.0", True, "")
+
+    def fake_install(*_args, **_kwargs):
+        return [
+            UpgradedPackage(
+                name="large-pkg",
+                version=Version("2.0.0"),
+                upgraded=True,
+                previous_version=Version("1.0.0"),
+            )
+        ]
+
+    with patch("pipu_cli.cli.download_packages", side_effect=fake_download), \
+         patch("pipu_cli.cli.install_from_local", side_effect=fake_install), \
+         patch("pipu_cli.rollback.save_state"):
+        results, _ = cli_module._download_and_install_phase(
+            console,
+            "human",
+            upgrades,
+            {},
+            ui=FakeUI(),
+        )
+
+    assert results[0].upgraded is True
+    assert ("show", ("large-pkg==2.0.0",), 300) in events
+    assert events.count(("activity", "large-pkg==2.0.0")) == 3
+    assert not [event for event in events if event[0] == "progress"]
+
+
 def test_group_install_worker_marks_failed_results_as_failed_env(tmp_path):
     """A batched install timeout should not render the environment as complete."""
     events = []
