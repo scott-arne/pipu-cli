@@ -7,10 +7,11 @@ from unittest.mock import patch
 import click
 import pytest
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore
+else:
+    # tomli is installed only for Python versions that need the fallback.
+    import tomli as tomllib  # pyright: ignore[reportMissingImports]
 
 from pipu_cli import groups
 from pipu_cli.groups import (

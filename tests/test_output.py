@@ -49,16 +49,46 @@ def test_build_upgrade_payload_with_results():
         ),
     ]
     payload = build_upgrade_payload(upgradable=upgradable, results=results)
-    assert payload["summary"] == {"total": 1, "upgraded": 1, "failed": 0}
+    assert payload["summary"] == {
+        "total": 1,
+        "upgraded": 1,
+        "constrained": 0,
+        "failed": 0,
+    }
     assert isinstance(payload["results"], list)
     # Round-trip through JSON to prove the payload is serializable.
     assert json.loads(json.dumps(payload))["summary"]["upgraded"] == 1
 
 
+def test_build_upgrade_payload_counts_resolver_constraints_separately():
+    upgradable = [
+        UpgradePackageInfo(
+            name="opentelemetry-sdk", version=Version("1.39.1"),
+            upgradable=True, latest_version=Version("1.41.1"),
+            is_editable=False,
+        ),
+    ]
+    results = [
+        UpgradedPackage(
+            name="opentelemetry-sdk", version=Version("1.39.1"),
+            upgraded=False, previous_version=Version("1.39.1"),
+            is_editable=False,
+            failure_reason="Version unchanged — may be constrained by dependency resolver",
+        ),
+    ]
+    payload = build_upgrade_payload(upgradable=upgradable, results=results)
+    assert payload["summary"] == {
+        "total": 1,
+        "upgraded": 0,
+        "constrained": 1,
+        "failed": 0,
+    }
+
+
 def test_build_upgrade_payload_without_results():
     payload = build_upgrade_payload(upgradable=[])
     assert payload["results"] == []
-    assert payload["summary"] == {"total": 0, "upgraded": 0, "failed": 0}
+    assert payload["summary"] == {"total": 0, "upgraded": 0, "constrained": 0, "failed": 0}
     assert payload["blocked"] == []
 
 

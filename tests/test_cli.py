@@ -91,6 +91,38 @@ def test_dry_run_exit_code_zero_when_upgrades_available(runner, mock_packages):
         assert result.exit_code == 0
 
 
+def test_upgrade_passes_timeout_to_download_phase(runner, mock_packages):
+    """The upgrade timeout controls the download phase as well as metadata lookups."""
+    installed, upgradable = mock_packages
+    captured_kwargs = {}
+
+    def fake_download_phase(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return [], 0.0
+
+    with patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+         patch("pipu_cli.cli.get_latest_versions", return_value={installed[0]: Package(name="requests", version=Version("2.31.0"))}), \
+         patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}), \
+         patch("pipu_cli.cli.resolve_upgradable_packages", return_value=upgradable), \
+         patch("pipu_cli.cli._download_and_install_phase", side_effect=fake_download_phase):
+        result = runner.invoke(
+            cli,
+            [
+                "upgrade",
+                "--timeout",
+                "900",
+                "--yes",
+                "--no-cache",
+                "--no-check",
+                "-p",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured_kwargs["timeout"] == 900
+
+
 def test_download_and_install_phase_skips_specs_that_failed_download():
     """A download timeout should become a package failure, not an install command error."""
     console = Console(file=StringIO(), force_terminal=True)
@@ -109,8 +141,11 @@ def test_download_and_install_phase_skips_specs_that_failed_download():
         ),
     ]
     installed_specs = []
+    captured_download_kwargs = {}
+    captured_install_kwargs = {}
 
     def fake_download(*_args, progress_callback=None, **_kwargs):
+        captured_download_kwargs.update(_kwargs)
         if progress_callback is not None:
             progress_callback("requests==2.31.0", False, "timed out after 300s")
             progress_callback("rich==13.7.0", True, "")
@@ -118,6 +153,7 @@ def test_download_and_install_phase_skips_specs_that_failed_download():
 
     def fake_install(*_args, specs, **_kwargs):
         installed_specs.extend(specs)
+        captured_install_kwargs.update(_kwargs)
         return [
             UpgradedPackage(
                 name="rich",
@@ -135,13 +171,163 @@ def test_download_and_install_phase_skips_specs_that_failed_download():
             "human",
             upgrades,
             {},
+            timeout=900,
         )
 
-    assert installed_specs == ["rich==13.7.0"]
+    assert captured_download_kwargs["timeout"] == 900
+    assert captured_download_kwargs["use_download_cache"] is True
+    assert captured_install_kwargs["timeout"] == 900
+    assert installed_specs == ["rich"]
     failed = [result for result in results if result.name == "requests"]
     assert len(failed) == 1
     assert failed[0].upgraded is False
     assert failed[0].failure_reason == "Download failed: timed out after 300s"
+
+
+def test_download_and_install_phase_relaxes_unconstrained_install_specs():
+    """Offline installs should let pip pick compatible staged versions."""
+    console = Console(file=StringIO(), force_terminal=True)
+    upgrades = [
+        UpgradePackageInfo(
+            name="logfire",
+            version=Version("4.32.1"),
+            upgradable=True,
+            latest_version=Version("4.33.0"),
+        ),
+        UpgradePackageInfo(
+            name="zope.interface",
+            version=Version("5.3.0"),
+            upgradable=True,
+            latest_version=Version("5.5.0"),
+        ),
+    ]
+    downloaded_specs = []
+    installed_specs = []
+
+    def fake_download(*_args, specs, **_kwargs):
+        downloaded_specs.extend(specs)
+
+    def fake_install(*_args, specs, **_kwargs):
+        installed_specs.extend(specs)
+        return [
+            UpgradedPackage(
+                name="logfire",
+                version=Version("4.32.1"),
+                upgraded=False,
+                previous_version=Version("4.32.1"),
+                failure_reason="Version unchanged — may be constrained by dependency resolver",
+            ),
+            UpgradedPackage(
+                name="zope.interface",
+                version=Version("5.4.0"),
+                upgraded=True,
+                previous_version=Version("5.3.0"),
+            ),
+        ]
+
+    with patch("pipu_cli.cli.download_packages", side_effect=fake_download), \
+         patch("pipu_cli.cli.install_from_local", side_effect=fake_install), \
+         patch("pipu_cli.rollback.save_state"):
+        results, _ = cli_module._download_and_install_phase(
+            console,
+            "human",
+            upgrades,
+            {"zope-interface": "==5.4.0"},
+        )
+
+    assert downloaded_specs == ["logfire==4.33.0", "zope.interface==5.4.0"]
+    assert installed_specs == ["logfire", "zope.interface==5.4.0"]
+    assert [result.name for result in results] == ["logfire", "zope.interface"]
+
+
+def test_group_install_worker_marks_failed_results_as_failed_env(tmp_path):
+    """A batched install timeout should not render the environment as complete."""
+    events = []
+
+    class FakeTracker:
+        def advance(self, env_name, package_name):
+            events.append(("advance", env_name, package_name))
+
+        def complete_env(self, env_name):
+            events.append(("complete", env_name))
+
+        def fail_env(self, env_name, reason):
+            events.append(("fail", env_name, reason))
+
+    def fake_install_from_local(*args, progress_callback=None, **kwargs):
+        if progress_callback is not None:
+            progress_callback("requests==2.31.0")
+        return [
+            UpgradedPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                upgraded=False,
+                previous_version=Version("2.28.0"),
+                failure_reason="Installation timed out after 300s without pip output",
+            )
+        ]
+
+    with patch("pipu_cli.download.install_from_local", side_effect=fake_install_from_local):
+        results = cli_module._upgrade_install_single_env(
+            "jupyter",
+            "/path/to/python",
+            ["requests==2.31.0"],
+            dest_dir=tmp_path,
+            tracker=FakeTracker(),
+        )
+
+    assert results[0].failure_reason == "Installation timed out after 300s without pip output"
+    assert ("complete", "jupyter") not in events
+    assert ("fail", "jupyter", "Installation timed out after 300s without pip output") in events
+
+
+def test_group_install_worker_reports_install_activity(tmp_path):
+    """Pip output during a batched install should be visible in the environment row."""
+    events = []
+
+    class FakeTracker:
+        def start_env(self, env_name):
+            events.append(("start", env_name))
+
+        def message_env(self, env_name, message):
+            events.append(("message", env_name, message))
+
+        def advance(self, env_name, package_name):
+            events.append(("advance", env_name, package_name))
+
+        def complete_env(self, env_name):
+            events.append(("complete", env_name))
+
+        def fail_env(self, env_name, reason):
+            events.append(("fail", env_name, reason))
+
+    def fake_install_from_local(*args, install_activity_callback=None, progress_callback=None, **kwargs):
+        assert install_activity_callback is not None
+        install_activity_callback("Installing collected packages: requests\n")
+        if progress_callback is not None:
+            progress_callback("requests==2.31.0")
+        return [
+            UpgradedPackage(
+                name="requests",
+                version=Version("2.31.0"),
+                upgraded=True,
+                previous_version=Version("2.28.0"),
+            )
+        ]
+
+    with patch("pipu_cli.download.install_from_local", side_effect=fake_install_from_local):
+        results = cli_module._upgrade_install_single_env(
+            "jupyter",
+            "/path/to/python",
+            ["requests==2.31.0"],
+            dest_dir=tmp_path,
+            tracker=FakeTracker(),
+        )
+
+    assert results[0].upgraded is True
+    assert ("start", "jupyter") in events
+    assert ("message", "jupyter", "Installing collected packages: requests") in events
+    assert ("complete", "jupyter") in events
 
 
 def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
@@ -679,6 +865,19 @@ class TestGroupExecution:
         # inspect should be called for each environment
         assert mock_inspect.call_count == 2
 
+    def test_upgrade_group_debug_enables_debug_logging(self, runner):
+        """upgrade -g --debug should use the same debug setup as local upgrade."""
+        with patch("pipu_cli._group_runner.get_group", return_value=["/python/a"]), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=[]), \
+             patch("os.path.exists", return_value=True):
+            result = runner.invoke(
+                cli,
+                ["upgrade", "-g", "mygroup", "--yes", "--debug", "--no-cache", "--no-check"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Debug mode enabled" in result.output
+
     def test_upgrade_group_skips_missing_env(self, runner):
         """upgrade -g skips environments that don't exist."""
         def path_exists(path):
@@ -805,6 +1004,8 @@ class TestGroupExecution:
             "rich": Version("13.7.0"),
         }
         captured_specs = {}
+        captured_download_kwargs = {}
+        captured_install_kwargs = {}
 
         def fake_latest(installed_packages, **_kwargs):
             return {
@@ -813,6 +1014,7 @@ class TestGroupExecution:
             }
 
         def fake_download(env_specs, *_args, progress_callback=None, **_kwargs):
+            captured_download_kwargs.update(_kwargs)
             if progress_callback is not None:
                 progress_callback("requests==2.31.0", False, "timed out after 300s")
                 progress_callback("rich==13.7.0", True, "")
@@ -820,6 +1022,7 @@ class TestGroupExecution:
 
         def fake_install_single_env(env_name, _env_path, specs, **_kwargs):
             captured_specs[env_name] = list(specs)
+            captured_install_kwargs.update(_kwargs)
             return [
                 UpgradedPackage(
                     name="rich",
@@ -846,13 +1049,99 @@ class TestGroupExecution:
              patch("pipu_cli.rollback.save_state"):
             result = runner.invoke(
                 cli,
-                ["upgrade", "-g", "all", "--yes", "--no-cache", "--no-check", "-p", "1"],
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--timeout",
+                    "900",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
             )
 
         assert result.exit_code == 1, result.output
-        assert captured_specs == {"main": ["rich==13.7.0"]}
+        assert captured_download_kwargs["timeout"] == 900
+        assert captured_download_kwargs["use_download_cache"] is True
+        assert captured_install_kwargs["timeout"] == 900
+        assert captured_specs == {"main": ["rich"]}
         assert "requests" in result.output
-        assert "Download failed: timed out after 300s" in result.output
+
+    def test_upgrade_group_relaxes_unconstrained_install_specs(self, runner):
+        """Group installs should not force latest pins after staging downloads."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="logfire",
+                version=Version("4.32.1"),
+                is_editable=False,
+                constrained_dependencies={},
+            ),
+        ]
+        latest_by_name = {
+            "logfire": Version("4.33.0"),
+        }
+        captured_download_specs = {}
+        captured_install_specs = {}
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=latest_by_name[pkg.name])
+                for pkg in installed_packages
+            }
+
+        def fake_download(env_specs, *_args, **_kwargs):
+            captured_download_specs.update(env_specs)
+
+        def fake_install_single_env(env_name, _env_path, specs, **_kwargs):
+            captured_install_specs[env_name] = list(specs)
+            return [
+                UpgradedPackage(
+                    name="logfire",
+                    version=Version("4.32.1"),
+                    upgraded=False,
+                    previous_version=Version("4.32.1"),
+                    failure_reason="Version unchanged — may be constrained by dependency resolver",
+                ),
+            ]
+
+        def fake_run_per_env(ctx, worker):
+            return {
+                name: worker(name, path, cli_module.InterruptToken())
+                for name, path in ctx.envs.items()
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}), \
+             patch("pipu_cli.download.download_packages_for_group", side_effect=fake_download), \
+             patch("pipu_cli.cli._upgrade_install_single_env", side_effect=fake_install_single_env), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=fake_run_per_env), \
+             patch("pipu_cli.rollback.save_state"):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "logfire",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured_download_specs == {"main": ["logfire==4.33.0"]}
+        assert captured_install_specs == {"main": ["logfire"]}
+        assert "constrained" in result.output
 
 
 class TestInstallCommand:

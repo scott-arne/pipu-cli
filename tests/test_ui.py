@@ -117,6 +117,138 @@ class TestDownloadTracker:
         output = buf.getvalue()
         assert "100%" in output
 
+    def test_download_tracker_known_size_omits_idle_text(self):
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["OpenEye-toolkits==2025.2.3"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("OpenEye-toolkits==2025.2.3")
+        tracker.progress("OpenEye-toolkits==2025.2.3", 1_024, 4_096)
+
+        state = tracker._active["OpenEye-toolkits==2025.2.3"]
+        assert state.downloaded == 1_024
+        assert state.total == 4_096
+
+        now = 1007.0
+        line = tracker._render_active_lines().plain
+        assert "OpenEye-toolkits==2025.2.3" in line
+        assert "25%" in line
+        assert "active" not in line
+        assert "idle" not in line
+        tracker.finish()
+
+    def test_download_tracker_known_size_uses_timeout_relative_styles(self):
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["large-pkg==1.0.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("large-pkg==1.0.0")
+        tracker.progress("large-pkg==1.0.0", 1_024, 4_096)
+
+        now = 1004.0
+        recent = tracker._render_active_lines()
+        assert any(span.style == "green" for span in recent.spans)
+
+        now = 1005.0
+        warning = tracker._render_active_lines()
+        assert any(span.style == "yellow" for span in warning.spans)
+
+        now = 1009.0
+        critical = tracker._render_active_lines()
+        assert any(span.style == "red" for span in critical.spans)
+        tracker.finish()
+
+    def test_download_tracker_complete_known_size_stays_normal_after_timeout(self):
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["large-pkg==1.0.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("large-pkg==1.0.0")
+        tracker.progress("large-pkg==1.0.0", 4_096, 4_096)
+
+        now = 1020.0
+        line = tracker._render_active_lines()
+        assert "100%" in line.plain
+        assert "idle" not in line.plain
+        assert any(span.style == "green" for span in line.spans)
+        tracker.finish()
+
+    def test_download_tracker_waiting_row_uses_dim_package_name_only(self):
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["pydantic-ai==1.94.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("pydantic-ai==1.94.0")
+
+        now = 1014.0
+        line = tracker._render_active_lines().plain
+        assert "pydantic-ai==1.94.0" in line
+        assert "waiting" not in line
+        assert "active" not in line
+        assert "idle" not in line
+        tracker.finish()
+
+    def test_download_tracker_unknown_size_shows_bytes_without_status_text(self):
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["streamed-pkg==1.0.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("streamed-pkg==1.0.0")
+        tracker.progress("streamed-pkg==1.0.0", 1_024, None)
+
+        now = 1014.0
+        line = tracker._render_active_lines()
+        assert "1.0 KB" in line.plain
+        assert "active" not in line.plain
+        assert "idle" not in line.plain
+        assert any(span.style == "dim" for span in line.spans)
+        tracker.finish()
+
 
 class TestInstallTracker:
     """Tests for install progress tracking."""
@@ -185,6 +317,56 @@ class TestGroupInstallTracker:
         tracker.finish()
         output = buf.getvalue()
         assert "main" in output
+
+    def test_group_tracker_message_env_updates_status_text(self):
+        buf = StringIO()
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["jupyter"],
+            env_totals={"jupyter": 2},
+        )
+        tracker.start_env("jupyter")
+        tracker.message_env("jupyter", "Installing collected packages: requests")
+        task = tracker._progress.tasks[0]
+        assert task.fields["pkg"].startswith("Installing collected")
+        tracker.finish()
+
+    def test_group_tracker_processing_path_uses_basename(self):
+        buf = StringIO()
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["jupyter"],
+            env_totals={"jupyter": 2},
+        )
+        tracker.start_env("jupyter")
+        tracker.message_env(
+            "jupyter",
+            "Processing /var/folders/tmp/pipu/OpenEye_toolkits-2025.2.3-py310.py3-none-any.whl",
+        )
+        task = tracker._progress.tasks[0]
+        assert task.fields["pkg"].startswith("Processing OpenEye_toolkits")
+        assert "/var/folders" not in task.fields["pkg"]
+        tracker.finish()
+
+    def test_group_tracker_fail_env_preserves_completed_count(self):
+        buf = StringIO()
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_group_install_progress(
+            env_names=["jupyter"],
+            env_totals={"jupyter": 2},
+        )
+        tracker.advance("jupyter", "requests")
+        tracker.fail_env("jupyter", "timeout")
+        task = tracker._progress.tasks[0]
+        assert task.completed == 1
+        assert task.fields["count"].strip() == "1/2"
+        tracker.finish()
 
 
 class TestContextManagerCursorRestoration:

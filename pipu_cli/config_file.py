@@ -1,13 +1,15 @@
 """Configuration file support for pipu."""
 
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore
+else:
+    # tomli is installed only for Python versions that need the fallback.
+    import tomli as tomllib  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 

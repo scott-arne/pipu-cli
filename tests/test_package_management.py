@@ -3347,6 +3347,36 @@ class TestPythonPathInstallation:
         assert cmd[0] == "/other/python"
         assert results[0].upgraded is True
 
+    def test_reinstall_editable_same_version_is_not_upgraded(self):
+        """A successful editable reinstall is not an upgrade when the version stays unchanged."""
+        from pipu_cli._subprocess import PipResult
+        from pipu_cli.package_management import reinstall_editable_packages
+
+        packages = [
+            UpgradePackageInfo(
+                name="iSIM",
+                version=Version("15.0.0"),
+                upgradable=True,
+                latest_version=Version("16.3.0"),
+                is_editable=True,
+                editable_location="/home/user/iSIM",
+            )
+        ]
+
+        with patch("pipu_cli.package_management.run_pip", return_value=PipResult(0, "", "")), \
+             patch("pipu_cli.package_management._get_remote_package_versions") as mock_versions:
+            mock_versions.return_value = {"isim": Version("15.0.0")}
+
+            results = reinstall_editable_packages(
+                packages, python_path="/other/python"
+            )
+
+        assert len(results) == 1
+        assert results[0].upgraded is False
+        assert results[0].version == Version("15.0.0")
+        assert results[0].previous_version == Version("15.0.0")
+        assert results[0].failure_reason == "Editable source version unchanged"
+
     def test_install_packages_interrupt_token_propagates(self):
         """install_packages routes interrupt_token through run_pip's early-return branch."""
         from pipu_cli._subprocess import InterruptToken

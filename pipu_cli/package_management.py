@@ -87,6 +87,24 @@ class UpgradedPackage(Package):
     failure_reason: Optional[str] = None
 
 
+CONSTRAINED_BY_RESOLVER_REASON = (
+    "Version unchanged \u2014 may be constrained by dependency resolver"
+)
+
+
+def is_resolver_constrained_upgrade(pkg: UpgradedPackage) -> bool:
+    """Return True when pip completed but kept a package at its old version."""
+    return (
+        not pkg.upgraded
+        and pkg.failure_reason == CONSTRAINED_BY_RESOLVER_REASON
+    )
+
+
+def is_failed_upgrade_result(pkg: UpgradedPackage) -> bool:
+    """Return True for actual upgrade errors, excluding resolver constraints."""
+    return not pkg.upgraded and not is_resolver_constrained_upgrade(pkg)
+
+
 @dataclass(frozen=True)
 class BlockedPackageInfo(Package):
     """Information about a package that cannot be upgraded."""
@@ -1694,7 +1712,7 @@ def install_packages(
                     previous_version=previous_version,
                     is_editable=pkg_info.is_editable,
                     editable_location=pkg_info.editable_location,
-                    failure_reason="Version unchanged \u2014 may be constrained by dependency resolver"
+                    failure_reason=CONSTRAINED_BY_RESOLVER_REASON,
                 )
                 results.append(upgraded_pkg)
                 logger.info(f"Package {pkg_info.name} was not upgraded (still at {actual_version})")
@@ -1855,16 +1873,23 @@ def reinstall_editable_packages(
                             pass
                         break
 
-            # For editable packages, a successful pip install is sufficient
-            # to consider the reinstall successful. The version is determined
-            # by the local source, not PyPI, so it may not increase.
+            upgraded = new_version > pkg.version
+            failure_reason = None
+            if not upgraded:
+                failure_reason = (
+                    "Editable source version unchanged"
+                    if new_version == pkg.version
+                    else "Editable source version did not increase"
+                )
+
             results.append(UpgradedPackage(
                 name=pkg.name,
                 version=new_version,
-                upgraded=True,
+                upgraded=upgraded,
                 previous_version=pkg.version,
                 is_editable=True,
                 editable_location=pkg.editable_location,
+                failure_reason=failure_reason,
             ))
             logger.info(f"Reinstalled editable package {pkg.name}: {pkg.version} -> {new_version}")
 

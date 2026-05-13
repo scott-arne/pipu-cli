@@ -21,15 +21,19 @@ from pipu_cli.package_management import (
     DepReport,
     DepProblem,
     EnvReport,
+    is_failed_upgrade_result,
+    is_resolver_constrained_upgrade,
 )
 from pipu_cli.ui import CHECKMARK, CROSS, STYLES
 
 
 _SUCCESS = STYLES["success"]
 _FAILURE = STYLES["failure"]
+_WARNING = STYLES["warning"]
 
 _CHECK_MARKUP = f"[{_SUCCESS}]{CHECKMARK}[/{_SUCCESS}]"
 _CROSS_MARKUP = f"[{_FAILURE}]{CROSS}[/{_FAILURE}]"
+_WARN_MARKUP = f"[{_WARNING}]![/{_WARNING}]"
 
 
 class _NamedRecord(Protocol):
@@ -110,6 +114,13 @@ def _print_error_details(
     for pkg_name, env_name, reason in details:
         console.print(f"\n[bold {_FAILURE}]{pkg_name}[/bold {_FAILURE}] ({env_name}) error details:")
         console.print(f"[dim]{reason}[/dim]")
+
+
+def _format_constrained_result(pkg: UpgradedPackage, *, include_version: bool) -> str:
+    """Return the warning text for a resolver-constrained upgrade result."""
+    if include_version:
+        return f"{_WARN_MARKUP} [{_WARNING}]constrained (kept {pkg.version})[/{_WARNING}]"
+    return f"{_WARN_MARKUP} [{_WARNING}]constrained[/{_WARNING}]"
 
 
 class ConsoleStream:
@@ -259,6 +270,23 @@ def _extract_error_summary(reason: str, max_len: int = 80) -> str:
                 return msg
             continue
 
+        # pip's rich resolver errors use a lowercase "error:" prefix.
+        if stripped.startswith("error:"):
+            msg = stripped.split(":", 1)[1].strip()
+            if msg:
+                if len(msg) > max_len:
+                    return msg[:max_len - 3] + "..."
+                return msg
+            continue
+
+        if stripped.startswith("×"):
+            msg = stripped.lstrip("×").strip()
+            if msg:
+                if len(msg) > max_len:
+                    return msg[:max_len - 3] + "..."
+                return msg
+            continue
+
         # ModuleNotFoundError, ImportError, etc.
         if "Error:" in stripped and not stripped.startswith(("×", "╰")):
             if len(stripped) > max_len:
@@ -268,7 +296,9 @@ def _extract_error_summary(reason: str, max_len: int = 80) -> str:
     # Fallback: find last non-decorative line
     for line in reversed(lines):
         stripped = line.strip()
-        if stripped and not stripped.startswith(("×", "╰", "─", "note:")):
+        if stripped and not stripped.startswith(
+            ("×", "╰", "─", "note:", "hint:", "Link:")
+        ):
             if len(stripped) > max_len:
                 return stripped[:max_len - 3] + "..."
             return stripped
@@ -295,7 +325,8 @@ def print_upgrade_results(
         return
 
     successful = [pkg for pkg in results if pkg.upgraded]
-    failed = [pkg for pkg in results if not pkg.upgraded]
+    constrained = [pkg for pkg in results if is_resolver_constrained_upgrade(pkg)]
+    failed = [pkg for pkg in results if is_failed_upgrade_result(pkg)]
 
     console.print(f"\n[bold {_SUCCESS}]Upgraded {len(successful)} package(s)[/bold {_SUCCESS}]")
 
@@ -306,6 +337,8 @@ def print_upgrade_results(
     for pkg in results:
         if pkg.upgraded:
             table.add_row(pkg.name, f"{_CHECK_MARKUP} {pkg.previous_version} -> [{_SUCCESS}]{pkg.version}[/{_SUCCESS}]")
+        elif is_resolver_constrained_upgrade(pkg):
+            table.add_row(pkg.name, _format_constrained_result(pkg, include_version=True))
         else:
             reason = _format_error_summary(pkg.failure_reason or "failed")
             table.add_row(pkg.name, f"{_CROSS_MARKUP} [{_FAILURE}]{reason}[/{_FAILURE}]")
@@ -318,8 +351,13 @@ def print_upgrade_results(
                 console.print(f"\n[bold {_FAILURE}]{pkg.name}[/bold {_FAILURE}] error details:")
                 console.print(f"[dim]{pkg.failure_reason}[/dim]")
 
-    if failed:
-        console.print(f"\n[bold]Summary:[/bold] {len(successful)}/{len(results)} packages upgraded successfully")
+    if failed or constrained:
+        parts = [f"{len(successful)}/{len(results)} upgraded"]
+        if constrained:
+            parts.append(f"{len(constrained)} constrained")
+        if failed:
+            parts.append(f"{len(failed)} failed")
+        console.print(f"\n[bold]Summary:[/bold] {', '.join(parts)}")
     else:
         console.print(f"\n[bold {_SUCCESS}]All packages upgraded successfully![/bold {_SUCCESS}]")
 
@@ -651,7 +689,7 @@ def print_group_results_matrix(
     for env_name in env_order:
         table.add_column(env_name, style="magenta", justify="center")
 
-    failed_details = _collect_error_details(env_results, failed=lambda r: not r.upgraded)
+    failed_details = _collect_error_details(env_results, failed=is_failed_upgrade_result)
 
     for pkg_name in row_keys:
         row = [pkg_name]
@@ -661,6 +699,8 @@ def print_group_results_matrix(
                 row.append("[dim]-[/dim]")
             elif entry.upgraded:
                 row.append(f"{_CHECK_MARKUP} {entry.previous_version}->[{_SUCCESS}]{entry.version}[/{_SUCCESS}]")
+            elif is_resolver_constrained_upgrade(entry):
+                row.append(_format_constrained_result(entry, include_version=False))
             else:
                 summary = _format_error_summary(entry.failure_reason or "failed")
                 row.append(f"{_CROSS_MARKUP} [{_FAILURE}]{summary}[/{_FAILURE}]")

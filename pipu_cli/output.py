@@ -19,6 +19,8 @@ from pipu_cli.package_management import (
     DepProblem,
     DepReport,
     EnvReport,
+    is_failed_upgrade_result,
+    is_resolver_constrained_upgrade,
 )
 
 
@@ -60,16 +62,19 @@ def build_upgrade_payload(
         "upgradable": [package_to_dict(pkg) for pkg in upgradable],
         "blocked": [package_to_dict(pkg) for pkg in blocked] if blocked else [],
         "results": [],
-        "summary": {"total": 0, "upgraded": 0, "failed": 0},
+        "summary": {"total": 0, "upgraded": 0, "constrained": 0, "failed": 0},
     }
 
     if results is not None:
         payload["results"] = [package_to_dict(pkg) for pkg in results]
         upgraded = sum(1 for pkg in results if pkg.upgraded)
+        constrained = sum(1 for pkg in results if is_resolver_constrained_upgrade(pkg))
+        failed = sum(1 for pkg in results if is_failed_upgrade_result(pkg))
         payload["summary"] = {
             "total": len(results),
             "upgraded": upgraded,
-            "failed": len(results) - upgraded,
+            "constrained": constrained,
+            "failed": failed,
         }
 
     return payload

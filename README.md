@@ -354,7 +354,7 @@ A user-level config can be placed at `~/.config/pipu/config.toml`.
 | `--update-requirements PATH` | | Update a requirements.txt after upgrade |
 | `--no-cache` | | Skip cache |
 | `--cache-ttl INTEGER` | | Cache freshness in seconds (default: 3600) |
-| `--timeout INTEGER` | | Network timeout in seconds (default: 10) |
+| `--timeout INTEGER` | | Network timeout in seconds; downloads use it as an idle timeout, and larger values extend upgrade installs (default: 10) |
 | `--pre` | | Include pre-release versions |
 | `--yes` | `-y` | Skip confirmation |
 | `--no-check` | | Skip the post-upgrade consistency check |

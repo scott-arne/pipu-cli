@@ -10,8 +10,9 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
-from typing import IO, Optional, Protocol
+from typing import Callable, IO, Literal, Optional, Protocol
 
 
 class SupportsWriteFlush(Protocol):
@@ -85,16 +86,32 @@ class InterruptToken:
                 pass
 
 
-def _drain(stream: IO[str], sink: list[str] | None, tee: Optional[SupportsWriteFlush]) -> None:
+def _drain(
+    stream: IO[str],
+    sink: list[str] | None,
+    tee: Optional[SupportsWriteFlush],
+    on_activity: Optional[Callable[[], None]] = None,
+    line_callback: Optional[Callable[[str], None]] = None,
+) -> None:
     """Read ``stream`` line-by-line, append to ``sink``, optionally mirror to ``tee``.
 
     :param stream: File-like handle attached to the subprocess pipe.
     :param sink: Capture buffer; pass ``None`` to discard (used when streaming,
         so ``PipResult.stdout``/``stderr`` stay empty per the contract).
     :param tee: Optional stream to mirror lines to in real time.
+    :param on_activity: Optional callback invoked whenever a line arrives.
+    :param line_callback: Optional observer invoked with each output line.
     """
     try:
         for line in iter(stream.readline, ""):
+            if on_activity is not None:
+                on_activity()
+            if line_callback is not None:
+                try:
+                    line_callback(line)
+                except Exception:
+                    # Progress observers must not poison subprocess draining.
+                    pass
             if sink is not None:
                 sink.append(line)
             if tee is not None:
@@ -140,9 +157,11 @@ def run_pip(
     *,
     python_path: str | None = None,
     output_stream: Optional[SupportsWriteFlush] = None,
-    timeout: int = 300,
+    timeout: float = 300,
     stream_output: bool = True,
     interrupt_token: InterruptToken | None = None,
+    timeout_mode: Literal["wall", "idle"] = "wall",
+    line_callback: Optional[Callable[[str], None]] = None,
 ) -> PipResult:
     """Run pip (or any Python command) as a subprocess.
 
@@ -150,16 +169,24 @@ def run_pip(
         pass e.g. ``["-m", "pip", "install", "requests"]``.
     :param python_path: Interpreter to invoke. Defaults to ``sys.executable``.
     :param output_stream: If ``stream_output`` is True, lines are tee'd here.
-    :param timeout: Hard wall-clock timeout in seconds.
+    :param timeout: Timeout in seconds. With ``timeout_mode="wall"``, this is
+        a hard wall-clock limit. With ``timeout_mode="idle"``, this is the
+        maximum time allowed without stdout/stderr activity.
     :param stream_output: When True, drain stdout/stderr in real time (captured
         strings stay empty). When False, capture both fully.
     :param interrupt_token: Optional token; if ``set()`` during the call, the
         subprocess is terminated and ``PipResult.interrupted`` is True.
+    :param timeout_mode: Whether to apply ``timeout`` as a wall-clock or idle
+        limit.
+    :param line_callback: Optional observer invoked with each stdout/stderr line.
     :returns: A :class:`PipResult`. If both an interrupt and a timeout could
         apply, ``interrupted`` wins -- user cancel is treated as more
         semantically meaningful than wall-clock expiry, so ``timed_out`` is
         reported as False in that case.
     """
+
+    if timeout_mode not in {"wall", "idle"}:
+        raise ValueError(f"Unsupported timeout_mode: {timeout_mode}")
 
     py = python_path or sys.executable
     cmd = [py, *argv]
@@ -171,6 +198,8 @@ def run_pip(
         text=True,
         bufsize=1,
     )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
 
     if interrupt_token is not None:
         interrupt_token.register(proc)
@@ -192,19 +221,51 @@ def run_pip(
     out_sink: list[str] | None = None if stream_output else stdout_buf
     err_sink: list[str] | None = None if stream_output else stderr_buf
 
-    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_sink, tee), daemon=True)
-    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_sink, tee), daemon=True)
+    activity_lock = threading.Lock()
+    last_activity = time.monotonic()
+
+    def mark_activity() -> None:
+        nonlocal last_activity
+        with activity_lock:
+            last_activity = time.monotonic()
+
+    def idle_seconds() -> float:
+        with activity_lock:
+            return time.monotonic() - last_activity
+
+    t_out = threading.Thread(
+        target=_drain,
+        args=(proc.stdout, out_sink, tee, mark_activity, line_callback),
+        daemon=True,
+    )
+    t_err = threading.Thread(
+        target=_drain,
+        args=(proc.stderr, err_sink, tee, mark_activity, line_callback),
+        daemon=True,
+    )
     t_out.start()
     t_err.start()
 
     timed_out = False
     interrupted = False
     try:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _cleanup(proc)
+        if timeout_mode == "wall":
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _cleanup(proc)
+        else:
+            while proc.poll() is None:
+                remaining = timeout - idle_seconds()
+                if remaining <= 0:
+                    timed_out = True
+                    _cleanup(proc)
+                    break
+                try:
+                    proc.wait(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
     except KeyboardInterrupt:
         interrupted = True
         _cleanup(proc)

@@ -1,10 +1,13 @@
 """Upgrade UI display layer using Rich progress components."""
 
 import threading
+import time
+from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
 from types import TracebackType
-from typing import Dict, List, Optional, Set, Type
+from typing import Callable, Dict, List, Optional, Type
 
-from rich.console import Console, Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TaskID
 from rich.text import Text
@@ -25,6 +28,7 @@ STYLES = {
 
 ENV_NAME_MAX = 16
 PKG_NAME_MAX = 20
+INSTALL_STATUS_MAX = 48
 
 
 def _fit(name: str, width: int) -> str:
@@ -34,21 +38,88 @@ def _fit(name: str, width: int) -> str:
     return name[: width - 1] + "\u2026"
 
 
+@dataclass
+class _DownloadState:
+    """Live progress state for one active package download."""
+
+    downloaded: Optional[int]
+    total: Optional[int]
+    last_activity: float
+
+
+class _DownloadStatusRenderable:
+    """Renderable wrapper so idle ages update between download events."""
+
+    def __init__(self, tracker: "DownloadTracker") -> None:
+        self._tracker = tracker
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        del console, options
+        lines = self._tracker._render_active_lines()
+        if lines.plain:
+            yield lines
+
+
+def _format_bytes(size: int) -> str:
+    """Format a byte count compactly for one-line progress rows."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _path_name(value: str) -> str:
+    """Return the filename portion from a pip-reported local path."""
+    cleaned = value.strip().strip("'\"")
+    if "\\" in cleaned and "/" not in cleaned:
+        return PureWindowsPath(cleaned).name
+    return PurePath(cleaned).name
+
+
+def _summarize_install_activity(message: str) -> str:
+    """Compact noisy pip install lines for one-line environment status."""
+    status = message.strip()
+    if status.startswith("Processing "):
+        target = status.removeprefix("Processing ").strip()
+        name = _path_name(target)
+        if name and name != target:
+            return f"Processing {name}"
+    return status
+
+
 class DownloadTracker:
     """Single progress bar with a compact bulleted list of active downloads below.
 
     Thread-safe for use with parallel downloads.
     """
 
-    def __init__(self, live: Live, progress: Progress, task_id: TaskID, total: int) -> None:
-        self._live = live
+    def __init__(
+        self,
+        progress: Progress,
+        task_id: TaskID,
+        total: int,
+        *,
+        idle_timeout: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._live: Optional[Live] = None
         self._progress = progress
         self._task_id = task_id
         self._total = total
         self._completed = 0
         self._failed = 0
-        self._active: Set[str] = set()
+        self._active: Dict[str, _DownloadState] = {}
+        self._idle_timeout = idle_timeout
+        self._clock = clock
         self._lock = threading.Lock()
+
+    def attach_live(self, live: Live) -> None:
+        """Attach the Rich live display after renderable construction."""
+        self._live = live
 
     def start(self, spec: str) -> None:
         """Mark a package as actively downloading.
@@ -56,8 +127,30 @@ class DownloadTracker:
         :param spec: Package spec (e.g., "requests==2.31.0")
         """
         with self._lock:
-            self._active.add(spec)
-            self._refresh()
+            now = self._clock()
+            self._active[spec] = _DownloadState(
+                downloaded=None,
+                total=None,
+                last_activity=now,
+            )
+        self._refresh()
+
+    def progress(self, spec: str, downloaded: int, total: Optional[int]) -> None:
+        """Record byte-level progress for an active package.
+
+        :param spec: Package spec.
+        :param downloaded: Bytes downloaded so far.
+        :param total: Total bytes expected, or ``None`` when pip does not know.
+        """
+        with self._lock:
+            state = self._active.get(spec)
+            if state is None:
+                state = _DownloadState(downloaded=None, total=None, last_activity=self._clock())
+                self._active[spec] = state
+            state.downloaded = downloaded
+            state.total = total
+            state.last_activity = self._clock()
+        self._refresh()
 
     def complete(self, spec: str) -> None:
         """Mark a package download as complete.
@@ -65,10 +158,10 @@ class DownloadTracker:
         :param spec: Package spec
         """
         with self._lock:
-            self._active.discard(spec)
+            self._active.pop(spec, None)
             self._completed += 1
             self._progress.update(self._task_id, completed=self._completed + self._failed)
-            self._refresh()
+        self._refresh()
 
     def fail(self, spec: str) -> None:
         """Mark a package download as failed.
@@ -76,28 +169,77 @@ class DownloadTracker:
         :param spec: Package spec
         """
         with self._lock:
-            self._active.discard(spec)
+            self._active.pop(spec, None)
             self._failed += 1
             self._progress.update(self._task_id, completed=self._completed + self._failed)
-            self._refresh()
+        self._refresh()
 
     def _refresh(self) -> None:
-        if self._active:
-            lines = Text()
-            for spec in sorted(self._active):
-                lines.append(f"    {BULLET} ", style="dim")
-                lines.append(spec, style="dim")
+        if self._live is not None:
+            self._live.refresh()
+
+    def _render_active_lines(self) -> Text:
+        """Render active package rows below the aggregate progress bar."""
+        now = self._clock()
+        with self._lock:
+            snapshot = sorted(
+                (
+                    spec,
+                    state.downloaded,
+                    state.total,
+                    state.last_activity,
+                )
+                for spec, state in self._active.items()
+            )
+
+        lines = Text()
+        for index, (spec, downloaded, total, last_activity) in enumerate(snapshot):
+            if index:
                 lines.append("\n")
-            if lines.plain.endswith("\n"):
-                lines.right_crop(1)
-            self._live.update(Group(self._progress, lines))
-        else:
-            self._live.update(Group(self._progress))
+            lines.append(f"    {BULLET} ", style="dim")
+            lines.append(spec, style="dim")
+            detail = self._format_progress(downloaded, total)
+            if detail:
+                lines.append("  ", style="dim")
+                age = max(0.0, now - last_activity)
+                lines.append(detail, style=self._progress_style(downloaded, total, age))
+        return lines
+
+    def _format_progress(self, downloaded: Optional[int], total: Optional[int]) -> str:
+        if downloaded is None:
+            return ""
+        if total is None:
+            return _format_bytes(downloaded)
+        percent = min(100.0, (downloaded / total) * 100) if total else 0.0
+        return f"{_format_bytes(downloaded)} / {_format_bytes(total)} {percent:.0f}%"
+
+    def _activity_thresholds(self) -> tuple[float, float]:
+        if self._idle_timeout is None:
+            return 5.0, 10.0
+        return self._idle_timeout * 0.5, self._idle_timeout * 0.9
+
+    def _progress_style(
+        self,
+        downloaded: Optional[int],
+        total: Optional[int],
+        age: float,
+    ) -> str:
+        if total is None:
+            return "dim"
+        if total is not None and downloaded is not None and downloaded >= total:
+            return "green"
+        warning_age, critical_age = self._activity_thresholds()
+        if age >= critical_age:
+            return "red"
+        if age >= warning_age:
+            return "yellow"
+        return "green"
 
     def finish(self) -> None:
         """Stop the progress display."""
-        self._live.update(self._progress)
-        self._live.stop()
+        if self._live is not None:
+            self._live.update(self._progress)
+            self._live.stop()
 
     def cleanup(self) -> None:
         """Stop the progress display. Safe to call multiple times.
@@ -131,7 +273,8 @@ class DownloadTracker:
             self.cleanup()
         finally:
             try:
-                self._live.console.show_cursor(True)
+                if self._live is not None:
+                    self._live.console.show_cursor(True)
             except Exception:
                 # Swallow errors during interrupt cleanup: stdout may already be closed.
                 pass
@@ -164,6 +307,44 @@ class GroupInstallTracker:
 
     def _make_count(self, count: int, total: int) -> str:
         return f"{count}/{total}".rjust(self._count_width)
+
+    def start_env(self, env_name: str) -> None:
+        """Mark an environment as actively installing.
+
+        :param env_name: Short environment name.
+        """
+        with self._lock:
+            if env_name in self._tasks:
+                total = self._totals[env_name]
+                count = self._completed.get(env_name, 0)
+                self._progress.update(
+                    self._tasks[env_name],
+                    completed=count,
+                    description=self._make_desc(DOT, env_name),
+                    count=self._make_count(count, total),
+                    pkg="installing...",
+                )
+
+    def message_env(self, env_name: str, message: str) -> None:
+        """Show the latest install activity for an environment.
+
+        :param env_name: Short environment name.
+        :param message: Latest pip output line.
+        """
+        status = _summarize_install_activity(message)
+        if not status:
+            return
+        with self._lock:
+            if env_name in self._tasks:
+                total = self._totals[env_name]
+                count = self._completed.get(env_name, 0)
+                self._progress.update(
+                    self._tasks[env_name],
+                    completed=count,
+                    description=self._make_desc(DOT, env_name),
+                    count=self._make_count(count, total),
+                    pkg=_fit(status, INSTALL_STATUS_MAX),
+                )
 
     def advance(self, env_name: str, package_name: str) -> None:
         """Record a package install completion for an environment.
@@ -212,7 +393,7 @@ class GroupInstallTracker:
                 count = self._completed.get(env_name, 0)
                 self._progress.update(
                     self._tasks[env_name],
-                    completed=total,
+                    completed=count,
                     description=self._make_desc(f"[bold red]{CROSS}[/bold red]", env_name),
                     count=self._make_count(count, total),
                     pkg=f"[red]{reason}[/red]",
@@ -347,11 +528,20 @@ class UpgradeUI:
 
         self.console.print(f"[bold green]{CHECKMARK}[/bold green] {description} [dim]{summary}[/dim]")
 
-    def show_download_progress(self, specs: List[str], label: str = "Downloading") -> DownloadTracker:
+    def show_download_progress(
+        self,
+        specs: List[str],
+        label: str = "Downloading",
+        *,
+        idle_timeout: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> DownloadTracker:
         """Show a single progress bar for downloading with active-package list.
 
         :param specs: List of package specs to download
         :param label: Label for the progress bar
+        :param idle_timeout: Optional idle timeout used to color idle rows.
+        :param clock: Monotonic clock for live idle-age calculation.
         :returns: DownloadTracker for updating progress
         """
         progress = Progress(
@@ -361,9 +551,21 @@ class UpgradeUI:
             console=self.console,
         )
         task_id = progress.add_task(f"  {label}", total=len(specs))
-        live = Live(progress, console=self.console, refresh_per_second=8)
+        tracker = DownloadTracker(
+            progress,
+            task_id,
+            len(specs),
+            idle_timeout=idle_timeout,
+            clock=clock,
+        )
+        live = Live(
+            Group(progress, _DownloadStatusRenderable(tracker)),
+            console=self.console,
+            refresh_per_second=8,
+        )
+        tracker.attach_live(live)
         live.start()
-        return DownloadTracker(live, progress, task_id, len(specs))
+        return tracker
 
     def show_install_progress(self, specs: List[str], label: str = "Installing") -> DownloadTracker:
         """Show a single progress bar for installing with active-package list.
@@ -379,9 +581,15 @@ class UpgradeUI:
             console=self.console,
         )
         task_id = progress.add_task(f"  {label}", total=len(specs))
-        live = Live(progress, console=self.console, refresh_per_second=8)
+        tracker = DownloadTracker(progress, task_id, len(specs))
+        live = Live(
+            Group(progress, _DownloadStatusRenderable(tracker)),
+            console=self.console,
+            refresh_per_second=8,
+        )
+        tracker.attach_live(live)
         live.start()
-        return DownloadTracker(live, progress, task_id, len(specs))
+        return tracker
 
     def show_group_install_progress(
         self, env_names: List[str], env_totals: Dict[str, int]

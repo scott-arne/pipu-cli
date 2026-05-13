@@ -9,12 +9,14 @@ from packaging.version import Version
 
 from pipu_cli.pretty import (
     ConsoleStream,
+    _extract_error_summary,
     _parse_selection,
     extract_env_short_name,
     print_blocked_packages_table,
     print_env_legend,
     print_group_blocked_table,
     print_group_install_matrix,
+    print_group_results_matrix,
     print_group_upgrade_matrix,
     print_upgrade_results,
 )
@@ -115,8 +117,8 @@ class TestParseSelection:
         assert _parse_selection("1-3,4", 5) == [0, 1, 2, 3]
 
 
-def test_print_upgrade_results_shows_failure_reason():
-    """Test that failure reason is shown instead of hardcoded message."""
+def test_print_upgrade_results_marks_resolver_constraints_as_warning():
+    """Resolver-constrained packages should not render as hard failures."""
     buf = StringIO()
 
     console = Console(file=buf, force_terminal=True)
@@ -131,8 +133,36 @@ def test_print_upgrade_results_shows_failure_reason():
     ]
     print_upgrade_results(results, console=console)
     output = buf.getvalue()
-    assert "Version unchanged" in output
-    assert "Blocked by runtime constraints" not in output
+    assert "constrained" in output
+    assert "kept 1.24.0" in output
+    assert "✗" not in output
+    assert "failed" not in output.lower()
+
+
+def test_print_group_results_matrix_marks_resolver_constraints_as_warning():
+    """Group results should distinguish resolver constraints from failures."""
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True, width=120)
+    env_results = {
+        "jupyter": [
+            UpgradedPackage(
+                name="opentelemetry-sdk",
+                version=Version("1.39.1"),
+                upgraded=False,
+                previous_version=Version("1.39.1"),
+                failure_reason="Version unchanged — may be constrained by dependency resolver",
+            )
+        ],
+    }
+    env_names = {"jupyter": "/path/to/jupyter/bin/python"}
+
+    print_group_results_matrix(env_results, env_names, console=console)
+
+    output = buf.getvalue()
+    assert "constrained" in output
+    assert "✗" not in output
+    assert "error details" not in output.lower()
 
 
 def test_print_upgrade_results_fallback_when_no_reason():
@@ -151,6 +181,20 @@ def test_print_upgrade_results_fallback_when_no_reason():
     print_upgrade_results(results, console=console)
     output = buf.getvalue()
     assert "failed" in output
+
+
+def test_extract_error_summary_prefers_pip_resolution_error_over_docs_link():
+    reason = """error: resolution-too-deep
+
+× Dependency resolution exceeded maximum depth
+╰─> Pip cannot resolve the current dependencies as the dependency graph is too complex for pip to solve efficiently.
+
+hint: Try adding lower bounds to constrain your dependencies, for example: 'package>=2.0.0' instead of just 'package'.
+
+Link: https://pip.pypa.io/en/stable/topics/dependency-resolution/#handling-resolution-too-deep-errors
+"""
+
+    assert _extract_error_summary(reason) == "resolution-too-deep"
 
 
 def test_print_blocked_packages_shows_all_reasons():

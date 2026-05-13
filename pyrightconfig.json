@@ -1,0 +1,31 @@
+{
+  "include": [
+    "pipu_cli",
+    "tests",
+    "tasks.py",
+    "setup.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "venv",
+    "pipu_cli.egg-info",
+    "**/node_modules",
+    "**/.*"
+  ],
+  "ignore": [
+    "build",
+    "dist",
+    "venv",
+    "**/site-packages"
+  ],
+  "venvPath": "/Users/johnss51/Applications/miniforge3/envs",
+  "venv": "main",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "standard",
+  "reportMissingModuleSource": "none"
+}
