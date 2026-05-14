@@ -10,7 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from packaging.utils import (
     InvalidSdistFilename,
@@ -19,7 +19,7 @@ from packaging.utils import (
     parse_sdist_filename,
     parse_wheel_filename,
 )
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from pipu_cli._subprocess import run_pip
 from pipu_cli.package_management import (
@@ -254,8 +254,44 @@ def _log_local_constraint_diagnostics(diagnostics: _LocalConstraintDiagnostics) 
         )
 
 
-def _write_local_constraints(dest_dir: Path) -> Optional[Path]:
-    """Pin unambiguous wheelhouse versions to keep pip's local resolver bounded."""
+def _exact_spec_version(spec: str) -> Optional[tuple[str, Version]]:
+    """Return the exact version requested by ``spec`` when it has one."""
+    try:
+        parsed = parse_package_spec(spec)
+    except ValueError:
+        return None
+
+    specifiers = list(parsed.specifier)
+    if len(specifiers) != 1:
+        return None
+    specifier = specifiers[0]
+    if specifier.operator not in {"==", "==="} or "*" in specifier.version:
+        return None
+    try:
+        return parsed.name, Version(specifier.version)
+    except InvalidVersion:
+        return None
+
+
+def _normalize_version_mapping(
+    versions: Optional[Mapping[str, Version]],
+) -> Dict[str, Version]:
+    """Return ``versions`` keyed by canonical package name."""
+    if versions is None:
+        return {}
+    return {
+        canonicalize_name(name): version
+        for name, version in versions.items()
+    }
+
+
+def _write_local_constraints(
+    dest_dir: Path,
+    specs: Optional[List[str]] = None,
+    installed_versions: Optional[Mapping[str, Version]] = None,
+    planned_versions: Optional[Mapping[str, Version]] = None,
+) -> Optional[Path]:
+    """Write resolver constraints for the current offline install plan."""
     versions_by_name: Dict[str, set[Version]] = {}
     ignored_artifacts = 0
     for path in dest_dir.iterdir():
@@ -270,14 +306,41 @@ def _write_local_constraints(dest_dir: Path) -> Optional[Path]:
         name, version = parsed
         versions_by_name.setdefault(name, set()).add(version)
 
-    lines: list[str] = []
-    ambiguous: Dict[str, List[Version]] = {}
-    for name, versions in sorted(versions_by_name.items()):
-        if len(versions) != 1:
-            ambiguous[name] = sorted(versions)
-            continue
-        version = next(iter(versions))
-        lines.append(f"{name}=={version}")
+    target_names = {
+        _canonical_name_for_spec(spec)
+        for spec in specs or []
+    }
+    normalized_planned_versions = _normalize_version_mapping(planned_versions)
+    normalized_installed_versions = _normalize_version_mapping(installed_versions)
+
+    pins: Dict[str, Version] = {}
+    for spec in specs or []:
+        name = _canonical_name_for_spec(spec)
+        planned_version = normalized_planned_versions.get(name)
+        exact = _exact_spec_version(spec)
+        artifact_versions = versions_by_name.get(name, set())
+        if planned_version is not None:
+            pins[name] = planned_version
+        elif exact is not None and exact[0] == name:
+            pins[name] = exact[1]
+        elif len(artifact_versions) == 1:
+            pins[name] = next(iter(artifact_versions))
+
+    for name, version in normalized_installed_versions.items():
+        if name not in target_names:
+            # Pip may otherwise upgrade installed dependencies that were not in
+            # pipu's preview, then only warn about conflicts after changing the env.
+            pins[name] = version
+
+    lines = [
+        f"{name}=={version}"
+        for name, version in sorted(pins.items())
+    ]
+    ambiguous: Dict[str, List[Version]] = {
+        name: sorted(versions)
+        for name, versions in sorted(versions_by_name.items())
+        if len(versions) != 1 and name not in pins
+    }
 
     if not lines:
         _log_local_constraint_diagnostics(
@@ -515,6 +578,8 @@ def install_from_local(
     timeout: int = DOWNLOAD_TIMEOUT,
     progress_callback: Optional[Callable[[str], None]] = None,
     install_activity_callback: Optional[Callable[[str], None]] = None,
+    installed_versions: Optional[Mapping[str, Version]] = None,
+    planned_versions: Optional[Mapping[str, Version]] = None,
 ) -> List[UpgradedPackage]:
     """Install packages from a local directory.
 
@@ -525,6 +590,11 @@ def install_from_local(
     :param progress_callback: Called with package spec after each install completes
     :param install_activity_callback: Called with raw pip output lines while
         the install subprocess is active.
+    :param installed_versions: Versions present before the upgrade, keyed by
+        package name. Non-target packages are pinned to these versions so pip
+        cannot silently upgrade dependencies outside pipu's resolved plan.
+    :param planned_versions: Exact target versions chosen by pipu's planner,
+        keyed by package name.
     :returns: List of UpgradedPackage results
     """
     if not specs:
@@ -539,7 +609,12 @@ def install_from_local(
         pre_versions = _get_local_package_versions(canonical_names)
 
     # Keep install offline so the preceding download phase owns all network I/O.
-    constraints_path = _write_local_constraints(dest_dir)
+    constraints_path = _write_local_constraints(
+        dest_dir,
+        specs=specs,
+        installed_versions=installed_versions,
+        planned_versions=planned_versions,
+    )
     cmd = [
         "-m", "pip", "install", "--upgrade",
         "--no-index",

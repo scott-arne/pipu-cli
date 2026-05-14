@@ -313,6 +313,33 @@ def _build_upgrade_specs(
     return f"{pkg.name}=={pkg.latest_version}", pkg.name
 
 
+def _versions_by_name(packages: list) -> dict[str, Version]:
+    """Return installed versions keyed by canonical package name."""
+    return {
+        str(canonicalize_name(pkg.name)): pkg.version
+        for pkg in packages
+    }
+
+
+def _planned_versions_by_download_spec(
+    packages: list,
+    package_constraints: dict,
+) -> dict[str, tuple[str, Version]]:
+    """Return planned target versions keyed by their download spec."""
+    planned: dict[str, tuple[str, Version]] = {}
+    constrained_names = {
+        str(canonicalize_name(name))
+        for name in package_constraints
+    }
+    for pkg in packages:
+        name = str(canonicalize_name(pkg.name))
+        if name in constrained_names:
+            continue
+        download_spec, _install_spec = _build_upgrade_specs(pkg, package_constraints)
+        planned[download_spec] = (name, pkg.latest_version)
+    return planned
+
+
 def _print_cache_diagnostics(
     console: Console,
     *,
@@ -761,6 +788,7 @@ def _download_and_install_phase(
     console: Console, output: str,
     can_upgrade: list, package_constraints: dict,
     python_path: Optional[str] = None,
+    installed_packages: Optional[list] = None,
     ui: Optional[UpgradeUI] = None,
     debug: bool = False,
     parallel: int = 1,
@@ -797,6 +825,14 @@ def _download_and_install_phase(
             download_specs.append(download_spec)
             install_specs_by_download_spec[download_spec] = install_spec
             spec_packages[download_spec] = pkg
+        planned_versions_by_spec = _planned_versions_by_download_spec(
+            non_editable_packages,
+            package_constraints,
+        )
+        installed_versions = (
+            _versions_by_name(installed_packages)
+            if installed_packages is not None else None
+        )
 
         with tempfile.TemporaryDirectory(prefix="pipu-") as tmp_dir:
             dest_dir = Path(tmp_dir)
@@ -876,6 +912,12 @@ def _download_and_install_phase(
                 for spec in download_specs
                 if spec not in download_failures
             ]
+            planned_versions = {}
+            for spec in download_specs:
+                if spec in download_failures or spec not in planned_versions_by_spec:
+                    continue
+                name, version = planned_versions_by_spec[spec]
+                planned_versions[name] = version
 
             # Install phase
             if specs and ui and output != "json":
@@ -889,6 +931,8 @@ def _download_and_install_phase(
                     python_path=python_path,
                     timeout=install_timeout,
                     progress_callback=on_install,
+                    installed_versions=installed_versions,
+                    planned_versions=planned_versions,
                 )
                 install_tracker.finish()
             elif specs:
@@ -896,6 +940,8 @@ def _download_and_install_phase(
                     dest_dir=dest_dir, specs=specs,
                     python_path=python_path,
                     timeout=install_timeout,
+                    installed_versions=installed_versions,
+                    planned_versions=planned_versions,
                 )
             else:
                 regular_results = []
@@ -1185,6 +1231,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
             results, install_time = _download_and_install_phase(
                 console, output, can_upgrade, package_constraints, ui=ui, debug=debug,
                 parallel=parallel, timeout=timeout,
+                installed_packages=installed_packages,
             )
 
             # Update requirements file if requested
@@ -2073,6 +2120,8 @@ def _upgrade_install_single_env(
     timeout: int = DOWNLOAD_TIMEOUT,
     tracker: Any = None,
     interrupt_token: Optional[InterruptToken] = None,
+    installed_versions: Optional[dict[str, Version]] = None,
+    planned_versions: Optional[dict[str, Version]] = None,
 ) -> list:
     """Install pre-downloaded wheels into a single env for the group upgrade path.
 
@@ -2087,6 +2136,10 @@ def _upgrade_install_single_env(
         token through to :func:`pipu_cli._subprocess.run_pip`, so the
         caller's ``KeyboardInterrupt`` handler still provides the
         primary cancellation path.
+    :param installed_versions: Versions present before the upgrade, keyed by
+        canonical package name.
+    :param planned_versions: Exact target versions selected by the group
+        planner, keyed by canonical package name.
     :returns: List of per-package install results (empty on worker-level
         exception so that one failing env doesn't poison the fan-out).
     """
@@ -2117,6 +2170,8 @@ def _upgrade_install_single_env(
             timeout=timeout,
             progress_callback=callback,
             install_activity_callback=activity_callback,
+            installed_versions=installed_versions,
+            planned_versions=planned_versions,
         )
         if tracker:
             failed = [result for result in results if is_failed_upgrade_result(result)]
@@ -2324,11 +2379,16 @@ def _run_group_upgrade(
             env_install_specs: dict[str, list[str]] = {}
             env_install_specs_by_download_spec: dict[str, dict[str, str]] = {}
             env_spec_packages: dict[str, dict[str, Any]] = {}
+            env_planned_versions_by_download_spec: dict[str, dict[str, tuple[str, Version]]] = {}
             for env_name, upgrades in env_upgrades.items():
                 specs = []
                 install_specs = []
                 install_specs_by_download_spec = {}
                 spec_packages = {}
+                planned_versions_by_download_spec = _planned_versions_by_download_spec(
+                    [pkg for pkg in upgrades if not pkg.is_editable],
+                    package_constraints,
+                )
                 for pkg in upgrades:
                     if pkg.is_editable:
                         continue
@@ -2345,6 +2405,9 @@ def _run_group_upgrade(
                     install_specs_by_download_spec
                 )
                 env_spec_packages[env_name] = spec_packages
+                env_planned_versions_by_download_spec[env_name] = (
+                    planned_versions_by_download_spec
+                )
 
             with tempfile.TemporaryDirectory(prefix="pipu-group-") as tmp_dir:
                 dest_dir = Path(tmp_dir)
@@ -2424,6 +2487,16 @@ def _run_group_upgrade(
                                 )
                             )
                         env_install_specs[env_name] = retained_specs
+                env_install_planned_versions: dict[str, dict[str, Version]] = {}
+                for env_name, specs in env_specs.items():
+                    planned_versions = {}
+                    planned_versions_by_spec = env_planned_versions_by_download_spec[env_name]
+                    for spec in specs:
+                        if spec in download_failures or spec not in planned_versions_by_spec:
+                            continue
+                        name, version = planned_versions_by_spec[spec]
+                        planned_versions[name] = version
+                    env_install_planned_versions[env_name] = planned_versions
 
                 # Phase 7: Install per environment (fanned out via shared runner)
                 env_order = list(env_name_map.keys())
@@ -2445,6 +2518,8 @@ def _run_group_upgrade(
                         dest_dir=dest_dir, timeout=install_timeout,
                         tracker=group_tracker,
                         interrupt_token=token,
+                        installed_versions=_versions_by_name(env_installed[name]),
+                        planned_versions=env_install_planned_versions.get(name, {}),
                     )
 
                 env_results = (

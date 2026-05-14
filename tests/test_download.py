@@ -330,8 +330,8 @@ class TestInstallFromLocal:
         assert "librt==0.10.0" in cmd
         assert [result.name for result in results] == ["mypy", "librt"]
 
-    def test_install_constrains_single_version_local_artifacts(self, tmp_path):
-        """The local install should not make pip search every possible version."""
+    def test_install_constrains_planned_target_artifacts(self, tmp_path):
+        """The local install should pin targets without blessing transitive upgrades."""
         (tmp_path / "requests-2.31.0-py3-none-any.whl").touch()
         (tmp_path / "urllib3-2.0.7-py3-none-any.whl").touch()
         pre_versions = {"requests": Version("2.28.0")}
@@ -351,10 +351,7 @@ class TestInstallFromLocal:
         assert constraints_path.parent == tmp_path
         assert constraints_path.name.startswith("pipu-local-constraints-")
         assert constraints_path.name.endswith(".txt")
-        assert constraints_path.read_text() == (
-            "requests==2.31.0\n"
-            "urllib3==2.0.7\n"
-        )
+        assert constraints_path.read_text() == "requests==2.31.0\n"
 
     def test_install_constraints_omit_ambiguous_local_artifact_versions(self, tmp_path):
         """Ambiguous transitive artifacts should be left for pip's resolver."""
@@ -374,6 +371,32 @@ class TestInstallFromLocal:
         cmd = mock_run.call_args[0][0]
         constraints_path = Path(cmd[cmd.index("--constraint") + 1])
         assert constraints_path.read_text() == "requests==2.31.0\n"
+
+    def test_install_constraints_pin_installed_non_targets_over_staged_artifacts(self, tmp_path):
+        """Staged transitive wheels must not upgrade packages outside the plan."""
+        (tmp_path / "uvicorn-0.47.0-py3-none-any.whl").touch()
+        (tmp_path / "packaging-26.2-py3-none-any.whl").touch()
+        pre_versions = {"uvicorn": Version("0.46.0")}
+        post_versions = {"uvicorn": Version("0.47.0")}
+
+        with patch("pipu_cli.download.run_pip", return_value=PipResult(0, "", "")) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            install_from_local(
+                dest_dir=tmp_path,
+                specs=["uvicorn"],
+                installed_versions={
+                    "uvicorn": Version("0.46.0"),
+                    "packaging": Version("25.0"),
+                },
+                planned_versions={"uvicorn": Version("0.47.0")},
+            )
+
+        cmd = mock_run.call_args[0][0]
+        constraints_path = Path(cmd[cmd.index("--constraint") + 1])
+        assert constraints_path.read_text() == (
+            "packaging==25.0\n"
+            "uvicorn==0.47.0\n"
+        )
 
     def test_install_ignores_existing_generated_constraint_files(self, tmp_path, caplog):
         """Concurrent group installs should not treat generated constraint files as artifacts."""
@@ -416,12 +439,12 @@ class TestInstallFromLocal:
         messages = "\n".join(caplog.messages)
         assert "Local wheelhouse constraints:" in messages
         assert "pipu-local-constraints-" in messages
-        assert "2 pinned" in messages
+        assert "1 pinned" in messages
         assert "1 ambiguous" in messages
         assert "1 ignored artifact" in messages
         assert "dep==2.0.0" not in messages
         assert "requests==2.31.0" in messages
-        assert "urllib3==2.0.7" in messages
+        assert "urllib3==2.0.7" not in messages
         assert "dep: 1.0.0, 2.0.0" in messages
 
     def test_install_uses_idle_timeout_runner(self, tmp_path):

@@ -122,6 +122,7 @@ def test_upgrade_passes_timeout_to_download_phase(runner, mock_packages):
 
     assert result.exit_code == 0, result.output
     assert captured_kwargs["timeout"] == 900
+    assert captured_kwargs["installed_packages"] == installed
 
 
 def test_download_and_install_phase_skips_specs_that_failed_download():
@@ -139,6 +140,20 @@ def test_download_and_install_phase_skips_specs_that_failed_download():
             version=Version("13.0.0"),
             upgradable=True,
             latest_version=Version("13.7.0"),
+        ),
+    ]
+    installed = [
+        InstalledPackage(
+            name="requests",
+            version=Version("2.28.0"),
+            is_editable=False,
+            constrained_dependencies={},
+        ),
+        InstalledPackage(
+            name="rich",
+            version=Version("13.0.0"),
+            is_editable=False,
+            constrained_dependencies={},
         ),
     ]
     installed_specs = []
@@ -173,11 +188,19 @@ def test_download_and_install_phase_skips_specs_that_failed_download():
             upgrades,
             {},
             timeout=900,
+            installed_packages=installed,
         )
 
     assert captured_download_kwargs["timeout"] == 900
     assert captured_download_kwargs["use_download_cache"] is True
     assert captured_install_kwargs["timeout"] == 900
+    assert captured_install_kwargs["installed_versions"] == {
+        "requests": Version("2.28.0"),
+        "rich": Version("13.0.0"),
+    }
+    assert captured_install_kwargs["planned_versions"] == {
+        "rich": Version("13.7.0"),
+    }
     assert installed_specs == ["rich"]
     failed = [result for result in results if result.name == "requests"]
     assert len(failed) == 1
@@ -492,6 +515,29 @@ def test_group_install_worker_reports_install_activity(tmp_path):
     assert ("start", "jupyter") in events
     assert ("message", "jupyter", "Installing collected packages: requests") in events
     assert ("complete", "jupyter") in events
+
+
+def test_group_install_worker_passes_resolver_boundary_to_local_install(tmp_path):
+    """The group worker should freeze installed non-target packages."""
+    captured = {}
+
+    def fake_install_from_local(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return []
+
+    with patch("pipu_cli.download.install_from_local", side_effect=fake_install_from_local):
+        cli_module._upgrade_install_single_env(
+            "jupyter",
+            "/path/to/python",
+            ["uvicorn"],
+            dest_dir=tmp_path,
+            installed_versions={"packaging": Version("25.0")},
+            planned_versions={"uvicorn": Version("0.47.0")},
+        )
+
+    assert captured["installed_versions"] == {"packaging": Version("25.0")}
+    assert captured["planned_versions"] == {"uvicorn": Version("0.47.0")}
 
 
 def test_exclude_removes_packages_from_upgrade_list(runner, mock_packages):
@@ -1231,6 +1277,13 @@ class TestGroupExecution:
         assert captured_download_kwargs["timeout"] == 900
         assert captured_download_kwargs["use_download_cache"] is True
         assert captured_install_kwargs["timeout"] == 900
+        assert captured_install_kwargs["installed_versions"] == {
+            "requests": Version("2.28.0"),
+            "rich": Version("13.0.0"),
+        }
+        assert captured_install_kwargs["planned_versions"] == {
+            "rich": Version("13.7.0"),
+        }
         assert captured_specs == {"main": ["rich"]}
         assert "requests" in result.output
 
