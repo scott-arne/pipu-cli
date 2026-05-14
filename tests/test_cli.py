@@ -22,6 +22,7 @@ from pipu_cli.package_management import (
 )
 from pipu_cli.rollback import PackageRollbackOutcome, RollbackResult
 from pipu_cli.download import DownloadError
+from pipu_cli.cache import CacheData
 
 
 @pytest.fixture
@@ -238,6 +239,91 @@ def test_download_and_install_phase_relaxes_unconstrained_install_specs():
     assert downloaded_specs == ["logfire==4.33.0", "zope.interface==5.4.0"]
     assert installed_specs == ["logfire", "zope.interface==5.4.0"]
     assert [result.name for result in results] == ["logfire", "zope.interface"]
+
+
+def test_step2_ignores_editables_from_cache_when_checking_index_versions():
+    """Editable source packages should not become upgrade candidates from index cache."""
+    console = Console(file=StringIO(), force_terminal=True)
+    editable = InstalledPackage(
+        name="iSIM",
+        version=Version("15.0.0"),
+        is_editable=True,
+        editable_location="/src/iSIM",
+    )
+    regular = InstalledPackage(
+        name="requests",
+        version=Version("2.28.0"),
+        is_editable=False,
+    )
+    cache_data = CacheData(
+        environment_id="env",
+        python_executable="/python",
+        updated_at="2026-05-14T00:00:00+00:00",
+        include_prereleases=False,
+        latest_versions={"isim": "16.3.0", "requests": "2.31.0"},
+    )
+
+    with patch("pipu_cli.cli.load_cache", return_value=cache_data):
+        latest_versions, _elapsed, cache_used = cli_module._step2_get_latest_versions(
+            console,
+            "json",
+            False,
+            [editable, regular],
+            use_cache=True,
+            cache_enabled=True,
+            timeout=10,
+            pre=False,
+            parallel=1,
+        )
+
+    assert cache_used is True
+    assert editable not in latest_versions
+    assert latest_versions == {
+        regular: Package(name="requests", version=Version("2.31.0"))
+    }
+
+
+def test_step2_does_not_query_index_for_editable_packages():
+    """Index latest versions cannot tell whether an editable source can upgrade."""
+    console = Console(file=StringIO(), force_terminal=True)
+    editable = InstalledPackage(
+        name="iSIM",
+        version=Version("15.0.0"),
+        is_editable=True,
+        editable_location="/src/iSIM",
+    )
+    regular = InstalledPackage(
+        name="requests",
+        version=Version("2.28.0"),
+        is_editable=False,
+    )
+    captured_packages = []
+
+    def fake_get_latest_versions(installed_packages, **_kwargs):
+        captured_packages.extend(installed_packages)
+        return {
+            regular: Package(name="requests", version=Version("2.31.0"))
+        }
+
+    with patch("pipu_cli.cli.get_latest_versions", side_effect=fake_get_latest_versions), \
+         patch("pipu_cli.cli.save_cache"):
+        latest_versions, _elapsed, cache_used = cli_module._step2_get_latest_versions(
+            console,
+            "json",
+            False,
+            [editable, regular],
+            use_cache=False,
+            cache_enabled=True,
+            timeout=10,
+            pre=False,
+            parallel=1,
+        )
+
+    assert cache_used is False
+    assert captured_packages == [regular]
+    assert latest_versions == {
+        regular: Package(name="requests", version=Version("2.31.0"))
+    }
 
 
 def test_download_and_install_phase_treats_raw_progress_as_liveness_only():

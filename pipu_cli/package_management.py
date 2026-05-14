@@ -90,6 +90,7 @@ class UpgradedPackage(Package):
 CONSTRAINED_BY_RESOLVER_REASON = (
     "Version unchanged \u2014 may be constrained by dependency resolver"
 )
+EDITABLE_SOURCE_UNCHANGED_REASON = "Editable source version unchanged"
 
 
 def is_resolver_constrained_upgrade(pkg: UpgradedPackage) -> bool:
@@ -100,9 +101,22 @@ def is_resolver_constrained_upgrade(pkg: UpgradedPackage) -> bool:
     )
 
 
+def is_editable_source_unchanged(pkg: UpgradedPackage) -> bool:
+    """Return True when an editable reinstall succeeded but stayed unchanged."""
+    return (
+        not pkg.upgraded
+        and pkg.is_editable
+        and pkg.failure_reason == EDITABLE_SOURCE_UNCHANGED_REASON
+    )
+
+
 def is_failed_upgrade_result(pkg: UpgradedPackage) -> bool:
-    """Return True for actual upgrade errors, excluding resolver constraints."""
-    return not pkg.upgraded and not is_resolver_constrained_upgrade(pkg)
+    """Return True for actual upgrade errors, excluding known no-op outcomes."""
+    return (
+        not pkg.upgraded
+        and not is_resolver_constrained_upgrade(pkg)
+        and not is_editable_source_unchanged(pkg)
+    )
 
 
 @dataclass(frozen=True)
@@ -1877,7 +1891,7 @@ def reinstall_editable_packages(
             failure_reason = None
             if not upgraded:
                 failure_reason = (
-                    "Editable source version unchanged"
+                    EDITABLE_SOURCE_UNCHANGED_REASON
                     if new_version == pkg.version
                     else "Editable source version did not increase"
                 )

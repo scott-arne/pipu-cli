@@ -165,6 +165,58 @@ def test_print_group_results_matrix_marks_resolver_constraints_as_warning():
     assert "error details" not in output.lower()
 
 
+def test_print_upgrade_results_marks_unchanged_editable_as_warning():
+    """Editable source no-ops should not render as hard failures."""
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True)
+    results = [
+        UpgradedPackage(
+            name="iSIM",
+            version=Version("15.0.0"),
+            upgraded=False,
+            previous_version=Version("15.0.0"),
+            is_editable=True,
+            editable_location="/src/iSIM",
+            failure_reason="Editable source version unchanged",
+        )
+    ]
+    print_upgrade_results(results, console=console)
+    output = buf.getvalue()
+    assert "editable unchanged" in output
+    assert "kept 15.0.0" in output
+    assert "✗" not in output
+    assert "failed" not in output.lower()
+
+
+def test_print_group_results_matrix_marks_unchanged_editable_as_warning():
+    """Group editable source no-ops should not render as hard failures."""
+    buf = StringIO()
+
+    console = Console(file=buf, force_terminal=True, width=120)
+    env_results = {
+        "main": [
+            UpgradedPackage(
+                name="iSIM",
+                version=Version("15.0.0"),
+                upgraded=False,
+                previous_version=Version("15.0.0"),
+                is_editable=True,
+                editable_location="/src/iSIM",
+                failure_reason="Editable source version unchanged",
+            )
+        ],
+    }
+    env_names = {"main": "/path/to/main/bin/python"}
+
+    print_group_results_matrix(env_results, env_names, console=console)
+
+    output = buf.getvalue()
+    assert "editable unchanged" in output
+    assert "✗" not in output
+    assert "error details" not in output.lower()
+
+
 def test_print_upgrade_results_fallback_when_no_reason():
     """Test fallback message when failure_reason is None."""
     buf = StringIO()

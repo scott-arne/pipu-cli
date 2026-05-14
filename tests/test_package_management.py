@@ -3350,7 +3350,10 @@ class TestPythonPathInstallation:
     def test_reinstall_editable_same_version_is_not_upgraded(self):
         """A successful editable reinstall is not an upgrade when the version stays unchanged."""
         from pipu_cli._subprocess import PipResult
-        from pipu_cli.package_management import reinstall_editable_packages
+        from pipu_cli.package_management import (
+            is_failed_upgrade_result,
+            reinstall_editable_packages,
+        )
 
         packages = [
             UpgradePackageInfo(
@@ -3376,6 +3379,7 @@ class TestPythonPathInstallation:
         assert results[0].version == Version("15.0.0")
         assert results[0].previous_version == Version("15.0.0")
         assert results[0].failure_reason == "Editable source version unchanged"
+        assert is_failed_upgrade_result(results[0]) is False
 
     def test_install_packages_interrupt_token_propagates(self):
         """install_packages routes interrupt_token through run_pip's early-return branch."""

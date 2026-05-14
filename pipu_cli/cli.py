@@ -453,6 +453,7 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
             console.print("\n[bold]Step 2/2:[/bold] Fetching latest versions from PyPI...")
 
         step2_start = time.time()
+        version_candidates = _index_version_candidates(installed_packages)
         if output != "json":
             with Progress(
                 TextColumn("[progress.description]{task.description}"),
@@ -461,29 +462,29 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
                 console=console,
                 transient=True
             ) as progress:
-                task = progress.add_task("Checking packages...", total=len(installed_packages))
+                task = progress.add_task("Checking packages...", total=len(version_candidates))
 
                 def update_progress(current: int, total: int) -> None:
                     progress.update(task, completed=current)
 
                 if parallel > 1:
                     latest_versions = get_latest_versions_parallel(
-                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        version_candidates, timeout=timeout, include_prereleases=pre,
                         max_workers=parallel, progress_callback=update_progress
                     )
                 else:
                     latest_versions = get_latest_versions(
-                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        version_candidates, timeout=timeout, include_prereleases=pre,
                         progress_callback=update_progress
                     )
         else:
             if parallel > 1:
                 latest_versions = get_latest_versions_parallel(
-                    installed_packages, timeout=timeout, include_prereleases=pre, max_workers=parallel
+                    version_candidates, timeout=timeout, include_prereleases=pre, max_workers=parallel
                 )
             else:
                 latest_versions = get_latest_versions(
-                    installed_packages, timeout=timeout, include_prereleases=pre
+                    version_candidates, timeout=timeout, include_prereleases=pre
                 )
         step2_time = time.time() - step2_start
 
@@ -496,7 +497,7 @@ def update(ctx: click.Context, timeout: int, pre: bool, parallel: int, debug: bo
         if output == "json":
             result = {
                 "status": "success",
-                "packages_checked": num_installed,
+                "packages_checked": len(version_candidates),
                 "packages_with_updates": num_with_updates,
                 "cache_path": str(cache_path)
             }
@@ -565,6 +566,14 @@ def _step1_inspect_packages(
     return installed_packages, step_time
 
 
+def _index_version_candidates(installed_packages: list) -> list:
+    """Return packages whose index versions represent actionable upgrades."""
+    return [
+        pkg for pkg in installed_packages
+        if not getattr(pkg, "is_editable", False)
+    ]
+
+
 def _step2_get_latest_versions(
     console: Console, output: str, debug: bool,
     installed_packages: list, use_cache: bool, cache_enabled: bool,
@@ -584,11 +593,12 @@ def _step2_get_latest_versions(
     step_start = time.time()
     latest_versions: dict = {}
     cache_was_used = False
+    version_candidates = _index_version_candidates(installed_packages)
 
     if use_cache:
         cache_data = load_cache(python_path=python_path)
         if cache_data and cache_data.latest_versions:
-            for installed_pkg in installed_packages:
+            for installed_pkg in version_candidates:
                 name_lower = installed_pkg.name.lower()
                 if name_lower in cache_data.latest_versions:
                     cached_version = cache_data.latest_versions[name_lower]
@@ -612,29 +622,29 @@ def _step2_get_latest_versions(
                 console=console,
                 transient=True
             ) as progress:
-                task = progress.add_task("Checking packages...", total=len(installed_packages))
+                task = progress.add_task("Checking packages...", total=len(version_candidates))
 
                 def update_progress(current: int, total: int) -> None:
                     progress.update(task, completed=current)
 
                 if parallel > 1:
                     latest_versions = get_latest_versions_parallel(
-                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        version_candidates, timeout=timeout, include_prereleases=pre,
                         max_workers=parallel, progress_callback=update_progress
                     )
                 else:
                     latest_versions = get_latest_versions(
-                        installed_packages, timeout=timeout, include_prereleases=pre,
+                        version_candidates, timeout=timeout, include_prereleases=pre,
                         progress_callback=update_progress
                     )
         else:
             if parallel > 1:
                 latest_versions = get_latest_versions_parallel(
-                    installed_packages, timeout=timeout, include_prereleases=pre, max_workers=parallel
+                    version_candidates, timeout=timeout, include_prereleases=pre, max_workers=parallel
                 )
             else:
                 latest_versions = get_latest_versions(
-                    installed_packages, timeout=timeout, include_prereleases=pre
+                    version_candidates, timeout=timeout, include_prereleases=pre
                 )
 
         if cache_enabled:
@@ -2162,6 +2172,8 @@ def _run_group_upgrade(
             all_installed_by_name: dict = {}
             for env_name, installed in env_installed.items():
                 for pkg in installed:
+                    if getattr(pkg, "is_editable", False):
+                        continue
                     key = pkg.name.lower()
                     if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
                         all_installed_by_name[key] = pkg

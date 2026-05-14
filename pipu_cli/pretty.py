@@ -22,6 +22,7 @@ from pipu_cli.package_management import (
     DepProblem,
     EnvReport,
     is_failed_upgrade_result,
+    is_editable_source_unchanged,
     is_resolver_constrained_upgrade,
 )
 from pipu_cli.ui import CHECKMARK, CROSS, STYLES
@@ -121,6 +122,13 @@ def _format_constrained_result(pkg: UpgradedPackage, *, include_version: bool) -
     if include_version:
         return f"{_WARN_MARKUP} [{_WARNING}]constrained (kept {pkg.version})[/{_WARNING}]"
     return f"{_WARN_MARKUP} [{_WARNING}]constrained[/{_WARNING}]"
+
+
+def _format_editable_unchanged_result(pkg: UpgradedPackage, *, include_version: bool) -> str:
+    """Return the warning text for a successful editable reinstall no-op."""
+    if include_version:
+        return f"{_WARN_MARKUP} [{_WARNING}]editable unchanged (kept {pkg.version})[/{_WARNING}]"
+    return f"{_WARN_MARKUP} [{_WARNING}]editable unchanged[/{_WARNING}]"
 
 
 class ConsoleStream:
@@ -326,6 +334,7 @@ def print_upgrade_results(
 
     successful = [pkg for pkg in results if pkg.upgraded]
     constrained = [pkg for pkg in results if is_resolver_constrained_upgrade(pkg)]
+    unchanged_editables = [pkg for pkg in results if is_editable_source_unchanged(pkg)]
     failed = [pkg for pkg in results if is_failed_upgrade_result(pkg)]
 
     console.print(f"\n[bold {_SUCCESS}]Upgraded {len(successful)} package(s)[/bold {_SUCCESS}]")
@@ -339,6 +348,8 @@ def print_upgrade_results(
             table.add_row(pkg.name, f"{_CHECK_MARKUP} {pkg.previous_version} -> [{_SUCCESS}]{pkg.version}[/{_SUCCESS}]")
         elif is_resolver_constrained_upgrade(pkg):
             table.add_row(pkg.name, _format_constrained_result(pkg, include_version=True))
+        elif is_editable_source_unchanged(pkg):
+            table.add_row(pkg.name, _format_editable_unchanged_result(pkg, include_version=True))
         else:
             reason = _format_error_summary(pkg.failure_reason or "failed")
             table.add_row(pkg.name, f"{_CROSS_MARKUP} [{_FAILURE}]{reason}[/{_FAILURE}]")
@@ -351,10 +362,12 @@ def print_upgrade_results(
                 console.print(f"\n[bold {_FAILURE}]{pkg.name}[/bold {_FAILURE}] error details:")
                 console.print(f"[dim]{pkg.failure_reason}[/dim]")
 
-    if failed or constrained:
+    if failed or constrained or unchanged_editables:
         parts = [f"{len(successful)}/{len(results)} upgraded"]
         if constrained:
             parts.append(f"{len(constrained)} constrained")
+        if unchanged_editables:
+            parts.append(f"{len(unchanged_editables)} unchanged editable")
         if failed:
             parts.append(f"{len(failed)} failed")
         console.print(f"\n[bold]Summary:[/bold] {', '.join(parts)}")
@@ -701,6 +714,8 @@ def print_group_results_matrix(
                 row.append(f"{_CHECK_MARKUP} {entry.previous_version}->[{_SUCCESS}]{entry.version}[/{_SUCCESS}]")
             elif is_resolver_constrained_upgrade(entry):
                 row.append(_format_constrained_result(entry, include_version=False))
+            elif is_editable_source_unchanged(entry):
+                row.append(_format_editable_unchanged_result(entry, include_version=False))
             else:
                 summary = _format_error_summary(entry.failure_reason or "failed")
                 row.append(f"{_CROSS_MARKUP} [{_FAILURE}]{summary}[/{_FAILURE}]")
