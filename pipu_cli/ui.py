@@ -46,6 +46,7 @@ class _DownloadState:
     total: Optional[int]
     last_activity: float
     has_activity: bool = False
+    status: str = "receiving data"
 
 
 class _DownloadStatusRenderable:
@@ -136,10 +137,11 @@ class DownloadTracker:
             )
         self._refresh()
 
-    def activity(self, spec: str) -> None:
+    def activity(self, spec: str, status: str = "receiving data") -> None:
         """Record download activity without displaying artifact-level progress.
 
         :param spec: Package spec.
+        :param status: Compact status message for the current activity.
         """
         with self._lock:
             now = self._clock()
@@ -150,11 +152,13 @@ class DownloadTracker:
                     total=None,
                     last_activity=now,
                     has_activity=True,
+                    status=status,
                 )
                 self._active[spec] = state
             else:
                 state.last_activity = now
                 state.has_activity = True
+                state.status = status
         self._refresh()
 
     def progress(self, spec: str, downloaded: int, total: Optional[int]) -> None:
@@ -212,17 +216,25 @@ class DownloadTracker:
                     state.total,
                     state.last_activity,
                     state.has_activity,
+                    state.status,
                 )
                 for spec, state in self._active.items()
             )
 
         lines = Text()
-        for index, (spec, downloaded, total, last_activity, has_activity) in enumerate(snapshot):
+        for index, (
+            spec,
+            downloaded,
+            total,
+            last_activity,
+            has_activity,
+            status,
+        ) in enumerate(snapshot):
             if index:
                 lines.append("\n")
             lines.append(f"    {BULLET} ", style="dim")
             lines.append(spec, style="dim")
-            detail = self._format_progress(downloaded, total, has_activity)
+            detail = self._format_progress(downloaded, total, has_activity, status)
             if detail:
                 lines.append("  ", style="dim")
                 age = max(0.0, now - last_activity)
@@ -234,10 +246,11 @@ class DownloadTracker:
         downloaded: Optional[int],
         total: Optional[int],
         has_activity: bool,
+        status: str,
     ) -> str:
         if downloaded is None:
             if has_activity:
-                return "receiving data"
+                return status
             return ""
         if total is None:
             return _format_bytes(downloaded)

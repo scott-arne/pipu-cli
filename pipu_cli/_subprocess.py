@@ -90,36 +90,67 @@ def _drain(
     stream: IO[str],
     sink: list[str] | None,
     tee: Optional[SupportsWriteFlush],
-    on_activity: Optional[Callable[[], None]] = None,
+    on_activity: Optional[Callable[[str], None]] = None,
     line_callback: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Read ``stream`` line-by-line, append to ``sink``, optionally mirror to ``tee``.
+    """Read ``stream`` output, append to ``sink``, optionally mirror to ``tee``.
 
     :param stream: File-like handle attached to the subprocess pipe.
     :param sink: Capture buffer; pass ``None`` to discard (used when streaming,
         so ``PipResult.stdout``/``stderr`` stay empty per the contract).
     :param tee: Optional stream to mirror lines to in real time.
-    :param on_activity: Optional callback invoked whenever a line arrives.
+    :param on_activity: Optional callback invoked with each output line.
     :param line_callback: Optional observer invoked with each output line.
     """
+    pending: list[str] = []
     try:
-        for line in iter(stream.readline, ""):
+        while True:
+            char = stream.read(1)
+            if char == "":
+                break
+            if not isinstance(char, str):
+                for line in iter(stream.readline, ""):
+                    if not isinstance(line, str):
+                        break
+                    if on_activity is not None:
+                        on_activity(line)
+                    if line_callback is not None:
+                        try:
+                            line_callback(line)
+                        except Exception:
+                            # Progress observers must not poison subprocess draining.
+                            pass
+                    if sink is not None:
+                        sink.append(line)
+                    if tee is not None:
+                        tee.write(line)
+                        tee.flush()
+                return
+            pending.append(char)
+            record = "".join(pending)
             if on_activity is not None:
-                on_activity()
-            if line_callback is not None:
-                try:
-                    line_callback(line)
-                except Exception:
-                    # Progress observers must not poison subprocess draining.
-                    pass
+                on_activity(record)
             if sink is not None:
-                sink.append(line)
+                sink.append(char)
             if tee is not None:
-                tee.write(line)
+                tee.write(char)
                 tee.flush()
+            if char in {"\n", "\r"}:
+                if line_callback is not None:
+                    try:
+                        line_callback(record)
+                    except Exception:
+                        # Progress observers must not poison subprocess draining.
+                        pass
+                pending.clear()
     except (ValueError, OSError):
         pass
     finally:
+        if pending and line_callback is not None:
+            try:
+                line_callback("".join(pending))
+            except Exception:
+                pass
         try:
             stream.close()
         except Exception:
@@ -162,6 +193,7 @@ def run_pip(
     interrupt_token: InterruptToken | None = None,
     timeout_mode: Literal["wall", "idle"] = "wall",
     line_callback: Optional[Callable[[str], None]] = None,
+    idle_activity_filter: Optional[Callable[[str], bool]] = None,
 ) -> PipResult:
     """Run pip (or any Python command) as a subprocess.
 
@@ -179,6 +211,10 @@ def run_pip(
     :param timeout_mode: Whether to apply ``timeout`` as a wall-clock or idle
         limit.
     :param line_callback: Optional observer invoked with each stdout/stderr line.
+    :param idle_activity_filter: Optional predicate for ``timeout_mode="idle"``.
+        When supplied, only output lines for which the predicate returns
+        ``True`` reset the idle timer. Without a predicate, any output line is
+        treated as activity.
     :returns: A :class:`PipResult`. If both an interrupt and a timeout could
         apply, ``interrupted`` wins -- user cancel is treated as more
         semantically meaningful than wall-clock expiry, so ``timed_out`` is
@@ -229,18 +265,27 @@ def run_pip(
         with activity_lock:
             last_activity = time.monotonic()
 
+    def mark_activity_for_line(line: str) -> None:
+        if idle_activity_filter is not None:
+            try:
+                if not idle_activity_filter(line):
+                    return
+            except Exception:
+                return
+        mark_activity()
+
     def idle_seconds() -> float:
         with activity_lock:
             return time.monotonic() - last_activity
 
     t_out = threading.Thread(
         target=_drain,
-        args=(proc.stdout, out_sink, tee, mark_activity, line_callback),
+        args=(proc.stdout, out_sink, tee, mark_activity_for_line, line_callback),
         daemon=True,
     )
     t_err = threading.Thread(
         target=_drain,
-        args=(proc.stderr, err_sink, tee, mark_activity, line_callback),
+        args=(proc.stderr, err_sink, tee, mark_activity_for_line, line_callback),
         daemon=True,
     )
     t_out.start()

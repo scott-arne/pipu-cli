@@ -42,6 +42,15 @@ class TestDownloadPackages:
             assert "raw" in cmd
             assert "requests==2.31.0" in cmd
             assert mock_run.call_args.kwargs["timeout_mode"] == "idle"
+            assert mock_run.call_args.kwargs["idle_activity_filter"](
+                "Progress 1024 of 2048\n"
+            )
+            assert mock_run.call_args.kwargs["idle_activity_filter"](
+                "Preparing metadata (pyproject.toml) ... |\r"
+            )
+            assert not mock_run.call_args.kwargs["idle_activity_filter"](
+                "Collecting requests==2.31.0\n"
+            )
             assert len(result) == 1
 
     def test_download_with_python_path(self, tmp_path):
@@ -154,6 +163,27 @@ class TestDownloadPackages:
             )
 
         assert updates == [("large-pkg==1.0.0", 512, None)]
+
+    def test_download_reports_metadata_activity_without_dependency_chatter(self, tmp_path):
+        updates = []
+
+        def record_update(spec, status):
+            updates.append((spec, status))
+
+        def fake_run(*args, line_callback=None, **kwargs):
+            assert line_callback is not None
+            line_callback("Collecting pydantic-core<2.44.0\n")
+            line_callback("Preparing metadata (pyproject.toml) ... |\r")
+            return PipResult(0, "", "")
+
+        with patch("pipu_cli.download.run_pip", side_effect=fake_run):
+            download_packages(
+                specs=["cohere==6.1.0"],
+                dest_dir=tmp_path,
+                download_activity_callback=record_update,
+            )
+
+        assert updates == [("cohere==6.1.0", "preparing metadata")]
 
     def test_download_stages_artifacts_from_pip_cache_wheelhouse(self, tmp_path):
         cache_root = tmp_path / "pip-cache"

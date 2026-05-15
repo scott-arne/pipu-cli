@@ -50,6 +50,57 @@ def test_idle_timeout_allows_active_output(tmp_path):
     assert r.timed_out is False
     assert "tick 3" in r.stdout
 
+def test_idle_timeout_can_ignore_non_activity_output(tmp_path):
+    s = _script(
+        tmp_path,
+        (
+            "import time\n"
+            "for i in range(20):\n"
+            "    print(f'Collecting dependency-{i}', flush=True)\n"
+            "    time.sleep(0.1)\n"
+        ),
+    )
+    r = run_pip(
+        [str(s)],
+        python_path=sys.executable,
+        stream_output=False,
+        timeout=0.3,
+        timeout_mode="idle",
+        idle_activity_filter=lambda line: line.startswith("Progress "),
+    )
+    assert r.timed_out is True
+    assert r.returncode != 0
+    assert "Collecting dependency" in r.stdout
+
+def test_idle_timeout_can_count_partial_status_output(tmp_path):
+    s = _script(
+        tmp_path,
+        (
+            "import sys, time\n"
+            "sys.stdout.write('Preparing metadata (pyproject.toml) ... |')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(0.15)\n"
+            "sys.stdout.write('\\b/')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(0.15)\n"
+            "sys.stdout.write('\\b-')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(0.15)\n"
+            "print(' done')\n"
+        ),
+    )
+    r = run_pip(
+        [str(s)],
+        python_path=sys.executable,
+        stream_output=False,
+        timeout=0.25,
+        timeout_mode="idle",
+        idle_activity_filter=lambda text: "Preparing metadata" in text,
+    )
+    assert r.timed_out is False
+    assert r.returncode == 0
+    assert "Preparing metadata" in r.stdout
+
 def test_idle_timeout_fires_after_output_stalls(tmp_path):
     s = _script(
         tmp_path,

@@ -274,6 +274,30 @@ class TestDownloadTracker:
         assert " / " not in line.plain
         tracker.finish()
 
+    def test_download_tracker_activity_can_show_metadata_status(self):
+        """Build metadata work should not be mislabeled as receiving data."""
+        buf = StringIO()
+        now = 1000.0
+
+        def clock():
+            return now
+
+        console = Console(file=buf, force_terminal=True)
+        ui = UpgradeUI(console)
+        tracker = ui.show_download_progress(
+            ["cohere==6.1.0"],
+            idle_timeout=10,
+            clock=clock,
+        )
+        tracker.start("cohere==6.1.0")
+        tracker.activity("cohere==6.1.0", "preparing metadata")
+
+        line = tracker._render_active_lines()
+        assert "cohere==6.1.0" in line.plain
+        assert "preparing metadata" in line.plain
+        assert "receiving data" not in line.plain
+        tracker.finish()
+
 
 class TestInstallTracker:
     """Tests for install progress tracking."""

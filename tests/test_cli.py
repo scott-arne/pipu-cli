@@ -366,8 +366,8 @@ def test_download_and_install_phase_treats_raw_progress_as_liveness_only():
         def start(self, spec):
             events.append(("start", spec))
 
-        def activity(self, spec):
-            events.append(("activity", spec))
+        def activity(self, spec, status="receiving data"):
+            events.append(("activity", spec, status))
 
         def progress(self, spec, downloaded, total):
             events.append(("progress", spec, downloaded, total))
@@ -390,14 +390,23 @@ def test_download_and_install_phase_treats_raw_progress_as_liveness_only():
             events.append(("show-install", tuple(specs)))
             return FakeTracker()
 
-    def fake_download(*_args, start_callback=None, download_progress_callback=None, progress_callback=None, **_kwargs):
+    def fake_download(
+        *_args,
+        start_callback=None,
+        download_progress_callback=None,
+        download_activity_callback=None,
+        progress_callback=None,
+        **_kwargs,
+    ):
         assert start_callback is not None
         assert download_progress_callback is not None
+        assert download_activity_callback is not None
         assert progress_callback is not None
         start_callback("large-pkg==2.0.0")
         download_progress_callback("large-pkg==2.0.0", 1_024, 4_096)
         download_progress_callback("large-pkg==2.0.0", 4_096, 4_096)
         download_progress_callback("large-pkg==2.0.0", 512, 2_048)
+        download_activity_callback("large-pkg==2.0.0", "preparing metadata")
         progress_callback("large-pkg==2.0.0", True, "")
 
     def fake_install(*_args, **_kwargs):
@@ -423,7 +432,8 @@ def test_download_and_install_phase_treats_raw_progress_as_liveness_only():
 
     assert results[0].upgraded is True
     assert ("show", ("large-pkg==2.0.0",), 300) in events
-    assert events.count(("activity", "large-pkg==2.0.0")) == 3
+    assert events.count(("activity", "large-pkg==2.0.0", "receiving data")) == 3
+    assert ("activity", "large-pkg==2.0.0", "preparing metadata") in events
     assert not [event for event in events if event[0] == "progress"]
 
 

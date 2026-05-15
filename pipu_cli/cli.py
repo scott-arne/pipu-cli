@@ -851,6 +851,9 @@ def _download_and_install_phase(
                     del downloaded, total
                     tracker.activity(spec)
 
+                def on_download_activity(spec: str, status: str) -> None:
+                    tracker.activity(spec, status)
+
                 def on_download(spec: str, success: bool, error_msg: str) -> None:
                     if success:
                         tracker.complete(spec)
@@ -867,6 +870,7 @@ def _download_and_install_phase(
                         progress_callback=on_download,
                         start_callback=on_download_start,
                         download_progress_callback=on_download_progress,
+                        download_activity_callback=on_download_activity,
                         use_download_cache=True,
                     )
                 except DownloadError as e:
@@ -2428,6 +2432,8 @@ def _run_group_upgrade(
                     ) -> None:
                         del downloaded, total
                         tracker.activity(spec)
+                    def on_download_activity(spec: str, status: str) -> None:
+                        tracker.activity(spec, status)
                     def on_download(spec: str, success: bool, error_msg: str) -> None:
                         if success:
                             tracker.complete(spec)
@@ -2440,6 +2446,7 @@ def _run_group_upgrade(
                             progress_callback=on_download,
                             start_callback=on_download_start,
                             download_progress_callback=on_download_progress,
+                            download_activity_callback=on_download_activity,
                             use_download_cache=True,
                         )
                     except DownloadError as e:

@@ -92,6 +92,32 @@ def _parse_raw_progress(line: str) -> Optional[Tuple[int, Optional[int]]]:
     return downloaded, total if total > 0 else None
 
 
+def _download_activity_status(line: str) -> Optional[str]:
+    """Return a compact status for pip download work that is not resolver chatter."""
+    if _parse_raw_progress(line) is not None:
+        return "receiving data"
+
+    status = line.strip()
+    build_statuses = (
+        ("Installing build dependencies", "installing build dependencies"),
+        ("Getting requirements to build", "getting build requirements"),
+        ("Installing backend dependencies", "installing backend dependencies"),
+        ("Preparing metadata", "preparing metadata"),
+        ("Preparing wheel metadata", "preparing metadata"),
+        ("Building wheel", "building wheel"),
+        ("Building wheels for collected packages", "building wheels"),
+    )
+    for prefix, label in build_statuses:
+        if status.startswith(prefix):
+            return label
+    return None
+
+
+def _is_download_activity_line(line: str) -> bool:
+    """Return True when ``line`` represents real download/build activity."""
+    return _download_activity_status(line) is not None
+
+
 def _parse_saved_artifact(line: str, download_dir: Path) -> Optional[Path]:
     """Return the artifact path pip reported saving into ``download_dir``."""
     match = SAVED_ARTIFACT_RE.match(line.strip())
@@ -374,6 +400,7 @@ def _download_single(
     pre: bool,
     timeout: int,
     download_progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None,
+    download_activity_callback: Optional[Callable[[str, str], None]] = None,
 ) -> Tuple[str, bool, str]:
     """Download a single package. Returns (spec, success, error_message)."""
     # Include dependencies here so the later install phase can run local-only;
@@ -403,11 +430,14 @@ def _download_single(
             if saved_artifact is not None:
                 reported_artifacts.append(saved_artifact)
             parsed = _parse_raw_progress(line)
-            if parsed is None:
+            if parsed is not None:
+                downloaded, total = parsed
+                if download_progress_callback is not None:
+                    download_progress_callback(spec, downloaded, total)
                 return
-            downloaded, total = parsed
-            if download_progress_callback is not None:
-                download_progress_callback(spec, downloaded, total)
+            status = _download_activity_status(line)
+            if status is not None and download_activity_callback is not None:
+                download_activity_callback(spec, status)
 
         result = run_pip(
             cmd,
@@ -416,6 +446,7 @@ def _download_single(
             stream_output=False,
             timeout_mode="idle",
             line_callback=on_line,
+            idle_activity_filter=_is_download_activity_line,
         )
         if result.timed_out:
             logger.warning(
@@ -446,6 +477,7 @@ def download_packages(
     progress_callback: Optional[Callable[[str, bool, str], None]] = None,
     start_callback: Optional[Callable[[str], None]] = None,
     download_progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None,
+    download_activity_callback: Optional[Callable[[str, str], None]] = None,
     use_download_cache: bool = False,
 ) -> List[Path]:
     """Download packages to a local directory using pip download.
@@ -461,6 +493,9 @@ def download_packages(
     :param download_progress_callback: Called with (spec, downloaded, total)
         for pip raw progress lines. ``total`` is ``None`` when pip reports an
         unknown size.
+    :param download_activity_callback: Called with (spec, status) for pip build
+        or metadata work that should keep the download watchdog alive without
+        being presented as dependency-resolution progress.
     :param use_download_cache: Store downloaded artifacts under pip's cache
         root and stage them into ``dest_dir`` for the install phase.
     :returns: List of paths to downloaded files
@@ -490,6 +525,7 @@ def download_packages(
                 pre,
                 timeout,
                 download_progress_callback,
+                download_activity_callback,
             )
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -512,6 +548,7 @@ def download_packages(
                 pre,
                 timeout,
                 download_progress_callback,
+                download_activity_callback,
             )
             if not success:
                 failed[spec] = error_msg or "download failed"
@@ -533,6 +570,7 @@ def download_packages_for_group(
     progress_callback: Optional[Callable[[str, bool, str], None]] = None,
     start_callback: Optional[Callable[[str], None]] = None,
     download_progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None,
+    download_activity_callback: Optional[Callable[[str, str], None]] = None,
     use_download_cache: bool = False,
 ) -> List[Path]:
     """Download deduplicated packages for a group of environments.
@@ -547,6 +585,9 @@ def download_packages_for_group(
     :param download_progress_callback: Called with (spec, downloaded, total)
         for pip raw progress lines. ``total`` is ``None`` when pip reports an
         unknown size.
+    :param download_activity_callback: Called with (spec, status) for pip build
+        or metadata work that should keep the download watchdog alive without
+        being presented as dependency-resolution progress.
     :param use_download_cache: Store downloaded artifacts under pip's cache
         root and stage them into ``dest_dir`` for the install phase.
     :returns: List of paths to downloaded files
@@ -567,6 +608,7 @@ def download_packages_for_group(
         progress_callback=progress_callback,
         start_callback=start_callback,
         download_progress_callback=download_progress_callback,
+        download_activity_callback=download_activity_callback,
         use_download_cache=use_download_cache,
     )
 
