@@ -437,6 +437,73 @@ def test_download_and_install_phase_treats_raw_progress_as_liveness_only():
     assert not [event for event in events if event[0] == "progress"]
 
 
+def test_download_and_install_phase_displays_download_watchdog_floor():
+    """The UI should show the process watchdog, not pip's low socket timeout."""
+    console = Console(file=StringIO(), force_terminal=True)
+    upgrades = [
+        UpgradePackageInfo(
+            name="fastmcp",
+            version=Version("3.2.4"),
+            upgradable=True,
+            latest_version=Version("3.3.1"),
+        )
+    ]
+    events = []
+    captured_download_kwargs = {}
+
+    class FakeTracker:
+        def start(self, spec):
+            events.append(("start", spec))
+
+        def complete(self, spec):
+            events.append(("complete", spec))
+
+        def fail(self, spec):
+            events.append(("fail", spec))
+
+        def finish(self):
+            events.append(("finish",))
+
+    class FakeUI:
+        def show_download_progress(self, specs, idle_timeout=None):
+            events.append(("show", tuple(specs), idle_timeout))
+            return FakeTracker()
+
+        def show_install_progress(self, specs):
+            return FakeTracker()
+
+    def fake_download(*_args, progress_callback=None, **kwargs):
+        captured_download_kwargs.update(kwargs)
+        if progress_callback is not None:
+            progress_callback("fastmcp==3.3.1", True, "")
+
+    def fake_install(*_args, **_kwargs):
+        return [
+            UpgradedPackage(
+                name="fastmcp",
+                version=Version("3.3.1"),
+                upgraded=True,
+                previous_version=Version("3.2.4"),
+            )
+        ]
+
+    with patch("pipu_cli.cli.download_packages", side_effect=fake_download), \
+         patch("pipu_cli.cli.install_from_local", side_effect=fake_install), \
+         patch("pipu_cli.rollback.save_state"):
+        results, _ = cli_module._download_and_install_phase(
+            console,
+            "human",
+            upgrades,
+            {},
+            ui=FakeUI(),
+            timeout=10,
+        )
+
+    assert results[0].upgraded is True
+    assert captured_download_kwargs["timeout"] == 10
+    assert ("show", ("fastmcp==3.3.1",), 300) in events
+
+
 def test_group_install_worker_marks_failed_results_as_failed_env(tmp_path):
     """A batched install timeout should not render the environment as complete."""
     events = []

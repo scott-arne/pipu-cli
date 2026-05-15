@@ -82,6 +82,7 @@ from pipu_cli.download import (
     DOWNLOAD_TIMEOUT,
     DownloadError,
     download_packages,
+    download_watchdog_timeout,
     install_from_local,
 )
 from pipu_cli.config_file import load_config, get_config_value
@@ -840,7 +841,10 @@ def _download_and_install_phase(
 
             # Download phase
             if ui and output != "json":
-                tracker = ui.show_download_progress(download_specs, idle_timeout=timeout)
+                tracker = ui.show_download_progress(
+                    download_specs,
+                    idle_timeout=download_watchdog_timeout(timeout),
+                )
 
                 def on_download_start(spec: str) -> None:
                     tracker.start(spec)
@@ -979,8 +983,8 @@ def _download_and_install_phase(
     type=int,
     default=10,
     help=(
-        "Network timeout in seconds; downloads use this as an idle timeout, "
-        "and larger values extend upgrade installs"
+        "Network timeout in seconds for pip requests; downloads use a "
+        "longer no-output watchdog, and larger values extend upgrade installs"
     )
 )
 @pre_option
@@ -2424,7 +2428,10 @@ def _run_group_upgrade(
                     unique_specs = list(dict.fromkeys(
                         s for specs in env_specs.values() for s in specs
                     ))
-                    tracker = ui.show_download_progress(unique_specs, idle_timeout=timeout)
+                    tracker = ui.show_download_progress(
+                        unique_specs,
+                        idle_timeout=download_watchdog_timeout(timeout),
+                    )
                     def on_download_start(spec: str) -> None:
                         tracker.start(spec)
                     def on_download_progress(

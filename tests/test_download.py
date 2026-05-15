@@ -42,15 +42,7 @@ class TestDownloadPackages:
             assert "raw" in cmd
             assert "requests==2.31.0" in cmd
             assert mock_run.call_args.kwargs["timeout_mode"] == "idle"
-            assert mock_run.call_args.kwargs["idle_activity_filter"](
-                "Progress 1024 of 2048\n"
-            )
-            assert mock_run.call_args.kwargs["idle_activity_filter"](
-                "Preparing metadata (pyproject.toml) ... |\r"
-            )
-            assert not mock_run.call_args.kwargs["idle_activity_filter"](
-                "Collecting requests==2.31.0\n"
-            )
+            assert mock_run.call_args.kwargs.get("idle_activity_filter") is None
             assert len(result) == 1
 
     def test_download_with_python_path(self, tmp_path):
@@ -116,8 +108,22 @@ class TestDownloadPackages:
                 )
 
         assert exc_info.value.failed == {
-            "large-pkg==1.0.0": "timed out after 30s without progress"
+            "large-pkg==1.0.0": "timed out after 300s without pip output"
         }
+
+    def test_download_separates_pip_network_timeout_from_idle_watchdog(self, tmp_path):
+        """A low pip socket timeout should not become a low process watchdog."""
+        with patch("pipu_cli.download.run_pip", return_value=PipResult(0, "", "")) as mock_run:
+            download_packages(
+                specs=["fastmcp==3.3.1"],
+                dest_dir=tmp_path,
+                timeout=10,
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--timeout") + 1] == "10"
+        assert mock_run.call_args.kwargs["timeout"] == 300
+        assert mock_run.call_args.kwargs.get("idle_activity_filter") is None
 
     def test_download_reports_raw_progress_for_package(self, tmp_path):
         updates = []

@@ -55,6 +55,20 @@ SAVED_ARTIFACT_RE = re.compile(r"^(?:Saved|File was already downloaded)\s+(.+?)\
 PIPU_DOWNLOAD_CACHE_DIR = "pipu-downloads"
 
 
+def download_watchdog_timeout(timeout: int) -> int:
+    """Return the no-output watchdog timeout for pip download subprocesses.
+
+    ``timeout`` is passed through to pip as its network/socket timeout. The
+    outer watchdog needs a larger floor because pip can legitimately spend
+    more than a few seconds resolving, consulting caches, or waiting on a slow
+    proxy before it emits byte-level progress.
+
+    :param timeout: User-configured pip network timeout.
+    :returns: Subprocess idle timeout used by pipu.
+    """
+    return max(timeout, DOWNLOAD_TIMEOUT)
+
+
 class DownloadError(RuntimeError):
     """Raised when one or more package downloads fail.
 
@@ -111,11 +125,6 @@ def _download_activity_status(line: str) -> Optional[str]:
         if status.startswith(prefix):
             return label
     return None
-
-
-def _is_download_activity_line(line: str) -> bool:
-    """Return True when ``line`` represents real download/build activity."""
-    return _download_activity_status(line) is not None
 
 
 def _parse_saved_artifact(line: str, download_dir: Path) -> Optional[Path]:
@@ -405,6 +414,7 @@ def _download_single(
     """Download a single package. Returns (spec, success, error_message)."""
     # Include dependencies here so the later install phase can run local-only;
     # otherwise pip can surprise users with downloads after the download bar.
+    watchdog_timeout = download_watchdog_timeout(timeout)
     cmd = [
         "-m",
         "pip",
@@ -442,17 +452,16 @@ def _download_single(
         result = run_pip(
             cmd,
             python_path=executable,
-            timeout=timeout,
+            timeout=watchdog_timeout,
             stream_output=False,
             timeout_mode="idle",
             line_callback=on_line,
-            idle_activity_filter=_is_download_activity_line,
         )
         if result.timed_out:
             logger.warning(
-                f"Download timed out for {spec} after {timeout}s without progress"
+                f"Download timed out for {spec} after {watchdog_timeout}s without pip output"
             )
-            return (spec, False, f"timed out after {timeout}s without progress")
+            return (spec, False, f"timed out after {watchdog_timeout}s without pip output")
         if result.returncode != 0:
             msg = result.stderr.strip() or f"pip exit code {result.returncode}"
             logger.warning(f"Failed to download {spec}: {msg}")
@@ -486,7 +495,8 @@ def download_packages(
     :param dest_dir: Directory to download wheels/sdists into
     :param python_path: Python interpreter path (default: current Python)
     :param pre: Include pre-release versions
-    :param timeout: Per-package subprocess timeout in seconds
+    :param timeout: Pip network timeout in seconds. The subprocess no-output
+        watchdog keeps a larger floor via :func:`download_watchdog_timeout`.
     :param max_workers: Number of parallel downloads
     :param progress_callback: Called with (spec, success, error_msg) after each download
     :param start_callback: Called with (spec) when a download begins
@@ -578,7 +588,8 @@ def download_packages_for_group(
     :param env_upgrade_plans: Dict mapping env short names to lists of pinned specs
     :param dest_dir: Shared directory to download into
     :param pre: Include pre-release versions
-    :param timeout: Per-package subprocess timeout in seconds
+    :param timeout: Pip network timeout in seconds. The subprocess no-output
+        watchdog keeps a larger floor via :func:`download_watchdog_timeout`.
     :param max_workers: Number of parallel downloads
     :param progress_callback: Called with (spec, success, error_msg) after each download
     :param start_callback: Called with (spec) when a download begins
