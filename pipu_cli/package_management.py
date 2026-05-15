@@ -933,33 +933,18 @@ def _find_disputed_target_packages(
 ) -> Dict[str, Package]:
     """Find upgrading packages whose target metadata is needed for safety.
 
-    A co-upgraded package may tighten a dependency constraint even when its
-    currently installed metadata allows the dependency's proposed target. Fetch
-    metadata for every upgrading package that currently constrains another
-    upgrading package so resolution uses the target package's real dependency
-    contract.
+    A target release may tighten dependency constraints that affect packages
+    pipu plans to pin in place during the offline install. Fetch metadata for
+    every actual target upgrade so resolution uses the target package's real
+    dependency contract, not only the currently installed metadata.
     """
-    actual_upgrades: Dict[str, tuple[InstalledPackage, Package]] = {
-        canonicalize_name(pkg.name): (pkg, latest_pkg)
+    installed_names = {canonicalize_name(pkg.name) for pkg in all_installed}
+    return {
+        canonicalize_name(pkg.name): latest_pkg
         for pkg, latest_pkg in upgrade_candidates.items()
         if latest_pkg.version > pkg.version
+        and canonicalize_name(pkg.name) in installed_names
     }
-    if not actual_upgrades:
-        return {}
-
-    disputed: Dict[str, Package] = {}
-    for constrained_name, (_installed_pkg, latest_pkg) in actual_upgrades.items():
-        for constraining_pkg in all_installed:
-            constraining_name = canonicalize_name(constraining_pkg.name)
-            if constraining_name not in actual_upgrades:
-                continue
-            specifier_str = constraining_pkg.constrained_dependencies.get(
-                constrained_name
-            )
-            if not specifier_str:
-                continue
-            disputed[constraining_name] = actual_upgrades[constraining_name][1]
-    return disputed
 
 
 def get_target_constraints_for_disputed_upgrades(
@@ -971,7 +956,7 @@ def get_target_constraints_for_disputed_upgrades(
     python_path: Optional[str] = None,
     constraints_cache: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> Dict[str, Optional[Dict[str, str]]]:
-    """Fetch target constraints for co-upgraded packages with dependency pins.
+    """Fetch target constraints for packages with planned target upgrades.
 
     :param upgrade_candidates: Installed package -> target package.
     :param all_installed: Full installed package list for the environment.
@@ -983,13 +968,15 @@ def get_target_constraints_for_disputed_upgrades(
     :returns: Canonical package name -> target constraints, or ``None``
         when target metadata was unavailable.
     """
-    disputed = _find_disputed_target_packages(upgrade_candidates, all_installed)
-    if not disputed:
+    metadata_targets = _find_disputed_target_packages(
+        upgrade_candidates, all_installed
+    )
+    if not metadata_targets:
         return {}
 
     cache = constraints_cache if constraints_cache is not None else {}
     result: Dict[str, Optional[Dict[str, str]]] = {}
-    for canonical_name, package in disputed.items():
+    for canonical_name, package in metadata_targets.items():
         if canonical_name not in cache:
             cache[canonical_name] = _download_target_package_constraints(
                 package,
@@ -1377,6 +1364,14 @@ def resolve_upgradable_packages_with_reasons(
     # Track blocking reasons for each package
     blocking_reasons: Dict[str, List[str]] = {}
 
+    installed_by_name: Dict[str, InstalledPackage] = {
+        canonicalize_name(pkg.name): pkg for pkg in all_installed
+    }
+    actual_upgrades_by_name: Dict[str, Package] = {
+        canonicalize_name(pkg.name): latest_pkg
+        for pkg, latest_pkg in actual_upgrades.items()
+    }
+
     normalized_target_constraints: Optional[Dict[str, Optional[Dict[str, str]]]]
     if target_constraints is None:
         normalized_target_constraints = None
@@ -1396,7 +1391,8 @@ def resolve_upgradable_packages_with_reasons(
         packages_to_remove.add(canonical_name)
         if canonical_name not in blocking_reasons:
             blocking_reasons[canonical_name] = []
-        blocking_reasons[canonical_name].append(reason)
+        if reason not in blocking_reasons[canonical_name]:
+            blocking_reasons[canonical_name].append(reason)
 
     def target_allows(
         *,
@@ -1430,13 +1426,54 @@ def resolve_upgradable_packages_with_reasons(
     upgrading_packages = {canonicalize_name(pkg.name) for pkg in actual_upgrades.keys()}
     max_iterations = len(upgrading_packages) + 1
 
+    def target_dependencies_are_safe(
+        target_pkg: InstalledPackage,
+        canonical_name: str,
+    ) -> bool:
+        """Check target requirements against versions pipu will leave pinned."""
+        if normalized_target_constraints is None:
+            return True
+
+        target = normalized_target_constraints.get(canonical_name)
+        if target is None:
+            return True
+
+        for dep_name, specifier_str in target.items():
+            installed_dep = installed_by_name.get(dep_name)
+            if installed_dep is None:
+                continue
+
+            try:
+                specifier = SpecifierSet(specifier_str)
+            except InvalidSpecifier:
+                block(canonical_name, f"{target_pkg.name} target constraint invalid")
+                return False
+
+            latest_dep = actual_upgrades_by_name.get(dep_name)
+            if latest_dep is not None and dep_name in upgrading_packages:
+                if latest_dep.version not in specifier:
+                    block(dep_name, f"{target_pkg.name} target requires {specifier_str}")
+                continue
+
+            if installed_dep.version not in specifier:
+                block(
+                    canonical_name,
+                    f"{target_pkg.name} target requires {dep_name}{specifier_str}",
+                )
+                return False
+
+        return True
+
     for _iteration in range(1, max_iterations + 1):
         packages_to_remove: set[str] = set()
 
         for installed_pkg, latest_pkg in actual_upgrades.items():
             canonical_name = canonicalize_name(installed_pkg.name)
 
-            if canonical_name not in upgrading_packages:
+            if canonical_name not in upgrading_packages or canonical_name in packages_to_remove:
+                continue
+
+            if not target_dependencies_are_safe(installed_pkg, canonical_name):
                 continue
 
             latest_version = latest_pkg.version

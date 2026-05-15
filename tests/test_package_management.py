@@ -17,6 +17,7 @@ from pipu_cli.package_management import (
     UpgradedPackage,
     inspect_installed_packages,
     get_latest_versions,
+    get_target_constraints_for_disputed_upgrades,
     parse_package_spec,
     resolve_upgradable_packages,
     resolve_upgradable_packages_with_reasons,
@@ -1482,7 +1483,7 @@ def test_resolve_upgradable_packages_blocks_when_target_metadata_unavailable():
 
 
 def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(monkeypatch):
-    """Target metadata is fetched only for upgrading packages with disputed pins."""
+    """Target metadata is fetched for every planned upgrade."""
     installed_a = InstalledPackage(
         name="package-a",
         version=Version("1.0.0"),
@@ -1504,7 +1505,9 @@ def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(mo
 
     def fake_download(package, **_kwargs):
         fetched.append(package.name)
-        return {"package-b": "<4.0"}
+        if package.name == "package-a":
+            return {"package-b": "<4.0"}
+        return {}
 
     monkeypatch.setattr(
         package_management, "_download_target_package_constraints", fake_download
@@ -1515,8 +1518,12 @@ def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(mo
         [installed_a, installed_b, installed_c],
     )
 
-    assert result == {"package-a": {"package-b": "<4.0"}}
-    assert fetched == ["package-a"]
+    assert result == {
+        "package-a": {"package-b": "<4.0"},
+        "package-b": {},
+        "package-c": {},
+    }
+    assert fetched == ["package-a", "package-b", "package-c"]
 
 
 def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
@@ -1538,7 +1545,9 @@ def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
 
     def fake_download(package, **_kwargs):
         fetched.append(package.name)
-        return {"jedi": ">=0.18.0,<0.20.0"}
+        if package.name == "marimo":
+            return {"jedi": ">=0.18.0,<0.20.0"}
+        return {}
 
     monkeypatch.setattr(
         package_management, "_download_target_package_constraints", fake_download
@@ -1549,12 +1558,15 @@ def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
         [installed_marimo, installed_jedi],
     )
 
-    assert result == {"marimo": {"jedi": ">=0.18.0,<0.20.0"}}
-    assert fetched == ["marimo"]
+    assert result == {
+        "marimo": {"jedi": ">=0.18.0,<0.20.0"},
+        "jedi": {},
+    }
+    assert fetched == ["marimo", "jedi"]
 
 
 def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
-    """Failed target metadata fetches are recorded as unavailable."""
+    """Failed target metadata fetches are recorded for each planned upgrade."""
     installed_a = InstalledPackage(
         name="package-a",
         version=Version("1.0.0"),
@@ -1580,7 +1592,7 @@ def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
         [installed_a, installed_b],
     )
 
-    assert result == {"package-a": None}
+    assert result == {"package-a": None, "package-b": None}
 
 
 def test_fetch_latest_version_respects_requested_specifier(monkeypatch):
@@ -1865,6 +1877,79 @@ def test_resolve_upgradable_packages_complex_chain():
     # C's upgrade to 2.2.0 violates B's constraint (<2.0)
     # But B is upgrading, so C can upgrade
     assert c_result.upgradable is True
+
+
+def test_target_metadata_fetched_for_target_dependency_checks():
+    """A target can newly constrain a pinned non-target dependency."""
+    installed_cohere = InstalledPackage(
+        name="cohere",
+        version=Version("5.21.1"),
+        constrained_dependencies={"pydantic-core": ">=2.18.2"},
+        is_editable=False,
+    )
+    installed_core = InstalledPackage(
+        name="pydantic-core",
+        version=Version("2.46.4"),
+        constrained_dependencies={},
+        is_editable=False,
+    )
+    upgrade_candidates = {
+        installed_cohere: Package(name="cohere", version=Version("6.1.0")),
+    }
+
+    with patch(
+        "pipu_cli.package_management._download_target_package_constraints",
+        return_value={"pydantic-core": "<2.44.0,>=2.18.2"},
+    ) as mock_download:
+        target_constraints = get_target_constraints_for_disputed_upgrades(
+            upgrade_candidates,
+            [installed_cohere, installed_core],
+            timeout=10,
+        )
+
+    assert target_constraints == {
+        "cohere": {"pydantic-core": "<2.44.0,>=2.18.2"}
+    }
+    mock_download.assert_called_once_with(
+        Package(name="cohere", version=Version("6.1.0")),
+        timeout=10,
+        include_prereleases=False,
+        python_path=None,
+    )
+
+
+def test_resolve_blocks_target_requires_pinned_installed_dependency():
+    """Target requirements must fit dependencies pipu will pin in place."""
+    installed_cohere = InstalledPackage(
+        name="cohere",
+        version=Version("5.21.1"),
+        constrained_dependencies={"pydantic-core": ">=2.18.2"},
+        is_editable=False,
+    )
+    installed_core = InstalledPackage(
+        name="pydantic-core",
+        version=Version("2.46.4"),
+        constrained_dependencies={},
+        is_editable=False,
+    )
+    upgrade_candidates = {
+        installed_cohere: Package(name="cohere", version=Version("6.1.0")),
+    }
+
+    upgradable, blocked = resolve_upgradable_packages_with_reasons(
+        upgrade_candidates,
+        [installed_cohere, installed_core],
+        target_constraints={
+            "cohere": {"pydantic-core": "<2.44.0,>=2.18.2"},
+        },
+    )
+
+    assert upgradable == []
+    assert len(blocked) == 1
+    assert blocked[0].name == "cohere"
+    assert blocked[0].blocked_by == [
+        "cohere target requires pydantic-core<2.44.0,>=2.18.2"
+    ]
 
 
 def test_resolve_upgradable_packages_name_canonicalization():
