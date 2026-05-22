@@ -106,6 +106,33 @@ def _parse_raw_progress(line: str) -> Optional[Tuple[int, Optional[int]]]:
     return downloaded, total if total > 0 else None
 
 
+def _is_resolution_too_deep_error(reason: str) -> bool:
+    """Return True when pip reports an over-deep dependency graph."""
+    lower_reason = reason.lower()
+    return (
+        "resolution-too-deep" in lower_reason
+        or "dependency resolution exceeded maximum depth" in lower_reason
+    )
+
+
+def _is_dependency_resolution_conflict(reason: str) -> bool:
+    """Return True when pip reports an unsatisfiable dependency graph."""
+    lower_reason = reason.lower()
+    return (
+        "resolutionimpossible" in lower_reason
+        or "conflicting dependencies" in lower_reason
+        or "dealing-with-dependency-conflicts" in lower_reason
+    )
+
+
+def _is_retryable_resolver_error(reason: str) -> bool:
+    """Return True when a smaller install request may isolate pip resolver failure."""
+    return (
+        _is_resolution_too_deep_error(reason)
+        or _is_dependency_resolution_conflict(reason)
+    )
+
+
 def _download_activity_status(line: str) -> Optional[str]:
     """Return a compact status for pip download work that is not resolver chatter."""
     if _parse_raw_progress(line) is not None:
@@ -668,14 +695,22 @@ def install_from_local(
         installed_versions=installed_versions,
         planned_versions=planned_versions,
     )
-    cmd = [
-        "-m", "pip", "install", "--upgrade",
-        "--no-index",
-        "--find-links", str(dest_dir),
-    ]
-    if constraints_path is not None:
-        cmd.extend(["--constraint", str(constraints_path)])
-    cmd.extend(specs)
+    normalized_planned_versions = _normalize_version_mapping(planned_versions)
+
+    def build_install_command(
+        command_specs: List[str],
+        *,
+        use_constraints: bool = True,
+    ) -> List[str]:
+        cmd = [
+            "-m", "pip", "install", "--upgrade",
+            "--no-index",
+            "--find-links", str(dest_dir),
+        ]
+        if use_constraints and constraints_path is not None:
+            cmd.extend(["--constraint", str(constraints_path)])
+        cmd.extend(command_specs)
+        return cmd
 
     def failed_results(reason: str) -> List[UpgradedPackage]:
         return [
@@ -689,31 +724,79 @@ def install_from_local(
             for spec in specs
         ]
 
-    logger.debug(f"Running: {executable} {' '.join(cmd)}")
-    try:
-        result = run_pip(
-            cmd,
-            python_path=executable,
-            timeout=timeout,
-            stream_output=False,
-            timeout_mode="idle",
-            line_callback=install_activity_callback,
-        )
-    except OSError as e:
-        return failed_results(f"Installation failed: {e}")
+    def install_failure_reason(result) -> str:
+        error_output = result.stderr.strip() or result.stdout.strip()
+        return error_output or f"pip exit code {result.returncode}"
 
-    if result.timed_out:
-        return failed_results(f"Installation timed out after {timeout}s without pip output")
+    def exact_retry_spec(spec: str) -> str:
+        try:
+            parsed = parse_package_spec(spec)
+        except ValueError:
+            return spec
+        if parsed.specifier:
+            return spec
+        planned_version = normalized_planned_versions.get(parsed.name)
+        if planned_version is None:
+            return spec
+        return f"{spec}=={planned_version}"
 
-    for spec in specs:
-        if progress_callback:
-            progress_callback(spec)
+    def run_local_install(
+        command_specs: List[str],
+        *,
+        use_constraints: bool = True,
+    ) -> Tuple[Optional[str], bool]:
+        cmd = build_install_command(command_specs, use_constraints=use_constraints)
+        logger.debug(f"Running: {executable} {' '.join(cmd)}")
+        try:
+            result = run_pip(
+                cmd,
+                python_path=executable,
+                timeout=timeout,
+                stream_output=False,
+                timeout_mode="idle",
+                line_callback=install_activity_callback,
+            )
+        except OSError as e:
+            return f"Installation failed: {e}", False
+
+        if result.timed_out:
+            return f"Installation timed out after {timeout}s without pip output", True
+
+        if result.returncode != 0:
+            return install_failure_reason(result), False
+
+        return None, False
+
+    reason, timed_out = run_local_install(specs)
+    if timed_out:
+        return failed_results(reason or f"Installation timed out after {timeout}s without pip output")
 
     failed_specs: Dict[str, str] = {}
-    if result.returncode != 0:
-        error_output = result.stderr.strip() or result.stdout.strip()
-        reason = error_output or f"pip exit code {result.returncode}"
+
+    if reason is None:
+        for spec in specs:
+            if progress_callback:
+                progress_callback(spec)
+    elif _is_retryable_resolver_error(reason):
+        logger.debug(
+            "Local install hit pip resolver failure; "
+            "retrying %d specs individually",
+            len(specs),
+        )
+        for spec in specs:
+            spec_reason, spec_timed_out = run_local_install(
+                [exact_retry_spec(spec)],
+                use_constraints=False,
+            )
+            if spec_reason is not None:
+                failed_specs[spec] = spec_reason
+            if progress_callback and not spec_timed_out:
+                progress_callback(spec)
+    else:
         failed_specs = {spec: reason for spec in specs}
+        for spec in specs:
+            if progress_callback:
+                progress_callback(spec)
 
     if python_path:
         post_versions = _get_remote_package_versions(python_path, canonical_names)

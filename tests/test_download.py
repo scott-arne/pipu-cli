@@ -366,6 +366,142 @@ class TestInstallFromLocal:
         assert "librt==0.10.0" in cmd
         assert [result.name for result in results] == ["mypy", "librt"]
 
+    def test_install_retries_resolution_too_deep_batch_one_spec_at_a_time(self, tmp_path):
+        pre_versions = {
+            "aiohappyeyeballs": Version("2.6.1"),
+            "anthropic": Version("0.102.0"),
+        }
+        post_versions = {
+            "aiohappyeyeballs": Version("2.6.2"),
+            "anthropic": Version("0.104.1"),
+        }
+        progress_callback = MagicMock()
+        resolution_too_deep = (
+            "error: resolution-too-deep\n\n"
+            "Dependency resolution exceeded maximum depth"
+        )
+
+        with patch(
+            "pipu_cli.download.run_pip",
+            side_effect=[
+                PipResult(1, "", resolution_too_deep),
+                PipResult(0, "", ""),
+                PipResult(0, "", ""),
+            ],
+        ) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["aiohappyeyeballs==2.6.2", "anthropic==0.104.1"],
+                progress_callback=progress_callback,
+            )
+
+        assert mock_run.call_count == 3
+        batch_cmd = mock_run.call_args_list[0].args[0]
+        retry_cmds = [call.args[0] for call in mock_run.call_args_list[1:]]
+        assert "aiohappyeyeballs==2.6.2" in batch_cmd
+        assert "anthropic==0.104.1" in batch_cmd
+        assert retry_cmds[0][-1] == "aiohappyeyeballs==2.6.2"
+        assert retry_cmds[1][-1] == "anthropic==0.104.1"
+        assert all("--no-deps" not in cmd for cmd in retry_cmds)
+        assert progress_callback.call_args_list == [
+            (("aiohappyeyeballs==2.6.2",),),
+            (("anthropic==0.104.1",),),
+        ]
+        assert [(result.name, result.upgraded) for result in results] == [
+            ("aiohappyeyeballs", True),
+            ("anthropic", True),
+        ]
+
+    def test_install_retries_planned_exact_specs_after_batch_resolver_failure(self, tmp_path):
+        pre_versions = {
+            "jupyter-ai-acp-client": Version("0.1.3"),
+            "jupyterlab-chat": Version("0.21.1"),
+        }
+        post_versions = {
+            "jupyter-ai-acp-client": Version("0.1.5"),
+            "jupyterlab-chat": Version("0.22.0"),
+        }
+        resolution_too_deep = (
+            "error: resolution-too-deep\n\n"
+            "Dependency resolution exceeded maximum depth"
+        )
+
+        with patch(
+            "pipu_cli.download.run_pip",
+            side_effect=[
+                PipResult(1, "", resolution_too_deep),
+                PipResult(0, "", ""),
+                PipResult(0, "", ""),
+            ],
+        ) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["jupyter_ai_acp_client", "jupyterlab_chat"],
+                planned_versions={
+                    "jupyter-ai-acp-client": Version("0.1.5"),
+                    "jupyterlab-chat": Version("0.22.0"),
+                },
+            )
+
+        retry_cmds = [call.args[0] for call in mock_run.call_args_list[1:]]
+        assert retry_cmds[0][-1] == "jupyter_ai_acp_client==0.1.5"
+        assert retry_cmds[1][-1] == "jupyterlab_chat==0.22.0"
+        assert "--constraint" not in retry_cmds[0]
+        assert "--constraint" not in retry_cmds[1]
+        assert [(result.name, result.upgraded) for result in results] == [
+            ("jupyter-ai-acp-client", True),
+            ("jupyterlab-chat", True),
+        ]
+
+    def test_install_retries_dependency_conflict_batch_one_spec_at_a_time(self, tmp_path):
+        pre_versions = {
+            "black": Version("26.5.0"),
+            "opentelemetry-instrumentation-httpx": Version("0.60b1"),
+        }
+        post_versions = {
+            "black": Version("26.5.1"),
+            "opentelemetry-instrumentation-httpx": Version("0.60b1"),
+        }
+        dependency_conflict = (
+            "ERROR: Cannot install "
+            "opentelemetry-instrumentation-httpx==0.63b1 because these "
+            "package versions have conflicting dependencies.\n"
+            "ERROR: ResolutionImpossible: for help visit "
+            "https://pip.pypa.io/en/latest/topics/dependency-resolution/"
+            "#dealing-with-dependency-conflicts"
+        )
+
+        with patch(
+            "pipu_cli.download.run_pip",
+            side_effect=[
+                PipResult(1, "", dependency_conflict),
+                PipResult(0, "", ""),
+                PipResult(1, "", dependency_conflict),
+            ],
+        ) as mock_run, \
+             patch("pipu_cli.download._get_local_package_versions", side_effect=[pre_versions, post_versions]):
+            results = install_from_local(
+                dest_dir=tmp_path,
+                specs=["black", "opentelemetry-instrumentation-httpx"],
+                planned_versions={
+                    "black": Version("26.5.1"),
+                    "opentelemetry-instrumentation-httpx": Version("0.63b1"),
+                },
+            )
+
+        retry_cmds = [call.args[0] for call in mock_run.call_args_list[1:]]
+        assert retry_cmds[0][-1] == "black==26.5.1"
+        assert retry_cmds[1][-1] == "opentelemetry-instrumentation-httpx==0.63b1"
+        assert "--constraint" not in retry_cmds[0]
+        assert "--constraint" not in retry_cmds[1]
+        assert [(result.name, result.upgraded) for result in results] == [
+            ("black", True),
+            ("opentelemetry-instrumentation-httpx", False),
+        ]
+        assert results[1].failure_reason == dependency_conflict
+
     def test_install_constrains_planned_target_artifacts(self, tmp_path):
         """The local install should pin targets without blessing transitive upgrades."""
         (tmp_path / "requests-2.31.0-py3-none-any.whl").touch()
