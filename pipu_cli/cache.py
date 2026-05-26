@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Any
@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 #: Version of the on-disk cache schema. Bump when incompatible changes are made
 #: to :class:`CacheData`; loaders treat a mismatch as a stale cache.
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
+COMPATIBLE_CACHE_SCHEMA_VERSIONS = {1, CACHE_SCHEMA_VERSION}
 
 
 @dataclass
@@ -40,6 +41,9 @@ class CacheData:
     include_prereleases: bool
     # Maps package name (lowercase) to latest version string
     latest_versions: Dict[str, str]
+    # Maps package name (lowercase) to the installed version that was checked
+    # and found current during the same cache refresh.
+    checked_versions: Dict[str, str] = field(default_factory=dict)
     schema_version: int = CACHE_SCHEMA_VERSION
 
 
@@ -96,9 +100,10 @@ def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
 
         # Reject caches written by a different schema version so we never try
         # to materialize a CacheData from an incompatible payload.
-        if data.get("schema_version") != CACHE_SCHEMA_VERSION:
+        schema_version = data.get("schema_version", 1)
+        if schema_version not in COMPATIBLE_CACHE_SCHEMA_VERSIONS:
             logger.debug(
-                f"Cache schema version mismatch (got {data.get('schema_version')!r}), ignoring"
+                f"Cache schema version mismatch (got {schema_version!r}), ignoring"
             )
             return None
 
@@ -114,6 +119,7 @@ def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
             updated_at=data["updated_at"],
             include_prereleases=data.get("include_prereleases", False),
             latest_versions=data.get("latest_versions", {}),
+            checked_versions=data.get("checked_versions", {}),
             schema_version=data.get("schema_version", CACHE_SCHEMA_VERSION),
         )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -123,6 +129,8 @@ def load_cache(python_path: Optional[str] = None) -> Optional[CacheData]:
 
 def save_cache(
     latest_versions: Dict[str, str],
+    *,
+    checked_versions: Optional[Dict[str, str]] = None,
     include_prereleases: bool = False,
     python_path: Optional[str] = None,
 ) -> Path:
@@ -134,6 +142,8 @@ def save_cache(
     other users on the host cannot read the cache.
 
     :param latest_versions: Mapping of canonicalized package names to latest version strings.
+    :param checked_versions: Mapping of canonicalized package names to installed
+        version strings that were checked and found current.
     :param include_prereleases: Whether prereleases were included when probing.
     :param python_path: Optional path to a Python executable (identifies the environment).
     :returns: Path to the cache file.
@@ -149,6 +159,7 @@ def save_cache(
         updated_at=datetime.now(timezone.utc).isoformat(),
         include_prereleases=include_prereleases,
         latest_versions=latest_versions,
+        checked_versions=checked_versions or {},
     )
 
     tmp = tempfile.NamedTemporaryFile(

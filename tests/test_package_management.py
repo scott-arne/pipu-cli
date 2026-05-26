@@ -1483,7 +1483,7 @@ def test_resolve_upgradable_packages_blocks_when_target_metadata_unavailable():
 
 
 def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(monkeypatch):
-    """Target metadata is fetched for every planned upgrade."""
+    """Target metadata is fetched for planned upgrades with dependency edges."""
     installed_a = InstalledPackage(
         name="package-a",
         version=Version("1.0.0"),
@@ -1521,9 +1521,8 @@ def test_get_target_constraints_for_disputed_upgrades_fetches_ambiguous_edges(mo
     assert result == {
         "package-a": {"package-b": "<4.0"},
         "package-b": {},
-        "package-c": {},
     }
-    assert fetched == ["package-a", "package-b", "package-c"]
+    assert fetched == ["package-a", "package-b"]
 
 
 def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
@@ -1565,6 +1564,35 @@ def test_get_target_constraints_fetches_satisfied_co_upgrade_edges(monkeypatch):
     assert fetched == ["marimo", "jedi"]
 
 
+def test_get_target_constraints_skips_isolated_leaf_upgrade(monkeypatch):
+    """A leaf upgrade with no installed dependents does not need target metadata."""
+    installed_leaf = InstalledPackage(
+        name="leaf",
+        version=Version("1.0.0"),
+        constrained_dependencies={},
+        is_editable=False,
+    )
+    upgrade_candidates = {
+        installed_leaf: Package(name="leaf", version=Version("1.1.0")),
+    }
+
+    def fail_download(package, **_kwargs):
+        raise AssertionError(f"unexpected metadata fetch for {package.name}")
+
+    monkeypatch.setattr(
+        package_management,
+        "_download_target_package_constraints",
+        fail_download,
+    )
+
+    result = package_management.get_target_constraints_for_disputed_upgrades(
+        upgrade_candidates,
+        [installed_leaf],
+    )
+
+    assert result == {}
+
+
 def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
     """Failed target metadata fetches are recorded for each planned upgrade."""
     installed_a = InstalledPackage(
@@ -1593,6 +1621,122 @@ def test_get_target_constraints_for_disputed_upgrades_fails_closed(monkeypatch):
     )
 
     assert result == {"package-a": None, "package-b": None}
+
+
+def test_get_target_constraints_cache_is_version_aware(monkeypatch):
+    """Target metadata cache entries do not collide across versions."""
+    installed = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"dep": ">=1.0"},
+        is_editable=False,
+    )
+    cache = {}
+    fetched = []
+
+    def fake_download(package, **_kwargs):
+        fetched.append(str(package.version))
+        return {"dep": f"<{package.version}"}
+
+    monkeypatch.setattr(
+        package_management,
+        "_download_target_package_constraints",
+        fake_download,
+    )
+
+    first = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("2.0.0"))},
+        [installed],
+        constraints_cache=cache,
+    )
+    second = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("3.0.0"))},
+        [installed],
+        constraints_cache=cache,
+    )
+
+    assert first == {"package-a": {"dep": "<2.0.0"}}
+    assert second == {"package-a": {"dep": "<3.0.0"}}
+    assert fetched == ["2.0.0", "3.0.0"]
+
+
+def test_get_target_constraints_cache_is_python_path_aware(monkeypatch):
+    """Target metadata cache entries do not cross Python environments."""
+    installed = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"dep": ">=1.0"},
+        is_editable=False,
+    )
+    cache = {}
+    fetched = []
+
+    def fake_download(package, **kwargs):
+        fetched.append(kwargs["python_path"])
+        return {"dep": f"from {kwargs['python_path']}"}
+
+    monkeypatch.setattr(
+        package_management,
+        "_download_target_package_constraints",
+        fake_download,
+    )
+
+    first = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("2.0.0"))},
+        [installed],
+        constraints_cache=cache,
+        python_path="/env/a/bin/python",
+    )
+    second = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("2.0.0"))},
+        [installed],
+        constraints_cache=cache,
+        python_path="/env/b/bin/python",
+    )
+
+    assert first == {"package-a": {"dep": "from /env/a/bin/python"}}
+    assert second == {"package-a": {"dep": "from /env/b/bin/python"}}
+    assert fetched == ["/env/a/bin/python", "/env/b/bin/python"]
+
+
+def test_get_target_constraints_cache_is_prerelease_aware(monkeypatch):
+    """Target metadata cache entries do not cross prerelease modes."""
+    installed = InstalledPackage(
+        name="package-a",
+        version=Version("1.0.0"),
+        constrained_dependencies={"dep": ">=1.0"},
+        is_editable=False,
+    )
+    cache = {}
+    fetched = []
+
+    def fake_download(package, **kwargs):
+        mode = "pre" if kwargs["include_prereleases"] else "final"
+        fetched.append(mode)
+        return {"dep": mode}
+
+    monkeypatch.setattr(
+        package_management,
+        "_download_target_package_constraints",
+        fake_download,
+    )
+
+    final = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("2.0.0"))},
+        [installed],
+        constraints_cache=cache,
+        include_prereleases=False,
+    )
+    pre = package_management.get_target_constraints_for_disputed_upgrades(
+        {installed: Package(name="package-a", version=Version("2.0.0"))},
+        [installed],
+        constraints_cache=cache,
+        include_prereleases=True,
+    )
+
+    assert final == {"package-a": {"dep": "final"}}
+    assert pre == {"package-a": {"dep": "pre"}}
+    assert fetched == ["final", "pre"]
 
 
 def test_fetch_latest_version_respects_requested_specifier(monkeypatch):

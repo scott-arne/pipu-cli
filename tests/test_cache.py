@@ -136,6 +136,29 @@ class TestLoadCache:
             assert "requests" in result.latest_versions
             assert result.latest_versions["requests"] == "2.31.0"
 
+    def test_load_cache_accepts_schema_one_without_checked_versions(self, tmp_path):
+        """Schema 1 caches remain valid when checked_versions is absent."""
+        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
+            cache_path = get_cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            env_id = get_environment_id()
+            cache_data = {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "python_executable": sys.executable,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "include_prereleases": False,
+                "latest_versions": {"requests": "2.31.0"},
+            }
+            cache_path.write_text(json.dumps(cache_data))
+
+            result = load_cache()
+
+        assert result is not None
+        assert result.latest_versions == {"requests": "2.31.0"}
+        assert result.checked_versions == {}
+
 
 class TestSaveCache:
     """Tests for save_cache function."""
@@ -189,6 +212,20 @@ class TestSaveCache:
             assert loaded is not None
             assert "numpy" in loaded.latest_versions
             assert loaded.latest_versions["numpy"] == "1.26.0"
+
+    def test_save_and_load_checked_versions(self, tmp_path):
+        """Cache stores packages checked as current."""
+        with patch('pipu_cli.cache.CACHE_BASE_DIR', tmp_path):
+            save_cache(
+                {"requests": "2.31.0"},
+                checked_versions={"idna": "3.6"},
+                include_prereleases=False,
+            )
+            loaded = load_cache()
+
+            assert loaded is not None
+            assert loaded.latest_versions == {"requests": "2.31.0"}
+            assert loaded.checked_versions == {"idna": "3.6"}
 
     def test_save_cache_is_atomic_on_failure(self, tmp_path, monkeypatch):
         """A failing os.replace must NOT truncate or remove the prior cache file."""

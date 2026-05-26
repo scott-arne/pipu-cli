@@ -934,16 +934,23 @@ def _find_disputed_target_packages(
     """Find upgrading packages whose target metadata is needed for safety.
 
     A target release may tighten dependency constraints that affect packages
-    pipu plans to pin in place during the offline install. Fetch metadata for
-    every actual target upgrade so resolution uses the target package's real
-    dependency contract, not only the currently installed metadata.
+    pipu plans to pin in place during the offline install. Fetch metadata only
+    for actual upgrades that either have constrained dependencies themselves or
+    are named by another installed package's constrained dependency edge.
     """
-    installed_names = {canonicalize_name(pkg.name) for pkg in all_installed}
+    dependency_names = {
+        canonicalize_name(dep_name)
+        for installed in all_installed
+        for dep_name in installed.constrained_dependencies
+    }
     return {
         canonicalize_name(pkg.name): latest_pkg
         for pkg, latest_pkg in upgrade_candidates.items()
         if latest_pkg.version > pkg.version
-        and canonicalize_name(pkg.name) in installed_names
+        and (
+            bool(pkg.constrained_dependencies)
+            or canonicalize_name(pkg.name) in dependency_names
+        )
     }
 
 
@@ -964,7 +971,8 @@ def get_target_constraints_for_disputed_upgrades(
     :param include_prereleases: Include pre-release targets.
     :param python_path: Python interpreter used to run pip.
     :param constraints_cache: Optional mutable cache keyed by canonical
-        package name for compatible resolver calls.
+        package name, target version, and pre-release mode for compatible
+        resolver calls.
     :returns: Canonical package name -> target constraints, or ``None``
         when target metadata was unavailable.
     """
@@ -977,14 +985,22 @@ def get_target_constraints_for_disputed_upgrades(
     cache = constraints_cache if constraints_cache is not None else {}
     result: Dict[str, Optional[Dict[str, str]]] = {}
     for canonical_name, package in metadata_targets.items():
-        if canonical_name not in cache:
-            cache[canonical_name] = _download_target_package_constraints(
+        cache_key = "|".join(
+            (
+                canonical_name,
+                str(package.version),
+                "pre" if include_prereleases else "final",
+                python_path or "",
+            )
+        )
+        if cache_key not in cache:
+            cache[cache_key] = _download_target_package_constraints(
                 package,
                 timeout=timeout,
                 include_prereleases=include_prereleases,
                 python_path=python_path,
             )
-        result[canonical_name] = cache[canonical_name]
+        result[canonical_name] = cache[cache_key]
     return result
 
 

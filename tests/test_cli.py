@@ -306,6 +306,42 @@ def test_step2_ignores_editables_from_cache_when_checking_index_versions():
     }
 
 
+def test_step2_uses_checked_cache_without_index_query():
+    """A fresh checked-current cache entry should avoid an index probe."""
+    console = Console(file=StringIO(), force_terminal=True)
+    regular = InstalledPackage(
+        name="idna",
+        version=Version("3.6"),
+        is_editable=False,
+    )
+    cache_data = CacheData(
+        environment_id="env",
+        python_executable="/python",
+        updated_at="2026-05-14T00:00:00+00:00",
+        include_prereleases=False,
+        latest_versions={},
+        checked_versions={"idna": "3.6"},
+    )
+
+    with patch("pipu_cli.cli.load_cache", return_value=cache_data), \
+         patch("pipu_cli.cli.get_latest_versions") as get_latest:
+        latest_versions, _elapsed, cache_used = cli_module._step2_get_latest_versions(
+            console,
+            "json",
+            False,
+            [regular],
+            use_cache=True,
+            cache_enabled=True,
+            timeout=10,
+            pre=False,
+            parallel=1,
+        )
+
+    assert cache_used is True
+    assert latest_versions == {}
+    get_latest.assert_not_called()
+
+
 def test_step2_does_not_query_index_for_editable_packages():
     """Index latest versions cannot tell whether an editable source can upgrade."""
     console = Console(file=StringIO(), force_terminal=True)
@@ -1020,6 +1056,76 @@ def test_step3_uses_target_constraints_for_resolution(monkeypatch):
     assert [pkg.name for pkg in blocked_packages] == ["package-b"]
 
 
+def test_post_check_run_per_env_collects_reports_before_rendering(monkeypatch):
+    """Group post-check gathers reports before rendering ordered panels."""
+    console = Console(file=StringIO(), force_terminal=False)
+    events = []
+    envs = {
+        "envA": "/tmp/envs/a/bin/python",
+        "envB": "/tmp/envs/b/bin/python",
+    }
+
+    def fake_build_report(*, python_path=None):
+        events.append(f"build:{python_path}")
+        return Mock()
+
+    def fake_print_report(_console, _report, group_by):
+        events.append(f"print:{group_by}")
+
+    monkeypatch.setattr("pipu_cli.cli.build_env_report", fake_build_report)
+    monkeypatch.setattr("pipu_cli.cli.print_env_report", fake_print_report)
+
+    post_check = cli_module.PostCheck(
+        console=console,
+        output="human",
+        enabled=True,
+    )
+    post_check.run_per_env(envs)
+
+    assert sorted(events[:2]) == [
+        "build:/tmp/envs/a/bin/python",
+        "build:/tmp/envs/b/bin/python",
+    ]
+    assert events[2:] == ["print:problem", "print:problem"]
+
+
+def test_outdated_single_env_json_returns_error_record(monkeypatch):
+    """JSON group outdated should preserve per-env failures."""
+    env_path = "/tmp/envs/broken/bin/python"
+    monkeypatch.setattr(
+        "pipu_cli.cli._step1_inspect_packages",
+        Mock(side_effect=RuntimeError("inspection failed")),
+    )
+
+    record = cli_module._outdated_single_env(
+        env_path,
+        console=Console(file=StringIO()),
+        output="json",
+        timeout=10,
+        pre=False,
+        debug=False,
+        exclude_str="",
+        show_blocked=True,
+        parallel=1,
+        cache_enabled=False,
+        cache_ttl=None,
+    )
+
+    assert record == {
+        "environment": env_path,
+        "error": "inspection failed",
+        "upgradable": [],
+        "blocked": [],
+        "results": [],
+        "summary": {
+            "total": 0,
+            "upgraded": 0,
+            "constrained": 0,
+            "failed": 1,
+        },
+    }
+
+
 def test_rollback_list_json_output(runner):
     """Test pipu rollback --list --output json returns valid JSON."""
     mock_states = [
@@ -1140,6 +1246,49 @@ class TestGroupExecution:
         assert "not found" in result.output.lower()
         assert result.exit_code == 1
 
+    def test_outdated_group_json_uses_parallel_runner_in_group_order(self, runner):
+        """Group outdated fans out per-env work and preserves env order."""
+        env_a = "/tmp/envs/a/bin/python"
+        env_b = "/tmp/envs/b/bin/python"
+        call_order = []
+
+        def fake_parallel(ctx, worker, max_workers=None):
+            assert max_workers == 4
+            return {
+                name: worker(name, path, cli_module.InterruptToken())
+                for name, path in ctx.envs.items()
+            }
+
+        def fake_single(env_path, **_kwargs):
+            call_order.append(env_path)
+            return {
+                "environment": env_path,
+                "upgradable": [],
+                "blocked": [],
+                "results": [],
+                "summary": {
+                    "total": 0,
+                    "upgraded": 0,
+                    "constrained": 0,
+                    "failed": 0,
+                },
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_a, env_b]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=fake_parallel) as parallel_run, \
+             patch("pipu_cli.cli._outdated_single_env", side_effect=fake_single):
+            result = runner.invoke(
+                cli,
+                ["outdated", "-g", "all", "--output", "json", "-p", "4"],
+            )
+
+        assert result.exit_code == 0, result.output
+        parallel_run.assert_called_once()
+        payload = json.loads(result.output)
+        assert [record["environment"] for record in payload] == [env_a, env_b]
+        assert call_order == [env_a, env_b]
+
     def test_upgrade_group_runs_per_environment(self, runner):
         """upgrade -g inspects each environment in consolidated pipeline."""
         with patch("pipu_cli._group_runner.get_group", return_value=["/python/a", "/python/b"]), \
@@ -1185,6 +1334,406 @@ class TestGroupExecution:
             result = runner.invoke(cli, ["upgrade", "-g", "mygroup", "--yes", "--no-cache"])
 
         assert "upgrades across" in result.output.lower() or "no packages can be upgraded" in result.output.lower()
+
+    def test_upgrade_group_dry_run_does_not_save_download_or_install(self, runner):
+        """Group dry-run stops after previewing planned upgrades."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}), \
+             patch("pipu_cli.download.download_packages_for_group") as download, \
+             patch("pipu_cli.cli._upgrade_install_single_env") as install_one, \
+             patch("pipu_cli.rollback.save_state") as save_state:
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "requests" in result.output
+        assert "Dry run complete" in result.output
+        download.assert_not_called()
+        install_one.assert_not_called()
+        save_state.assert_not_called()
+
+    def test_upgrade_group_dry_run_does_not_prompt_without_yes(self, runner):
+        """Group dry-run should not ask for confirmation."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Dry run complete" in result.output
+        assert "Upgrade 1 packages across 1 environments?" not in result.output
+
+    def test_upgrade_group_profile_env_prints_phase_timings(self, runner, monkeypatch):
+        """PIPU_PROFILE shows group phase timings in human output."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        monkeypatch.setenv("PIPU_PROFILE", "1")
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "profile: group.inspect:" in result.output
+        assert "profile: group.latest_versions:" in result.output
+        assert "profile: group.resolve_constraints:" in result.output
+
+    def test_upgrade_group_profile_does_not_pollute_json_stdout(self, runner, monkeypatch):
+        """PIPU_PROFILE should not break group JSON output."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        monkeypatch.setenv("PIPU_PROFILE", "1")
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--output",
+                    "json",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload[0]["environment"] == env_path
+        assert "profile:" not in result.output
+
+    def test_upgrade_group_profile_reports_download_and_install_phases(
+        self,
+        runner,
+        monkeypatch,
+    ):
+        """PIPU_PROFILE shows mutating group phase timings in human output."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="requests",
+                version=Version("2.28.0"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        monkeypatch.setenv("PIPU_PROFILE", "1")
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        install_result = [
+            UpgradedPackage(
+                name="requests",
+                version=Version("2.31.0"),
+                upgraded=True,
+                previous_version=Version("2.28.0"),
+            )
+        ]
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}), \
+             patch("pipu_cli.download.download_packages_for_group"), \
+             patch("pipu_cli.cli._upgrade_install_single_env", return_value=install_result), \
+             patch("pipu_cli.rollback.save_state"):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "profile: group.download:" in result.output
+        assert "profile: group.install:" in result.output
+
+    def test_upgrade_group_inspects_envs_through_parallel_runner(self, runner):
+        """Group upgrade inspection uses the ordered group runner."""
+        env_a = "/tmp/envs/a/bin/python"
+        env_b = "/tmp/envs/b/bin/python"
+        inspected = []
+
+        def fake_parallel(ctx, worker, max_workers=None):
+            assert max_workers == 3
+            return {
+                name: worker(name, path, cli_module.InterruptToken())
+                for name, path in ctx.envs.items()
+            }
+
+        def fake_inspect(*_args, **kwargs):
+            inspected.append(kwargs["python_path"])
+            return [
+                InstalledPackage(
+                    name="requests",
+                    version=Version("2.28.0"),
+                    is_editable=False,
+                    constrained_dependencies={},
+                )
+            ]
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.31.0"))
+                for pkg in installed_packages
+            }
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_a, env_b]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=fake_parallel) as parallel_run, \
+             patch("pipu_cli.cli.inspect_installed_packages", side_effect=fake_inspect), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_latest_versions_parallel", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "3",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        parallel_run.assert_called_once()
+        assert inspected == [env_a, env_b]
+
+    def test_upgrade_group_shares_target_constraints_cache(self, runner):
+        """Group upgrade reuses one target metadata cache across envs."""
+        env_a = "/tmp/envs/a/bin/python"
+        env_b = "/tmp/envs/b/bin/python"
+        installed_by_env = {
+            env_a: [
+                InstalledPackage(
+                    name="package-a",
+                    version=Version("1.0.0"),
+                    is_editable=False,
+                    constrained_dependencies={},
+                )
+            ],
+            env_b: [
+                InstalledPackage(
+                    name="package-a",
+                    version=Version("1.0.0"),
+                    is_editable=False,
+                    constrained_dependencies={},
+                )
+            ],
+        }
+        cache_ids = []
+
+        def fake_inspect(*_args, **kwargs):
+            return installed_by_env[kwargs["python_path"]]
+
+        def fake_latest(installed_packages, **_kwargs):
+            return {
+                pkg: Package(name=pkg.name, version=Version("2.0.0"))
+                for pkg in installed_packages
+            }
+
+        def fake_target_constraints(_candidates, _installed, **kwargs):
+            cache_ids.append(id(kwargs.get("constraints_cache")))
+            return {}
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_a, env_b]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", side_effect=fake_inspect), \
+             patch("pipu_cli.cli.get_latest_versions", side_effect=fake_latest), \
+             patch("pipu_cli.cli.get_target_constraints_for_disputed_upgrades", side_effect=fake_target_constraints):
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--yes",
+                    "--no-cache",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(cache_ids) == 2
+        assert cache_ids[0] == cache_ids[1]
+        assert cache_ids[0] != id(None)
+
+    def test_upgrade_group_uses_checked_cache_without_index_query(self, runner):
+        """Group upgrade skips index probes for checked-current packages."""
+        env_path = "/tmp/envs/main/bin/python"
+        installed = [
+            InstalledPackage(
+                name="idna",
+                version=Version("3.6"),
+                is_editable=False,
+                constrained_dependencies={},
+            )
+        ]
+        cache_data = CacheData(
+            environment_id="env",
+            python_executable=env_path,
+            updated_at="2026-05-14T00:00:00+00:00",
+            include_prereleases=False,
+            latest_versions={},
+            checked_versions={"idna": "3.6"},
+        )
+
+        with patch("pipu_cli._group_runner.get_group", return_value=[env_path]), \
+             patch("os.path.exists", return_value=True), \
+             patch("pipu_cli.cli.inspect_installed_packages", return_value=installed), \
+             patch("pipu_cli.cli.is_cache_fresh", return_value=True), \
+             patch("pipu_cli.cli.load_cache", return_value=cache_data), \
+             patch("pipu_cli.cli.get_latest_versions") as get_latest, \
+             patch("pipu_cli.cli.get_latest_versions_parallel") as get_latest_parallel:
+            result = runner.invoke(
+                cli,
+                [
+                    "upgrade",
+                    "-g",
+                    "all",
+                    "--dry-run",
+                    "--yes",
+                    "--no-check",
+                    "-p",
+                    "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "No packages can be upgraded" in result.output
+        get_latest.assert_not_called()
+        get_latest_parallel.assert_not_called()
 
     def test_upgrade_group_uses_target_constraints_per_environment(self, runner):
         """Group upgrades must not leak one env's safe target into another env."""
@@ -1238,6 +1787,19 @@ class TestGroupExecution:
         def fake_group_download(env_specs, *_args, **_kwargs):
             captured_env_specs.update(env_specs)
 
+        parallel_calls = 0
+
+        def fake_run_per_env(ctx, worker, max_workers=None):
+            nonlocal parallel_calls
+            del max_workers
+            parallel_calls += 1
+            if parallel_calls == 1:
+                return {
+                    name: worker(name, path, cli_module.InterruptToken())
+                    for name, path in ctx.envs.items()
+                }
+            return {name: [] for name in ctx.envs}
+
         with patch("pipu_cli._group_runner.get_group", return_value=[env_a_path, env_b_path]), \
              patch("os.path.exists", return_value=True), \
              patch("pipu_cli.cli.inspect_installed_packages", side_effect=fake_inspect), \
@@ -1247,7 +1809,7 @@ class TestGroupExecution:
                  side_effect=fake_target_constraints,
              ), \
              patch("pipu_cli.download.download_packages_for_group", side_effect=fake_group_download), \
-             patch("pipu_cli.cli.run_per_env_parallel", side_effect=lambda ctx, _worker: {name: [] for name in ctx.envs}), \
+             patch("pipu_cli.cli.run_per_env_parallel", side_effect=fake_run_per_env), \
              patch("pipu_cli.rollback.save_state"):
             result = runner.invoke(
                 cli,
@@ -1319,7 +1881,8 @@ class TestGroupExecution:
                 )
             ]
 
-        def fake_run_per_env(ctx, worker):
+        def fake_run_per_env(ctx, worker, max_workers=None):
+            del max_workers
             return {
                 name: worker(name, path, cli_module.InterruptToken())
                 for name, path in ctx.envs.items()
@@ -1402,7 +1965,8 @@ class TestGroupExecution:
                 ),
             ]
 
-        def fake_run_per_env(ctx, worker):
+        def fake_run_per_env(ctx, worker, max_workers=None):
+            del max_workers
             return {
                 name: worker(name, path, cli_module.InterruptToken())
                 for name, path in ctx.envs.items()

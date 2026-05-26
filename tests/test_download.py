@@ -366,7 +366,7 @@ class TestInstallFromLocal:
         assert "librt==0.10.0" in cmd
         assert [result.name for result in results] == ["mypy", "librt"]
 
-    def test_install_retries_resolution_too_deep_batch_one_spec_at_a_time(self, tmp_path):
+    def test_install_retries_resolution_too_deep_batch_one_spec_at_a_time(self, tmp_path, caplog):
         pre_versions = {
             "aiohappyeyeballs": Version("2.6.1"),
             "anthropic": Version("0.102.0"),
@@ -380,6 +380,7 @@ class TestInstallFromLocal:
             "error: resolution-too-deep\n\n"
             "Dependency resolution exceeded maximum depth"
         )
+        caplog.set_level(logging.DEBUG, logger="pipu_cli.download")
 
         with patch(
             "pipu_cli.download.run_pip",
@@ -412,6 +413,10 @@ class TestInstallFromLocal:
             ("aiohappyeyeballs", True),
             ("anthropic", True),
         ]
+        assert (
+            "Local install hit pip resolver failure; retrying 2 specs individually"
+            in caplog.messages
+        )
 
     def test_install_retries_planned_exact_specs_after_batch_resolver_failure(self, tmp_path):
         pre_versions = {

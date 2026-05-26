@@ -3,12 +3,14 @@
 import json
 import logging
 import multiprocessing as mp
+import os
 import sys
 import tempfile
 import time
-from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import rich_click as click
 from click.core import ParameterSource
@@ -195,6 +197,32 @@ def _configure_debug_logging(console: Console, debug: bool, output: str) -> None
     console.print("[dim]Debug mode enabled[/dim]\n")
 
 
+def _profile_enabled(*, debug: bool, output: str) -> bool:
+    """Return whether human-readable phase timings should be printed."""
+    return output != "json" and (debug or os.environ.get("PIPU_PROFILE") == "1")
+
+
+@contextmanager
+def _profile_phase(
+    console: Console,
+    label: str,
+    *,
+    debug: bool,
+    output: str,
+) -> Iterator[None]:
+    """Print elapsed time for a CLI phase when profiling is enabled."""
+    if not _profile_enabled(debug=debug, output=output):
+        yield
+        return
+
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        console.print(f"[dim]profile: {label}: {elapsed:.2f}s[/dim]")
+
+
 class PostCheck:
     """Encapsulates the post-mutation consistency-check dispatch.
 
@@ -274,13 +302,24 @@ class PostCheck:
         """
         if not self.enabled:
             return
-        for env_name, env_path in envs.items():
+        env_items = list(envs.items())
+        if not env_items:
+            return
+
+        def _build(item: tuple[str, str]) -> tuple[str, str, Any]:
+            env_name, env_path = item
+            return env_name, env_path, build_env_report(python_path=env_path)
+
+        with ThreadPoolExecutor(max_workers=max(1, len(env_items))) as executor:
+            reports = list(executor.map(_build, env_items))
+
+        for env_name, env_path, report in reports:
             self.console.print()
             self.console.print(Panel(
                 env_path, title=f"{title_prefix}: {env_name}",
                 border_style="cyan", expand=False,
             ))
-            self.run(python_path=env_path)
+            print_env_report(self.console, report, group_by="problem")
 
 
 def _upgrade_install_timeout(timeout: int) -> int:
@@ -625,7 +664,8 @@ def _step2_get_latest_versions(
 
     if use_cache:
         cache_data = load_cache(python_path=python_path)
-        if cache_data and cache_data.latest_versions:
+        if cache_data:
+            uncovered_candidates = []
             for installed_pkg in version_candidates:
                 name_lower = installed_pkg.name.lower()
                 if name_lower in cache_data.latest_versions:
@@ -636,12 +676,20 @@ def _step2_get_latest_versions(
                             latest_pkg = Package(name=installed_pkg.name, version=latest_ver)
                             latest_versions[installed_pkg] = latest_pkg
                     except InvalidVersion:
-                        pass
+                        uncovered_candidates.append(installed_pkg)
+                elif (
+                    name_lower in cache_data.checked_versions
+                    and cache_data.checked_versions[name_lower] == str(installed_pkg.version)
+                ):
+                    continue
+                else:
+                    uncovered_candidates.append(installed_pkg)
+            version_candidates = uncovered_candidates
             cache_was_used = True
         else:
             use_cache = False
 
-    if not use_cache:
+    if not use_cache or version_candidates:
         if output != "json":
             with Progress(
                 TextColumn("[progress.description]{task.description}"),
@@ -677,7 +725,17 @@ def _step2_get_latest_versions(
 
         if cache_enabled:
             version_cache = build_version_cache(latest_versions)
-            save_cache(version_cache, include_prereleases=pre, python_path=python_path)
+            checked_cache = {
+                pkg.name.lower(): str(pkg.version)
+                for pkg in version_candidates
+                if pkg not in latest_versions
+            }
+            save_cache(
+                version_cache,
+                checked_versions=checked_cache,
+                include_prereleases=pre,
+                python_path=python_path,
+            )
 
     step_time = time.time() - step_start
 
@@ -1090,7 +1148,7 @@ def upgrade(ctx: click.Context, packages: tuple[str, ...], timeout: int, pre: bo
     if group_name is not None:
         _run_group_upgrade(
             group_name=group_name, console=console, output=output,
-            timeout=timeout, pre=pre, yes=yes, debug=debug,
+            timeout=timeout, pre=pre, yes=yes, debug=debug, dry_run=dry_run,
             exclude_str=exclude_str, show_blocked=show_blocked,
             parallel=parallel, no_cache=no_cache, cache_ttl=cache_ttl,
             packages=packages, package_constraints={},
@@ -2197,7 +2255,7 @@ def _upgrade_install_single_env(
 
 def _run_group_upgrade(
     group_name: str, console: Console, output: str,
-    timeout: int, pre: bool, yes: bool, debug: bool,
+    timeout: int, pre: bool, yes: bool, debug: bool, dry_run: bool,
     exclude_str: str, show_blocked: bool,
     parallel: int, no_cache: bool, cache_ttl: Optional[int],
     packages: tuple, package_constraints: dict,
@@ -2211,123 +2269,158 @@ def _run_group_upgrade(
     group_ctx = prepare_group(group_name, console=console, output=output)
     env_name_map = group_ctx.envs
     valid_envs = list(env_name_map.values())
-    reverse_map = {v: k for k, v in env_name_map.items()}  # full_path -> short_name
 
     ui = UpgradeUI(console) if output != "json" else None
 
     try:
         with (ui if ui is not None else nullcontext()):
             # Phase 1: Inspect all environments
-            env_installed: dict[str, list] = {}
-            if ui:
-                ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
-            for env_path in valid_envs:
-                installed = inspect_installed_packages(timeout=timeout, python_path=env_path)
-                env_installed[reverse_map[env_path]] = installed
-            if ui:
-                total_pkgs = sum(len(v) for v in env_installed.values())
-                ui.complete_phase(f"Found {total_pkgs} total packages")
+            with _profile_phase(console, "group.inspect", debug=debug, output=output):
+                if ui:
+                    ui.start_phase(f"Inspecting {len(valid_envs)} environments...")
+                def _inspect_worker(
+                    _env_name: str,
+                    env_path: str,
+                    _token: InterruptToken,
+                ) -> list:
+                    return inspect_installed_packages(
+                        timeout=timeout,
+                        python_path=env_path,
+                    )
+
+                env_installed: dict[str, list] = run_per_env_parallel(
+                    group_ctx,
+                    _inspect_worker,
+                    max_workers=parallel,
+                )
+                if ui:
+                    total_pkgs = sum(len(v) for v in env_installed.values())
+                    ui.complete_phase(f"Found {total_pkgs} total packages")
 
             # Phase 2: Fetch latest versions (deduplicated across environments)
-            if ui:
-                ui.start_phase("Checking for updates across all environments...")
-            # Merge all installed packages for a single version check
-            all_installed_by_name: dict = {}
-            for env_name, installed in env_installed.items():
-                for pkg in installed:
-                    if getattr(pkg, "is_editable", False):
-                        continue
-                    key = pkg.name.lower()
-                    if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
-                        all_installed_by_name[key] = pkg
-            all_installed = list(all_installed_by_name.values())
+            with _profile_phase(console, "group.latest_versions", debug=debug, output=output):
+                if ui:
+                    ui.start_phase("Checking for updates across all environments...")
+                # Merge all installed packages for a single version check
+                all_installed_by_name: dict = {}
+                for env_name, installed in env_installed.items():
+                    for pkg in installed:
+                        if getattr(pkg, "is_editable", False):
+                            continue
+                        key = pkg.name.lower()
+                        if key not in all_installed_by_name or pkg.version < all_installed_by_name[key].version:
+                            all_installed_by_name[key] = pkg
+                all_installed = list(all_installed_by_name.values())
 
-            effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
-            use_cache = cache_enabled and not no_cache
-            cache_was_used = False
+                effective_cache_ttl = DEFAULT_CACHE_TTL if cache_ttl is None else cache_ttl
+                use_cache = cache_enabled and not no_cache
+                cache_was_used = False
 
-            latest_versions: dict = {}
+                latest_versions: dict = {}
 
-            # Try cache first (using first env as cache key)
-            if use_cache and is_cache_fresh(effective_cache_ttl, python_path=valid_envs[0]):
-                cache_data = load_cache(python_path=valid_envs[0])
-                if cache_data and cache_data.latest_versions:
-                    for pkg in all_installed:
-                        name_lower = pkg.name.lower()
-                        if name_lower in cache_data.latest_versions:
-                            try:
-                                latest_ver = Version(cache_data.latest_versions[name_lower])
-                                if latest_ver > pkg.version:
-                                    latest_versions[pkg] = Package(name=pkg.name, version=latest_ver)
-                            except InvalidVersion:
-                                pass
-                    cache_was_used = True
+                # Try cache first (using first env as cache key)
+                uncovered_installed = list(all_installed)
+                if use_cache and is_cache_fresh(effective_cache_ttl, python_path=valid_envs[0]):
+                    cache_data = load_cache(python_path=valid_envs[0])
+                    if cache_data:
+                        uncovered_installed = []
+                        for pkg in all_installed:
+                            name_lower = pkg.name.lower()
+                            if name_lower in cache_data.latest_versions:
+                                try:
+                                    latest_ver = Version(cache_data.latest_versions[name_lower])
+                                    if latest_ver > pkg.version:
+                                        latest_versions[pkg] = Package(name=pkg.name, version=latest_ver)
+                                except InvalidVersion:
+                                    uncovered_installed.append(pkg)
+                            elif (
+                                name_lower in cache_data.checked_versions
+                                and cache_data.checked_versions[name_lower] == str(pkg.version)
+                            ):
+                                continue
+                            else:
+                                uncovered_installed.append(pkg)
+                        cache_was_used = True
 
-            if not cache_was_used:
-                if parallel > 1:
-                    latest_versions = get_latest_versions_parallel(
-                        all_installed, timeout=timeout, include_prereleases=pre, max_workers=parallel,
-                    )
-                else:
-                    latest_versions = get_latest_versions(
-                        all_installed, timeout=timeout, include_prereleases=pre,
-                    )
-                # Save to cache
-                if use_cache:
-                    cache_dict = build_version_cache(latest_versions)
-                    save_cache(cache_dict, include_prereleases=pre, python_path=valid_envs[0])
+                if not cache_was_used or uncovered_installed:
+                    if parallel > 1:
+                        probed_versions = get_latest_versions_parallel(
+                            uncovered_installed, timeout=timeout, include_prereleases=pre, max_workers=parallel,
+                        )
+                    else:
+                        probed_versions = get_latest_versions(
+                            uncovered_installed, timeout=timeout, include_prereleases=pre,
+                        )
+                    latest_versions.update(probed_versions)
+                    # Save to cache
+                    if use_cache:
+                        cache_dict = build_version_cache(latest_versions)
+                        checked_cache = {
+                            pkg.name.lower(): str(pkg.version)
+                            for pkg in uncovered_installed
+                            if pkg not in probed_versions
+                        }
+                        save_cache(
+                            cache_dict,
+                            checked_versions=checked_cache,
+                            include_prereleases=pre,
+                            python_path=valid_envs[0],
+                        )
 
-            # Re-key latest_versions by canonical name for cross-environment lookup
-            latest_by_name: dict[str, Package] = {
-                pkg.name.lower(): latest_versions[pkg] for pkg in latest_versions
-            }
+                # Re-key latest_versions by canonical name for cross-environment lookup
+                latest_by_name: dict[str, Package] = {
+                    pkg.name.lower(): latest_versions[pkg] for pkg in latest_versions
+                }
 
-            if ui:
-                ui.complete_phase(f"{len(latest_versions)} packages with newer versions")
+                if ui:
+                    ui.complete_phase(f"{len(latest_versions)} packages with newer versions")
 
             # Phase 3: Resolve constraints per environment
-            if ui:
-                ui.start_phase("Resolving dependency constraints...")
             env_upgrades: dict[str, list] = {}
             all_blocked: list[tuple[str, BlockedPackageInfo]] = []
+            target_constraints_cache: Dict[str, Optional[Dict[str, str]]] = {}
 
-            for env_name, installed in env_installed.items():
-                env_latest = {pkg: latest_by_name[pkg.name.lower()] for pkg in installed if pkg.name.lower() in latest_by_name}
-                target_constraints = get_target_constraints_for_disputed_upgrades(
-                    env_latest,
-                    installed,
-                    timeout=timeout,
-                    include_prereleases=pre,
-                    python_path=env_name_map[env_name],
-                )
-                if show_blocked:
-                    upgradable, blocked = resolve_upgradable_packages_with_reasons(
-                        env_latest, installed, target_constraints=target_constraints,
+            with _profile_phase(console, "group.resolve_constraints", debug=debug, output=output):
+                if ui:
+                    ui.start_phase("Resolving dependency constraints...")
+                for env_name, installed in env_installed.items():
+                    env_latest = {pkg: latest_by_name[pkg.name.lower()] for pkg in installed if pkg.name.lower() in latest_by_name}
+                    target_constraints = get_target_constraints_for_disputed_upgrades(
+                        env_latest,
+                        installed,
+                        timeout=timeout,
+                        include_prereleases=pre,
+                        python_path=env_name_map[env_name],
+                        constraints_cache=target_constraints_cache,
                     )
-                    for b in blocked:
-                        all_blocked.append((env_name, b))
-                else:
-                    upgradable = [
-                        p for p in resolve_upgradable_packages(
+                    if show_blocked:
+                        upgradable, blocked = resolve_upgradable_packages_with_reasons(
                             env_latest, installed, target_constraints=target_constraints,
                         )
-                        if p.upgradable
-                    ]
+                        for b in blocked:
+                            all_blocked.append((env_name, b))
+                    else:
+                        upgradable = [
+                            p for p in resolve_upgradable_packages(
+                                env_latest, installed, target_constraints=target_constraints,
+                            )
+                            if p.upgradable
+                        ]
 
-                # Apply exclusions and package filters
-                excluded_names = set()
-                if exclude_str:
-                    excluded_names = {n.strip().lower() for n in exclude_str.split(',')}
-                can_upgrade = [p for p in upgradable if p.name.lower() not in excluded_names]
-                if packages:
-                    requested = {parse_package_spec(s).name for s in packages}
-                    can_upgrade = [p for p in can_upgrade if canonicalize_name(p.name) in requested]
+                    # Apply exclusions and package filters
+                    excluded_names = set()
+                    if exclude_str:
+                        excluded_names = {n.strip().lower() for n in exclude_str.split(',')}
+                    can_upgrade = [p for p in upgradable if p.name.lower() not in excluded_names]
+                    if packages:
+                        requested = {parse_package_spec(s).name for s in packages}
+                        can_upgrade = [p for p in can_upgrade if canonicalize_name(p.name) in requested]
 
-                env_upgrades[env_name] = can_upgrade
+                    env_upgrades[env_name] = can_upgrade
 
-            total_upgradable = sum(len(v) for v in env_upgrades.values())
-            if ui:
-                ui.complete_phase(f"{total_upgradable} upgrades across {len(valid_envs)} environments")
+                total_upgradable = sum(len(v) for v in env_upgrades.values())
+                if ui:
+                    ui.complete_phase(f"{total_upgradable} upgrades across {len(valid_envs)} environments")
 
             if total_upgradable == 0:
                 if output != "json":
@@ -2364,6 +2457,39 @@ def _run_group_upgrade(
                     from pipu_cli.pretty import print_group_blocked_table
                     print_group_blocked_table(all_blocked, console=console)
 
+            if dry_run:
+                if output == "json":
+                    group_results = []
+                    for env_name, upgrades in env_upgrades.items():
+                        env_path = env_name_map[env_name]
+                        dry_run_dict: Dict[str, Any] = {
+                            "environment": env_path,
+                            "upgradable": [package_to_dict(p) for p in upgrades],
+                            "blocked": [
+                                package_to_dict(b)
+                                for en, b in all_blocked
+                                if en == env_name
+                            ],
+                            "results": [],
+                            "summary": {
+                                "total": len(upgrades),
+                                "upgraded": 0,
+                                "constrained": 0,
+                                "failed": 0,
+                            },
+                        }
+                        post_check.run(python_path=env_path, result=dry_run_dict)
+                        group_results.append(dry_run_dict)
+                    print(json.dumps(group_results, indent=2))
+                else:
+                    post_check.run_per_env(env_name_map)
+                    console.print(
+                        "\n[bold cyan]Dry run complete.[/bold cyan] "
+                        "No packages were modified."
+                    )
+                sys.exit(0)
+
+            if output != "json":
                 if not yes:
                     console.print()
                     confirm = click.confirm(
@@ -2424,56 +2550,57 @@ def _run_group_upgrade(
                 from pipu_cli.download import download_packages_for_group
                 download_failures: dict[str, str] = {}
 
-                if ui:
-                    unique_specs = list(dict.fromkeys(
-                        s for specs in env_specs.values() for s in specs
-                    ))
-                    tracker = ui.show_download_progress(
-                        unique_specs,
-                        idle_timeout=download_watchdog_timeout(timeout),
-                    )
-                    def on_download_start(spec: str) -> None:
-                        tracker.start(spec)
-                    def on_download_progress(
-                        spec: str, downloaded: int, total: Optional[int],
-                    ) -> None:
-                        del downloaded, total
-                        tracker.activity(spec)
-                    def on_download_activity(spec: str, status: str) -> None:
-                        tracker.activity(spec, status)
-                    def on_download(spec: str, success: bool, error_msg: str) -> None:
-                        if success:
-                            tracker.complete(spec)
-                        else:
-                            download_failures[spec] = error_msg or "download failed"
-                            tracker.fail(spec)
-                    try:
-                        download_packages_for_group(
-                            env_specs, dest_dir, pre=pre, timeout=timeout, max_workers=parallel,
-                            progress_callback=on_download,
-                            start_callback=on_download_start,
-                            download_progress_callback=on_download_progress,
-                            download_activity_callback=on_download_activity,
-                            use_download_cache=True,
+                with _profile_phase(console, "group.download", debug=debug, output=output):
+                    if ui:
+                        unique_specs = list(dict.fromkeys(
+                            s for specs in env_specs.values() for s in specs
+                        ))
+                        tracker = ui.show_download_progress(
+                            unique_specs,
+                            idle_timeout=download_watchdog_timeout(timeout),
                         )
-                    except DownloadError as e:
-                        download_failures.update(e.failed)
-                        pass
-                    finally:
-                        tracker.finish()
-                else:
-                    def on_download(spec: str, success: bool, error_msg: str) -> None:
-                        if not success:
-                            download_failures[spec] = error_msg or "download failed"
+                        def on_download_start(spec: str) -> None:
+                            tracker.start(spec)
+                        def on_download_progress(
+                            spec: str, downloaded: int, total: Optional[int],
+                        ) -> None:
+                            del downloaded, total
+                            tracker.activity(spec)
+                        def on_download_activity(spec: str, status: str) -> None:
+                            tracker.activity(spec, status)
+                        def on_download(spec: str, success: bool, error_msg: str) -> None:
+                            if success:
+                                tracker.complete(spec)
+                            else:
+                                download_failures[spec] = error_msg or "download failed"
+                                tracker.fail(spec)
+                        try:
+                            download_packages_for_group(
+                                env_specs, dest_dir, pre=pre, timeout=timeout, max_workers=parallel,
+                                progress_callback=on_download,
+                                start_callback=on_download_start,
+                                download_progress_callback=on_download_progress,
+                                download_activity_callback=on_download_activity,
+                                use_download_cache=True,
+                            )
+                        except DownloadError as e:
+                            download_failures.update(e.failed)
+                            pass
+                        finally:
+                            tracker.finish()
+                    else:
+                        def on_download(spec: str, success: bool, error_msg: str) -> None:
+                            if not success:
+                                download_failures[spec] = error_msg or "download failed"
 
-                    try:
-                        download_packages_for_group(
-                            env_specs, dest_dir, pre=pre, timeout=timeout, max_workers=parallel,
-                            progress_callback=on_download,
-                            use_download_cache=True,
-                        )
-                    except DownloadError as e:
-                        download_failures.update(e.failed)
+                        try:
+                            download_packages_for_group(
+                                env_specs, dest_dir, pre=pre, timeout=timeout, max_workers=parallel,
+                                progress_callback=on_download,
+                                use_download_cache=True,
+                            )
+                        except DownloadError as e:
+                            download_failures.update(e.failed)
 
                 download_failed_results: dict[str, list[UpgradedPackage]] = {}
                 if download_failures:
@@ -2513,55 +2640,56 @@ def _run_group_upgrade(
                     env_install_planned_versions[env_name] = planned_versions
 
                 # Phase 7: Install per environment (fanned out via shared runner)
-                env_order = list(env_name_map.keys())
-                active_envs = [name for name in env_order if env_install_specs.get(name)]
-                active_ctx = GroupContext(
-                    name=group_ctx.name,
-                    envs={name: env_name_map[name] for name in active_envs},
-                )
-
-                if ui:
-                    env_totals = {name: len(env_install_specs.get(name, [])) for name in active_envs}
-                    group_tracker = ui.show_group_install_progress(active_envs, env_totals)
-                else:
-                    group_tracker = None
-
-                def _upgrade_worker(name: str, path: str, token: InterruptToken) -> list:
-                    return _upgrade_install_single_env(
-                        name, path, env_install_specs[name],
-                        dest_dir=dest_dir, timeout=install_timeout,
-                        tracker=group_tracker,
-                        interrupt_token=token,
-                        installed_versions=_versions_by_name(env_installed[name]),
-                        planned_versions=env_install_planned_versions.get(name, {}),
+                with _profile_phase(console, "group.install", debug=debug, output=output):
+                    env_order = list(env_name_map.keys())
+                    active_envs = [name for name in env_order if env_install_specs.get(name)]
+                    active_ctx = GroupContext(
+                        name=group_ctx.name,
+                        envs={name: env_name_map[name] for name in active_envs},
                     )
 
-                env_results = (
-                    run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
-                )
-                for env_name, failed_results in download_failed_results.items():
-                    env_results.setdefault(env_name, [])
-                    env_results[env_name] = [*failed_results, *env_results[env_name]]
+                    if ui:
+                        env_totals = {name: len(env_install_specs.get(name, [])) for name in active_envs}
+                        group_tracker = ui.show_group_install_progress(active_envs, env_totals)
+                    else:
+                        group_tracker = None
 
-                if group_tracker is not None:
-                    group_tracker.finish()
-
-                # Handle editable packages per environment
-                for env_name, upgrades in env_upgrades.items():
-                    editables = [p for p in upgrades if p.is_editable]
-                    if editables:
-                        env_path = env_name_map[env_name]
-                        if ui:
-                            ui.start_phase(f"Reinstalling {len(editables)} editable package(s) in {env_name}...")
-                        ed_results = reinstall_editable_packages(
-                            editables, timeout=install_timeout, python_path=env_path,
+                    def _upgrade_worker(name: str, path: str, token: InterruptToken) -> list:
+                        return _upgrade_install_single_env(
+                            name, path, env_install_specs[name],
+                            dest_dir=dest_dir, timeout=install_timeout,
+                            tracker=group_tracker,
+                            interrupt_token=token,
+                            installed_versions=_versions_by_name(env_installed[name]),
+                            planned_versions=env_install_planned_versions.get(name, {}),
                         )
-                        if ui:
-                            ui.complete_phase("done")
-                        if env_name in env_results:
-                            env_results[env_name].extend(ed_results)
-                        else:
-                            env_results[env_name] = list(ed_results)
+
+                    env_results = (
+                        run_per_env_parallel(active_ctx, _upgrade_worker) if active_envs else {}
+                    )
+                    for env_name, failed_results in download_failed_results.items():
+                        env_results.setdefault(env_name, [])
+                        env_results[env_name] = [*failed_results, *env_results[env_name]]
+
+                    if group_tracker is not None:
+                        group_tracker.finish()
+
+                    # Handle editable packages per environment.
+                    for env_name, upgrades in env_upgrades.items():
+                        editables = [p for p in upgrades if p.is_editable]
+                        if editables:
+                            env_path = env_name_map[env_name]
+                            if ui:
+                                ui.start_phase(f"Reinstalling {len(editables)} editable package(s) in {env_name}...")
+                            ed_results = reinstall_editable_packages(
+                                editables, timeout=install_timeout, python_path=env_path,
+                            )
+                            if ui:
+                                ui.complete_phase("done")
+                            if env_name in env_results:
+                                env_results[env_name].extend(ed_results)
+                            else:
+                                env_results[env_name] = list(ed_results)
 
             # Phase 8: Show results
             if output == "json":
@@ -2718,7 +2846,20 @@ def _outdated_single_env(
     except Exception as e:
         if output != "json":
             console.print(f"\n[red]Error in {env_path}:[/red] {e}")
-        return None
+            return None
+        return {
+            "environment": env_path,
+            "error": str(e),
+            "upgradable": [],
+            "blocked": [],
+            "results": [],
+            "summary": {
+                "total": 0,
+                "upgraded": 0,
+                "constrained": 0,
+                "failed": 1,
+            },
+        }
 
 
 def _run_group_outdated(
@@ -2730,9 +2871,10 @@ def _run_group_outdated(
 ) -> None:
     """Execute outdated check across all environments in a group.
 
-    Kept serial so the per-env console panels don't interleave with each
-    other. ``no_cache`` is already folded into ``cache_enabled`` by the
-    caller and is accepted for signature parity with the outer command.
+    JSON mode fans out per-env work through the shared group runner. Human
+    mode stays serial so Rich panels do not interleave with each other.
+    ``no_cache`` is already folded into ``cache_enabled`` by the caller and
+    is accepted for signature parity with the outer command.
     """
     del no_cache  # already folded into cache_enabled at call site
     group_ctx = prepare_group(group_name, console=console, output=output)
@@ -2740,17 +2882,38 @@ def _run_group_outdated(
     group_results: list[dict[str, Any]] = []
 
     try:
-        for env_path in group_ctx.envs.values():
-            record = _outdated_single_env(
+        def _worker(
+            _env_name: str,
+            env_path: str,
+            token: InterruptToken,
+        ) -> Optional[Dict[str, Any]]:
+            return _outdated_single_env(
                 env_path,
                 console=console, output=output,
                 timeout=timeout, pre=pre, debug=debug,
                 exclude_str=exclude_str, show_blocked=show_blocked,
                 parallel=parallel, cache_enabled=cache_enabled,
                 cache_ttl=cache_ttl,
+                interrupt_token=token,
             )
-            if record is not None:
-                group_results.append(record)
+
+        with _profile_phase(console, "group.outdated", debug=debug, output=output):
+            if output == "json":
+                records_by_env = run_per_env_parallel(
+                    group_ctx,
+                    _worker,
+                    max_workers=parallel,
+                )
+                group_results = [
+                    record
+                    for record in records_by_env.values()
+                    if record is not None
+                ]
+            else:
+                for env_path in group_ctx.envs.values():
+                    record = _worker("", env_path, InterruptToken())
+                    if record is not None:
+                        group_results.append(record)
 
     except KeyboardInterrupt:
         console.show_cursor(True)
